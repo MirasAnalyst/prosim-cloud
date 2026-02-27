@@ -24,7 +24,7 @@ _COMMON_COMPOUNDS: list[dict[str, str]] = [
     {"name": "propylene", "cas": "115-07-1", "formula": "C3H6"},
     {"name": "benzene", "cas": "71-43-2", "formula": "C6H6"},
     {"name": "toluene", "cas": "108-88-3", "formula": "C7H8"},
-    {"name": "xylene", "cas": "1330-20-7", "formula": "C8H10"},
+    {"name": "o-xylene", "cas": "95-47-6", "formula": "C8H10"},
     {"name": "methanol", "cas": "67-56-1", "formula": "CH3OH"},
     {"name": "ethanol", "cas": "64-17-5", "formula": "C2H5OH"},
     {"name": "acetone", "cas": "67-64-1", "formula": "C3H6O"},
