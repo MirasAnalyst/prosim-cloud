@@ -43,7 +43,11 @@ async def run_simulation(body: SimulationRequest, db: AsyncSession = Depends(get
 
     # Run simulation
     try:
-        sim_output = await engine.simulate({"nodes": nodes, "edges": edges})
+        sim_output = await engine.simulate({
+            "nodes": nodes,
+            "edges": edges,
+            "property_package": body.property_package,
+        })
     except Exception as exc:
         logger.exception("Simulation execution failed")
         sim_output = {"status": "error", "error": str(exc)}

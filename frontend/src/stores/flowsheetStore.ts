@@ -12,6 +12,13 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { EquipmentType, type EquipmentData } from '../types';
 import { equipmentLibrary, getDefaultParameters } from '../lib/equipment-library';
+import {
+  listProjects,
+  createProject,
+  getFlowsheet,
+  saveFlowsheet,
+  updateProject,
+} from '../lib/api-client';
 
 export interface EquipmentNodeData extends Record<string, unknown> {
   equipmentType: EquipmentType;
@@ -23,6 +30,8 @@ interface FlowsheetState {
   nodes: Node<EquipmentNodeData>[];
   edges: Edge[];
   selectedNodeId: string | null;
+  currentProjectId: string | null;
+  projectName: string;
 
   addNode: (type: EquipmentType, position: { x: number; y: number }) => void;
   removeNode: (id: string) => void;
@@ -32,13 +41,29 @@ interface FlowsheetState {
   onConnect: OnConnect;
   setSelectedNode: (id: string | null) => void;
   loadFlowsheet: (equipment: EquipmentData[], streams: { id: string; sourceId: string; sourcePort: string; targetId: string; targetPort: string }[]) => void;
+  getUpstreamNodes: (nodeId: string) => string[];
   clear: () => void;
+  setProjectName: (name: string) => void;
+  initProject: () => Promise<void>;
 }
 
-export const useFlowsheetStore = create<FlowsheetState>((set) => ({
+let saveTimeout: ReturnType<typeof setTimeout> | null = null;
+function debounceSave(get: () => FlowsheetState) {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    const { currentProjectId, nodes, edges } = get();
+    if (currentProjectId) {
+      saveFlowsheet(currentProjectId, nodes as any, edges as any).catch(() => {});
+    }
+  }, 1000);
+}
+
+export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   nodes: [],
   edges: [],
   selectedNodeId: null,
+  currentProjectId: null,
+  projectName: 'Untitled Project',
 
   addNode: (type, position) => {
     const def = equipmentLibrary[type];
@@ -54,6 +79,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set) => ({
       },
     };
     set((state) => ({ nodes: [...state.nodes, newNode] }));
+    debounceSave(get);
   },
 
   removeNode: (id) => {
@@ -62,6 +88,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set) => ({
       edges: state.edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: state.selectedNodeId === id ? null : state.selectedNodeId,
     }));
+    debounceSave(get);
   },
 
   updateNodeData: (id, data) => {
@@ -72,6 +99,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set) => ({
           : node
       ),
     }));
+    debounceSave(get);
   },
 
   onNodesChange: (changes) => {
@@ -101,6 +129,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set) => ({
         state.edges
       ),
     }));
+    debounceSave(get);
   },
 
   setSelectedNode: (id) => {
@@ -130,7 +159,56 @@ export const useFlowsheetStore = create<FlowsheetState>((set) => ({
     set({ nodes, edges, selectedNodeId: null });
   },
 
+  getUpstreamNodes: (nodeId: string) => {
+    return get().edges.filter((e) => e.target === nodeId).map((e) => e.source);
+  },
+
   clear: () => {
     set({ nodes: [], edges: [], selectedNodeId: null });
+  },
+
+  setProjectName: (name) => {
+    set({ projectName: name });
+    const { currentProjectId } = get();
+    if (currentProjectId) {
+      updateProject(currentProjectId, { name }).catch(() => {});
+    }
+  },
+
+  initProject: async () => {
+    try {
+      const projects = await listProjects();
+      if (projects.length > 0) {
+        const project = projects[0];
+        set({ currentProjectId: project.id, projectName: project.name });
+        try {
+          const flowsheet = await getFlowsheet(project.id);
+          if (flowsheet.nodes && flowsheet.nodes.length > 0) {
+            const equipment: EquipmentData[] = flowsheet.nodes.map((n: any) => ({
+              id: n.id,
+              type: n.data?.equipmentType ?? n.type,
+              name: n.data?.name ?? n.name ?? '',
+              parameters: n.data?.parameters ?? n.parameters ?? {},
+              position: n.position ?? { x: 0, y: 0 },
+            }));
+            const streams = (flowsheet.edges ?? []).map((e: any) => ({
+              id: e.id,
+              sourceId: e.source,
+              sourcePort: e.sourceHandle ?? e.source_handle ?? '',
+              targetId: e.target,
+              targetPort: e.targetHandle ?? e.target_handle ?? '',
+            }));
+            get().loadFlowsheet(equipment, streams);
+          }
+        } catch {
+          // No flowsheet saved yet, that's fine
+        }
+      } else {
+        const project = await createProject('Untitled Project');
+        set({ currentProjectId: project.id, projectName: project.name });
+      }
+    } catch {
+      // API not available, continue with local-only mode
+    }
   },
 }));

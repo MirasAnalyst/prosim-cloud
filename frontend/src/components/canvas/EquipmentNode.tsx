@@ -3,11 +3,57 @@ import { Handle, Position, type NodeProps } from '@xyflow/react';
 import type { EquipmentNodeData } from '../../stores/flowsheetStore';
 import { equipmentLibrary } from '../../lib/equipment-library';
 import { EquipmentIcon, getNodeDimensions } from './EquipmentIcons';
+import { useSimulationStore } from '../../stores/simulationStore';
+import { SimulationStatus, EquipmentType } from '../../types';
 
-function EquipmentNode({ data, selected }: NodeProps) {
+function getResultBadge(
+  equipmentType: EquipmentType,
+  eqResult: Record<string, number | string>
+): string | null {
+  switch (equipmentType) {
+    case EquipmentType.Heater:
+    case EquipmentType.Cooler:
+    case EquipmentType.HeatExchanger: {
+      const duty = eqResult.duty;
+      if (duty == null) return null;
+      const label = `Q: ${Number(duty).toFixed(1)} kW`;
+      if (equipmentType === EquipmentType.HeatExchanger && eqResult.lmtd != null) {
+        return `${label} | LMTD: ${Number(eqResult.lmtd).toFixed(1)}°C`;
+      }
+      return label;
+    }
+    case EquipmentType.Pump:
+    case EquipmentType.Compressor: {
+      const work = eqResult.work;
+      if (work == null) return null;
+      return `W: ${Number(work).toFixed(1)} kW`;
+    }
+    case EquipmentType.Separator: {
+      const vf = eqResult.vaporFraction ?? eqResult.vapor_fraction;
+      if (vf == null) return null;
+      return `VF: ${Number(vf).toFixed(3)}`;
+    }
+    default:
+      return null;
+  }
+}
+
+function EquipmentNode({ id, data, selected }: NodeProps) {
   const nodeData = data as unknown as EquipmentNodeData;
   const def = equipmentLibrary[nodeData.equipmentType];
   const dims = getNodeDimensions(nodeData.equipmentType);
+
+  const results = useSimulationStore((s) => s.results);
+  const status = useSimulationStore((s) => s.status);
+
+  const eqResult =
+    status === SimulationStatus.Completed && results?.equipmentResults
+      ? results.equipmentResults[id]
+      : null;
+
+  const badge = eqResult
+    ? getResultBadge(nodeData.equipmentType, eqResult)
+    : null;
 
   const leftPorts = def.ports.filter((p) => p.position === 'left');
   const rightPorts = def.ports.filter((p) => p.position === 'right');
@@ -67,6 +113,16 @@ function EquipmentNode({ data, selected }: NodeProps) {
       >
         {nodeData.name}
       </span>
+
+      {/* Result badge below the name */}
+      {badge && (
+        <span
+          className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[9px] text-green-400 font-mono"
+          style={{ top: dims.height + 18 }}
+        >
+          {badge}
+        </span>
+      )}
 
       {rightPorts.map((port, i) => (
         <Handle

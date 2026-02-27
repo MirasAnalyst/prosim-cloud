@@ -1,4 +1,10 @@
-import { EquipmentType, EquipmentCategory, EquipmentDefinition } from '../types';
+import { EquipmentType, EquipmentCategory, EquipmentDefinition, ParameterDefinition } from '../types';
+
+const feedConditionParams: Record<string, ParameterDefinition> = {
+  feedTemperature: { label: 'Feed Temperature', unit: '°C', default: 25, min: -273.15, max: 2000, type: 'number' },
+  feedPressure: { label: 'Feed Pressure', unit: 'kPa', default: 101.325, min: 0, max: 100000, type: 'number' },
+  feedFlowRate: { label: 'Feed Flow Rate', unit: 'kg/s', default: 1.0, min: 0, max: 100000, type: 'number' },
+};
 
 export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
   [EquipmentType.Mixer]: {
@@ -7,6 +13,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Mixing,
     icon: 'GitMerge',
     parameters: {
+      ...feedConditionParams,
       pressure: { label: 'Outlet Pressure', unit: 'kPa', default: 101.325, min: 0, max: 50000, type: 'number' },
       pressureDrop: { label: 'Pressure Drop', unit: 'kPa', default: 0, min: 0, max: 1000, type: 'number' },
     },
@@ -23,6 +30,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Mixing,
     icon: 'GitBranch',
     parameters: {
+      ...feedConditionParams,
       splitRatio: { label: 'Split Ratio (Stream 1)', unit: '', default: 0.5, min: 0, max: 1, type: 'number' },
     },
     ports: [
@@ -38,6 +46,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.HeatTransfer,
     icon: 'Flame',
     parameters: {
+      ...feedConditionParams,
       outletTemperature: { label: 'Outlet Temperature', unit: '°C', default: 100, min: -273.15, max: 2000, type: 'number' },
       duty: { label: 'Heat Duty', unit: 'kW', default: 0, min: 0, max: 1e8, type: 'number' },
       pressureDrop: { label: 'Pressure Drop', unit: 'kPa', default: 0, min: 0, max: 1000, type: 'number' },
@@ -54,6 +63,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.HeatTransfer,
     icon: 'Snowflake',
     parameters: {
+      ...feedConditionParams,
       outletTemperature: { label: 'Outlet Temperature', unit: '°C', default: 25, min: -273.15, max: 2000, type: 'number' },
       duty: { label: 'Heat Duty', unit: 'kW', default: 0, min: 0, max: 1e8, type: 'number' },
       pressureDrop: { label: 'Pressure Drop', unit: 'kPa', default: 0, min: 0, max: 1000, type: 'number' },
@@ -70,6 +80,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Separation,
     icon: 'SplitSquareVertical',
     parameters: {
+      ...feedConditionParams,
       temperature: { label: 'Temperature', unit: '°C', default: 25, min: -273.15, max: 2000, type: 'number' },
       pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 50000, type: 'number' },
     },
@@ -86,6 +97,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.PressureChange,
     icon: 'CircleDot',
     parameters: {
+      ...feedConditionParams,
       outletPressure: { label: 'Outlet Pressure', unit: 'kPa', default: 500, min: 0, max: 100000, type: 'number' },
       efficiency: { label: 'Efficiency', unit: '%', default: 75, min: 0, max: 100, type: 'number' },
     },
@@ -101,6 +113,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.PressureChange,
     icon: 'Gauge',
     parameters: {
+      ...feedConditionParams,
       outletPressure: { label: 'Outlet Pressure', unit: 'kPa', default: 500, min: 0, max: 100000, type: 'number' },
       efficiency: { label: 'Adiabatic Efficiency', unit: '%', default: 75, min: 0, max: 100, type: 'number' },
     },
@@ -116,6 +129,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.PressureChange,
     icon: 'ToggleRight',
     parameters: {
+      ...feedConditionParams,
       outletPressure: { label: 'Outlet Pressure', unit: 'kPa', default: 101.325, min: 0, max: 100000, type: 'number' },
     },
     ports: [
@@ -130,6 +144,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.HeatTransfer,
     icon: 'ArrowLeftRight',
     parameters: {
+      ...feedConditionParams,
       hotOutletTemp: { label: 'Hot Outlet Temp', unit: '°C', default: 60, min: -273.15, max: 2000, type: 'number' },
       coldOutletTemp: { label: 'Cold Outlet Temp', unit: '°C', default: 80, min: -273.15, max: 2000, type: 'number' },
       pressureDropHot: { label: 'ΔP Hot Side', unit: 'kPa', default: 10, min: 0, max: 1000, type: 'number' },
@@ -149,6 +164,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Separation,
     icon: 'Columns3',
     parameters: {
+      ...feedConditionParams,
       numberOfStages: { label: 'Number of Stages', unit: '', default: 10, min: 2, max: 200, type: 'number' },
       feedStage: { label: 'Feed Stage', unit: '', default: 5, min: 1, max: 200, type: 'number' },
       refluxRatio: { label: 'Reflux Ratio', unit: '', default: 1.5, min: 0.01, max: 100, type: 'number' },
@@ -168,6 +184,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Reaction,
     icon: 'FlaskConical',
     parameters: {
+      ...feedConditionParams,
       volume: { label: 'Volume', unit: 'm³', default: 10, min: 0, max: 10000, type: 'number' },
       temperature: { label: 'Temperature', unit: '°C', default: 80, min: -273.15, max: 2000, type: 'number' },
       pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 50000, type: 'number' },
@@ -185,6 +202,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Reaction,
     icon: 'Cylinder',
     parameters: {
+      ...feedConditionParams,
       length: { label: 'Length', unit: 'm', default: 5, min: 0, max: 1000, type: 'number' },
       diameter: { label: 'Diameter', unit: 'm', default: 0.5, min: 0, max: 100, type: 'number' },
       temperature: { label: 'Temperature', unit: '°C', default: 80, min: -273.15, max: 2000, type: 'number' },
@@ -202,6 +220,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     category: EquipmentCategory.Reaction,
     icon: 'FlaskRound',
     parameters: {
+      ...feedConditionParams,
       conversion: { label: 'Conversion', unit: '%', default: 80, min: 0, max: 100, type: 'number' },
       temperature: { label: 'Temperature', unit: '°C', default: 80, min: -273.15, max: 2000, type: 'number' },
       pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 50000, type: 'number' },

@@ -80,7 +80,7 @@ export default function BottomPanel() {
                     <th className="text-left py-1 pr-4">Stream</th>
                     <th className="text-right py-1 pr-4">Temp (C)</th>
                     <th className="text-right py-1 pr-4">Pressure (kPa)</th>
-                    <th className="text-right py-1">Flow (kg/h)</th>
+                    <th className="text-right py-1">Flow (kg/s)</th>
                   </tr>
                 </thead>
                 <tbody>

@@ -89,6 +89,7 @@ export function runSimulation(data: {
   flowsheet_id?: string;
   nodes?: Record<string, unknown>[];
   edges?: Record<string, unknown>[];
+  property_package?: string;
 }) {
   return request<SimulationResultResponse>('/api/simulation/run', {
     method: 'POST',
@@ -98,6 +99,18 @@ export function runSimulation(data: {
 
 export function getSimulationResults(simulationId: string) {
   return request<SimulationResultResponse>(`/api/simulation/${simulationId}/results`);
+}
+
+// ── Compounds ──
+
+export interface CompoundResult {
+  name: string;
+  cas: string;
+  formula: string;
+}
+
+export function searchCompounds(query: string) {
+  return request<CompoundResult[]>(`/api/compounds/search?q=${encodeURIComponent(query)}`);
 }
 
 // ── Agent Chat ──

@@ -4,6 +4,8 @@ import {
   getBezierPath,
   type EdgeProps,
 } from '@xyflow/react';
+import { useSimulationStore } from '../../stores/simulationStore';
+import { SimulationStatus } from '../../types';
 
 export default function StreamEdge({
   id,
@@ -17,6 +19,9 @@ export default function StreamEdge({
   markerEnd,
   label,
 }: EdgeProps) {
+  const results = useSimulationStore((s) => s.results);
+  const status = useSimulationStore((s) => s.status);
+
   const [edgePath, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
@@ -25,6 +30,15 @@ export default function StreamEdge({
     targetY,
     targetPosition,
   });
+
+  const streamResult =
+    status === SimulationStatus.Completed && results?.streamResults
+      ? results.streamResults[id]
+      : null;
+
+  const displayLabel = streamResult
+    ? `${streamResult.temperature.toFixed(1)}°C | ${streamResult.pressure.toFixed(1)} kPa | ${streamResult.flowRate.toFixed(2)} kg/s`
+    : label;
 
   return (
     <>
@@ -38,7 +52,7 @@ export default function StreamEdge({
         }}
         id={id}
       />
-      {label && (
+      {displayLabel && (
         <EdgeLabelRenderer>
           <div
             style={{
@@ -48,7 +62,7 @@ export default function StreamEdge({
             }}
             className="rounded bg-gray-800/90 px-2 py-0.5 text-[10px] text-gray-300 border border-gray-600"
           >
-            {label}
+            {displayLabel}
           </div>
         </EdgeLabelRenderer>
       )}

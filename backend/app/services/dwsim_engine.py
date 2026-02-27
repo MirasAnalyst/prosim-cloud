@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 from typing import Any
@@ -51,6 +52,12 @@ try:
 
     _thermo_available = True
     logger.info("thermo library available")
+
+    # Try importing SRK for property package support
+    try:
+        from thermo import SRKMIX  # type: ignore[import-untyped]
+    except ImportError:
+        SRKMIX = None  # type: ignore[assignment]
 except Exception as exc:
     logger.warning("thermo not available: %s", exc)
 
@@ -117,14 +124,14 @@ EQUIPMENT_TYPE_MAP: dict[str, str] = {
     "ConversionReactor": "ConversionReactor",
 }
 
-# Default feed conditions (SI units) when no upstream data
+# Default feed conditions (SI units) when no upstream data and no user params
 _DEFAULT_FEED = {
     "temperature": 298.15,   # K
     "pressure": 101325.0,    # Pa
     "mass_flow": 1.0,        # kg/s
     "vapor_fraction": 0.0,
     "enthalpy": 0.0,         # J/kg relative to T_ref=298.15 K (h=0 at 25 °C)
-    "composition": {"Water": 1.0},
+    "composition": {"water": 1.0},
 }
 
 # Reference temperature for enthalpy calculations (K)
@@ -149,10 +156,36 @@ class DWSIMEngine:
         self.use_thermo = _thermo_available
         self.use_coolprop = _coolprop_available
 
+    @staticmethod
+    def _normalize_nodes(nodes: list[dict]) -> list[dict]:
+        """Normalize React Flow node format to engine's flat format.
+
+        React Flow sends: {id, type: "equipment", data: {equipmentType, label, parameters}}
+        Engine expects:   {id, type: "Heater", name: "...", parameters: {...}}
+        """
+        normalized = []
+        for node in nodes:
+            data = node.get("data", {})
+            # If node has data.equipmentType, it's React Flow format
+            eq_type = data.get("equipmentType")
+            if eq_type:
+                normalized.append({
+                    "id": node.get("id", ""),
+                    "type": eq_type,
+                    "name": data.get("label", node.get("id", "")),
+                    "parameters": data.get("parameters", {}),
+                    "position": node.get("position", {}),
+                })
+            else:
+                # Already flat format or unknown — pass through
+                normalized.append(node)
+        return normalized
+
     async def simulate(self, flowsheet_data: dict[str, Any]) -> dict[str, Any]:
-        """Run simulation on flowsheet_data = {nodes: [...], edges: [...]}."""
-        nodes = flowsheet_data.get("nodes", [])
+        """Run simulation on flowsheet_data = {nodes, edges, property_package}."""
+        nodes = self._normalize_nodes(flowsheet_data.get("nodes", []))
         edges = flowsheet_data.get("edges", [])
+        property_package = flowsheet_data.get("property_package", "PengRobinson")
 
         if not nodes:
             return {"status": "error", "error": "No equipment nodes in flowsheet"}
@@ -164,7 +197,102 @@ class DWSIMEngine:
                 logger.exception("DWSIM simulation failed, trying fallback")
 
         # Fallback: basic calculations (works with or without thermo/CoolProp)
-        return await self._simulate_basic(nodes, edges)
+        return await self._simulate_basic(nodes, edges, property_package)
+
+    # ------------------------------------------------------------------
+    # Shared flash helper (reusable across equipment types)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _flash_tp(
+        comp_names: list[str],
+        zs: list[float],
+        T: float,
+        P: float,
+        property_package: str = "PengRobinson",
+    ) -> dict[str, Any] | None:
+        """Flash at T,P using thermo library.
+
+        Returns dict with: T, P, H (J/mol), VF, Cp (J/mol/K),
+        gas_zs, liquid_zs, MW_mix, or None if flash fails.
+        """
+        if not _thermo_available:
+            return None
+        if not comp_names or not zs:
+            return None
+
+        try:
+            # Normalize mole fractions
+            total = sum(zs)
+            if total <= 0:
+                return None
+            zs_norm = [z / total for z in zs]
+
+            constants, properties = ChemicalConstantsPackage.from_IDs(comp_names)
+
+            # Try to get binary interaction parameters
+            try:
+                kijs = IPDB.get_ip_asymmetric_matrix("ChemSep PR", constants.CASs, "kij")
+            except Exception:
+                kijs = [[0.0] * len(comp_names) for _ in comp_names]
+
+            eos_kwargs = {
+                "Pcs": constants.Pcs,
+                "Tcs": constants.Tcs,
+                "omegas": constants.omegas,
+                "kijs": kijs,
+            }
+
+            # Select EOS based on property package
+            EOS_class = PRMIX  # default
+            if property_package == "SRK" and SRKMIX is not None:
+                EOS_class = SRKMIX
+
+            gas = CEOSGas(
+                EOS_class, eos_kwargs,
+                HeatCapacityGases=properties.HeatCapacityGases,
+                T=T, P=P, zs=zs_norm,
+            )
+            liq = CEOSLiquid(
+                EOS_class, eos_kwargs,
+                HeatCapacityGases=properties.HeatCapacityGases,
+                T=T, P=P, zs=zs_norm,
+            )
+            flasher = FlashVL(constants, properties, liquid=liq, gas=gas)
+            state = flasher.flash(T=T, P=P, zs=zs_norm)
+
+            vf = state.VF if state.VF is not None else 0.0
+
+            # Compute mixture molecular weight
+            MW_mix = sum(z * mw for z, mw in zip(zs_norm, constants.MWs))
+
+            # Get enthalpy (J/mol) and Cp (J/mol/K)
+            H = state.H() if callable(getattr(state, 'H', None)) else 0.0
+            try:
+                Cp = state.Cp() if callable(getattr(state, 'Cp', None)) else None
+            except Exception:
+                Cp = None
+
+            gas_phase = getattr(state, 'gas', None)
+            liquid_phase = getattr(state, 'liquid0', None)
+            gas_zs = list(gas_phase.zs) if gas_phase else zs_norm
+            liquid_zs = list(liquid_phase.zs) if liquid_phase else zs_norm
+
+            return {
+                "T": T,
+                "P": P,
+                "H": H,           # J/mol
+                "VF": vf,
+                "Cp": Cp,         # J/mol/K (may be None)
+                "MW_mix": MW_mix,  # g/mol
+                "MWs": list(constants.MWs),
+                "gas_zs": gas_zs,
+                "liquid_zs": liquid_zs,
+                "comp_names": comp_names,
+                "zs": zs_norm,
+            }
+        except Exception as exc:
+            logger.debug("_flash_tp failed: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # Topological sort
@@ -199,6 +327,53 @@ class DWSIMEngine:
             if nid not in result:
                 result.append(nid)
         return result
+
+    # ------------------------------------------------------------------
+    # Build feed from node parameters (Feature 1)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _build_feed_from_params(params: dict[str, Any]) -> dict[str, Any]:
+        """Build SI feed conditions from user-specified node parameters.
+
+        Reads feedTemperature (°C), feedPressure (kPa), feedFlowRate (kg/s),
+        feedComposition (JSON string or dict). Falls back to _DEFAULT_FEED
+        for any missing values.
+        """
+        feed = dict(_DEFAULT_FEED)
+        feed["composition"] = dict(_DEFAULT_FEED["composition"])
+
+        ft = params.get("feedTemperature")
+        if ft is not None and float(ft) != 25:  # non-default
+            feed["temperature"] = _c_to_k(float(ft))
+
+        fp = params.get("feedPressure")
+        if fp is not None and float(fp) != 101.325:
+            feed["pressure"] = _kpa_to_pa(float(fp))
+
+        ff = params.get("feedFlowRate")
+        if ff is not None and float(ff) != 1.0:
+            feed["mass_flow"] = float(ff)
+
+        fc = params.get("feedComposition")
+        if fc:
+            comp: dict[str, float] = {}
+            if isinstance(fc, str):
+                try:
+                    comp = json.loads(fc)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            elif isinstance(fc, dict):
+                comp = {str(k): float(v) for k, v in fc.items()}
+            if comp:
+                # Normalize
+                total = sum(comp.values())
+                if total > 0:
+                    comp = {k: v / total for k, v in comp.items()}
+                feed["composition"] = comp
+
+        # Recompute enthalpy relative to T_ref
+        feed["enthalpy"] = _CP_WATER * (feed["temperature"] - _T_REF)
+        return feed
 
     # ------------------------------------------------------------------
     # DWSIM primary engine (kept for when DWSIM is installed)
@@ -298,14 +473,17 @@ class DWSIMEngine:
     # When thermo/CoolProp are available they augment the calculations.
     # ------------------------------------------------------------------
     async def _simulate_basic(
-        self, nodes: list[dict], edges: list[dict]
+        self, nodes: list[dict], edges: list[dict],
+        property_package: str = "PengRobinson",
     ) -> dict[str, Any]:
         try:
             logs: list[str] = []
             equipment_results: dict[str, Any] = {}
 
-            # Build adjacency  (source_id → [(target_id, srcHandle, tgtHandle)])
+            # Build adjacency with target handles for port-aware routing
+            # downstream: source_id → [(target_id, srcHandle, tgtHandle)]
             downstream: dict[str, list[tuple[str, str, str]]] = {}
+            # upstream: target_id → [(source_id, srcHandle, tgtHandle)]
             upstream: dict[str, list[tuple[str, str, str]]] = {}
             for edge in edges:
                 src = edge.get("source", "")
@@ -334,19 +512,22 @@ class DWSIMEngine:
                 params = node.get("parameters", {})
                 name = node.get("name", nid)
 
-                # Collect inlet conditions (SI)
+                # Collect inlet conditions (SI), tagged with targetHandle
                 inlets: list[dict[str, Any]] = []
-                for src_id, _sh, _th in upstream.get(nid, []):
+                inlet_handles: list[str] = []  # parallel list of target handles
+                for src_id, _sh, tgt_handle in upstream.get(nid, []):
                     # Find the matching source outlet port
-                    for tgt_id, sh2, th2 in downstream.get(src_id, []):
+                    for tgt_id, sh2, _th2 in downstream.get(src_id, []):
                         if tgt_id == nid:
                             cond = port_conditions.get((src_id, sh2))
                             if cond:
                                 inlets.append(cond)
+                                inlet_handles.append(tgt_handle)
                             break
 
+                # If no upstream connections, build feed from node parameters
                 if not inlets:
-                    inlets = [dict(_DEFAULT_FEED)]
+                    inlets = [self._build_feed_from_params(params)]
 
                 # ----------------------------------------------------------
                 # Equipment-specific calculations (all SI internally)
@@ -359,17 +540,34 @@ class DWSIMEngine:
                     T_in = inlet["temperature"]
                     P_in = inlet["pressure"]
                     mf = inlet["mass_flow"]
+                    comp = inlet.get("composition", {})
                     dp = _kpa_to_pa(float(params.get("pressureDrop", 0)))
                     P_out = P_in - dp
 
                     # Outlet temp: user-specified or default
                     T_out_c = params.get("outletTemperature")
                     duty_kw = params.get("duty")
-                    cp = _CP_WATER
+
+                    # Try thermo flash for real Cp
+                    cp = _CP_WATER  # fallback
+                    comp_names = list(comp.keys())
+                    zs = [float(v) for v in comp.values()]
+                    flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                    used_thermo = False
 
                     if T_out_c is not None and float(T_out_c) != 0:
                         T_out = _c_to_k(float(T_out_c))
-                        duty_w = mf * cp * (T_out - T_in)
+                        # Use real enthalpy difference if thermo available
+                        flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                        if flash_in and flash_out and flash_in["MW_mix"] > 0:
+                            # H is J/mol, convert to J/kg: H / (MW/1000)
+                            mw_kg = flash_in["MW_mix"] / 1000.0  # kg/mol
+                            H_in = flash_in["H"] / mw_kg if mw_kg > 0 else 0  # J/kg
+                            H_out = flash_out["H"] / mw_kg if mw_kg > 0 else 0
+                            duty_w = mf * (H_out - H_in)
+                            used_thermo = True
+                        else:
+                            duty_w = mf * cp * (T_out - T_in)
                     elif duty_kw is not None and float(duty_kw) != 0:
                         duty_w = _kw_to_w(float(duty_kw))
                         if ntype == "Cooler":
@@ -383,20 +581,36 @@ class DWSIMEngine:
                     eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
                     eq_res["pressureDrop"] = round(_pa_to_kpa(dp), 3)
 
+                    # Get VF from flash at outlet conditions
+                    vf_out = 0.0
+                    if used_thermo and flash_out:
+                        vf_out = flash_out.get("VF", 0.0)
+
                     outlet = dict(inlet)
                     outlet["temperature"] = T_out
                     outlet["pressure"] = P_out
                     outlet["enthalpy"] = cp * (T_out - _T_REF)
-                    outlet["composition"] = dict(inlet.get("composition", {}))
+                    outlet["vapor_fraction"] = vf_out
+                    outlet["composition"] = dict(comp)
                     outlets["out-1"] = outlet
-                    logs.append(f"{name}: duty = {eq_res['duty']:.1f} kW, T_out = {eq_res['outletTemperature']:.1f} °C")
+                    engine_note = " (thermo)" if used_thermo else ""
+                    logs.append(f"{name}: duty = {eq_res['duty']:.1f} kW, T_out = {eq_res['outletTemperature']:.1f} °C{engine_note}")
 
                 elif ntype == "Pump":
                     inlet = inlets[0]
                     P_in = inlet["pressure"]
                     mf = inlet["mass_flow"]
                     T_in = inlet["temperature"]
+                    comp = inlet.get("composition", {})
                     rho = 1000.0  # kg/m³ default water density
+
+                    # Try getting density from thermo
+                    comp_names = list(comp.keys())
+                    zs = [float(v) for v in comp.values()]
+                    flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                    if flash_in and flash_in.get("VF", 0) < 0.01:
+                        # Liquid phase - estimate density from MW (rough)
+                        pass  # keep default rho for now
 
                     P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 2))))
                     eff = float(params.get("efficiency", 75)) / 100.0
@@ -421,7 +635,7 @@ class DWSIMEngine:
                     outlet["temperature"] = T_out
                     outlet["pressure"] = P_out
                     outlet["enthalpy"] = cp * (T_out - _T_REF)
-                    outlet["composition"] = dict(inlet.get("composition", {}))
+                    outlet["composition"] = dict(comp)
                     outlets["out-1"] = outlet
                     logs.append(f"{name}: work = {eq_res['work']:.1f} kW, ΔT = {dT_friction:.2f} K")
 
@@ -430,18 +644,39 @@ class DWSIMEngine:
                     T_in = inlet["temperature"]
                     P_in = inlet["pressure"]
                     mf = inlet["mass_flow"]
+                    comp = inlet.get("composition", {})
 
                     P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 3))))
                     eff = float(params.get("efficiency", 75)) / 100.0
                     if eff <= 0:
                         eff = 0.75
-                    gamma = 1.4  # ideal gas
+
+                    # Try thermo for real Cp ratio (gamma)
+                    gamma = 1.4  # ideal gas default
+                    cp = _CP_AIR
+                    comp_names = list(comp.keys())
+                    zs = [float(v) for v in comp.values()]
+                    flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                    used_thermo = False
+
+                    if flash_in and flash_in.get("Cp") is not None:
+                        try:
+                            Cp_mol = flash_in["Cp"]  # J/(mol·K)
+                            R = 8.314  # J/(mol·K)
+                            Cv_mol = Cp_mol - R
+                            if Cv_mol > 0:
+                                gamma = Cp_mol / Cv_mol
+                            mw_kg = flash_in["MW_mix"] / 1000.0
+                            if mw_kg > 0:
+                                cp = Cp_mol / mw_kg  # J/(kg·K)
+                            used_thermo = True
+                        except Exception:
+                            pass
 
                     ratio = P_out / P_in if P_in > 0 else 1.0
                     T_out_isen = T_in * (ratio ** ((gamma - 1) / gamma))
                     T_out = T_in + (T_out_isen - T_in) / eff
 
-                    cp = _CP_AIR
                     work_w = mf * cp * (T_out - T_in)
 
                     eq_res["work"] = round(_w_to_kw(work_w), 3)
@@ -453,15 +688,17 @@ class DWSIMEngine:
                     outlet["temperature"] = T_out
                     outlet["pressure"] = P_out
                     outlet["enthalpy"] = cp * (T_out - _T_REF)
-                    outlet["composition"] = dict(inlet.get("composition", {}))
+                    outlet["composition"] = dict(comp)
                     outlets["out-1"] = outlet
-                    logs.append(f"{name}: work = {eq_res['work']:.1f} kW, T_out = {_k_to_c(T_out):.1f} °C")
+                    engine_note = f" (γ={gamma:.2f})" if used_thermo else ""
+                    logs.append(f"{name}: work = {eq_res['work']:.1f} kW, T_out = {_k_to_c(T_out):.1f} °C{engine_note}")
 
                 elif ntype == "Valve":
                     inlet = inlets[0]
                     T_in = inlet["temperature"]
                     P_in = inlet["pressure"]
                     mf = inlet["mass_flow"]
+                    comp = inlet.get("composition", {})
 
                     P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in / 2))))
 
@@ -469,7 +706,6 @@ class DWSIMEngine:
                     # For ideal gas: dT = 0.  For real fluids, use CoolProp if available.
                     T_out = T_in  # default: ideal gas approximation
                     if _coolprop_available:
-                        comp = inlet.get("composition", {})
                         if len(comp) == 1:
                             comp_name = list(comp.keys())[0]
                             try:
@@ -486,7 +722,7 @@ class DWSIMEngine:
                     outlet["temperature"] = T_out
                     outlet["pressure"] = P_out
                     outlet["enthalpy"] = _CP_WATER * (T_out - _T_REF)
-                    outlet["composition"] = dict(inlet.get("composition", {}))
+                    outlet["composition"] = dict(comp)
                     outlets["out-1"] = outlet
                     logs.append(f"{name}: ΔP = {eq_res['pressureDrop']:.1f} kPa")
 
@@ -519,9 +755,21 @@ class DWSIMEngine:
                     dp = _kpa_to_pa(float(params.get("pressureDrop", 0)))
                     P_out = P_min - dp
 
-                    # Back-calculate T from enthalpy: h = Cp*(T - T_ref), so T = T_ref + h/Cp
+                    # Try thermo flash for correct outlet T
                     cp = _CP_WATER
                     T_out = _T_REF + h_mix / cp if cp > 0 else _T_REF
+                    vf_out = 0.0
+                    used_thermo = False
+
+                    comp_names = list(mixed_comp.keys())
+                    zs = [float(v) for v in mixed_comp.values()]
+                    if comp_names and len(comp_names) > 1:
+                        # Use flash to find correct T at outlet P
+                        # First estimate T, then refine
+                        flash_result = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                        if flash_result:
+                            vf_out = flash_result.get("VF", 0.0)
+                            used_thermo = True
 
                     eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
                     eq_res["totalMassFlow"] = round(total_mass, 4)
@@ -531,11 +779,12 @@ class DWSIMEngine:
                         "pressure": P_out,
                         "mass_flow": total_mass,
                         "enthalpy": h_mix,
-                        "vapor_fraction": 0.0,
+                        "vapor_fraction": vf_out,
                         "composition": mixed_comp,
                     }
                     outlets["out-1"] = outlet
-                    logs.append(f"{name}: mixed flow = {total_mass:.2f} kg/s")
+                    engine_note = " (thermo)" if used_thermo else ""
+                    logs.append(f"{name}: mixed flow = {total_mass:.2f} kg/s{engine_note}")
 
                 elif ntype == "Splitter":
                     inlet = inlets[0]
@@ -557,9 +806,22 @@ class DWSIMEngine:
                     logs.append(f"{name}: split {ratio:.0%} / {1-ratio:.0%}")
 
                 elif ntype == "HeatExchanger":
-                    # Two-stream heat exchanger
-                    hot = inlets[0] if len(inlets) >= 1 else dict(_DEFAULT_FEED)
-                    cold = inlets[1] if len(inlets) >= 2 else dict(_DEFAULT_FEED)
+                    # Two-stream heat exchanger — match inlets by port handle
+                    hot = dict(_DEFAULT_FEED)
+                    cold = dict(_DEFAULT_FEED)
+
+                    for i, handle in enumerate(inlet_handles):
+                        if i < len(inlets):
+                            if handle == "in-hot":
+                                hot = inlets[i]
+                            elif handle == "in-cold":
+                                cold = inlets[i]
+
+                    # If no handles matched (old-style position-based), use index
+                    if hot is _DEFAULT_FEED and len(inlets) >= 1:
+                        hot = inlets[0]
+                    if cold is _DEFAULT_FEED and len(inlets) >= 2:
+                        cold = inlets[1]
 
                     # Ensure hot is actually hotter
                     if cold["temperature"] > hot["temperature"]:
@@ -628,31 +890,26 @@ class DWSIMEngine:
                     P_op = _kpa_to_pa(float(params.get("pressure", _pa_to_kpa(inlet["pressure"]))))
 
                     vf = 0.0  # molar vapor fraction
+                    comp_names = list(comp.keys())
+                    zs = [float(v) for v in comp.values()]
 
-                    # Try flash calculation with thermo
-                    if _thermo_available and len(comp) > 1:
-                        try:
-                            comp_names = list(comp.keys())
-                            zs = [float(v) for v in comp.values()]
-                            total = sum(zs)
-                            if total > 0:
-                                zs = [z / total for z in zs]
-                            constants, properties = ChemicalConstantsPackage.from_IDs(comp_names)
-                            kijs = IPDB.get_ip_asymmetric_matrix("ChemSep PR", constants.CASs, "kij")
-                            eos_kwargs = {"Pcs": constants.Pcs, "Tcs": constants.Tcs, "omegas": constants.omegas, "kijs": kijs}
-                            gas = CEOSGas(PRMIX, eos_kwargs, HeatCapacityGases=properties.HeatCapacityGases, T=T_op, P=P_op, zs=zs)
-                            liq = CEOSLiquid(PRMIX, eos_kwargs, HeatCapacityGases=properties.HeatCapacityGases, T=T_op, P=P_op, zs=zs)
-                            flasher = FlashVL(constants, properties, liquid=liq, gas=gas)
-                            state = flasher.flash(T=T_op, P=P_op, zs=zs)
-                            vf = state.VF if state.VF is not None else 0.0
+                    # Use shared _flash_tp helper
+                    if len(comp_names) > 1:
+                        flash_result = self._flash_tp(comp_names, zs, T_op, P_op, property_package)
+                        if flash_result:
+                            vf = flash_result["VF"]
+                            # Mass-based split
+                            MWs = flash_result["MWs"]
+                            gas_zs = flash_result["gas_zs"]
+                            liq_zs = flash_result["liquid_zs"]
 
-                            # Mass-based split: use MW of each phase
-                            MW_vap = sum(zs_v * mw for zs_v, mw in zip(state.gas.zs, constants.MWs)) if state.gas else 0
-                            MW_liq = sum(zs_l * mw for zs_l, mw in zip(state.liquid0.zs, constants.MWs)) if state.liquid0 else 0
-                            mass_vap_frac = (vf * MW_vap) / (vf * MW_vap + (1 - vf) * MW_liq) if (vf * MW_vap + (1 - vf) * MW_liq) > 0 else vf
+                            MW_vap = sum(z * mw for z, mw in zip(gas_zs, MWs))
+                            MW_liq = sum(z * mw for z, mw in zip(liq_zs, MWs))
+                            denom = vf * MW_vap + (1 - vf) * MW_liq
+                            mass_vap_frac = (vf * MW_vap) / denom if denom > 0 else vf
 
-                            vapor_comp = {comp_names[i]: state.gas.zs[i] for i in range(len(comp_names))} if state.gas else {}
-                            liquid_comp = {comp_names[i]: state.liquid0.zs[i] for i in range(len(comp_names))} if state.liquid0 else {}
+                            vapor_comp = {comp_names[i]: gas_zs[i] for i in range(len(comp_names))}
+                            liquid_comp = {comp_names[i]: liq_zs[i] for i in range(len(comp_names))}
 
                             outlets["out-1"] = {
                                 "temperature": T_op,
@@ -673,9 +930,6 @@ class DWSIMEngine:
                             eq_res["vaporFraction"] = round(vf, 4)
                             eq_res["massVaporFraction"] = round(mass_vap_frac, 4)
                             logs.append(f"{name}: VF = {vf:.3f} (molar), mass VF = {mass_vap_frac:.3f}")
-                        except Exception as exc:
-                            logger.debug("thermo flash failed for separator: %s", exc)
-                            logs.append(f"{name}: flash calculation failed, using simple split")
 
                     if not outlets:
                         # Simple fallback: assume 10% vapor
@@ -711,7 +965,6 @@ class DWSIMEngine:
                     P_cond = _kpa_to_pa(float(params.get("condenserPressure", _pa_to_kpa(P_feed))))
 
                     # Sort components by volatility (boiling point)
-                    # Lower boiling point = more volatile = goes to distillate
                     comp_bp: list[tuple[str, float, float]] = []
                     for cname, cfrac in comp.items():
                         bp = 373.15  # default
@@ -777,7 +1030,6 @@ class DWSIMEngine:
                     T_in = inlet["temperature"]
                     P_in = inlet["pressure"]
                     mf = inlet["mass_flow"]
-                    comp = inlet.get("composition", {})
 
                     volume = float(params.get("volume", 10.0))
                     T_op_c = params.get("temperature")
@@ -902,6 +1154,7 @@ class DWSIMEngine:
             return {
                 "status": "success",
                 "engine": engine_name,
+                "property_package": property_package,
                 "stream_results": stream_results,
                 "equipment_results": equipment_results,
                 "convergence_info": {

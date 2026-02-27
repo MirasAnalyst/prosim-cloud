@@ -59,6 +59,7 @@ export interface StreamConditions {
   temperature: number;
   pressure: number;
   flowRate: number;
+  vapor_fraction: number;
   composition: Record<string, number>;
 }
 

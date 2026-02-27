@@ -7,16 +7,19 @@ interface SimulationState {
   status: SimulationStatus;
   results: SimulationResult | null;
   error: string | null;
+  propertyPackage: string;
 
   runSimulation: () => Promise<void>;
   setStatus: (status: SimulationStatus) => void;
   setResults: (results: SimulationResult | null) => void;
+  setPropertyPackage: (pkg: string) => void;
 }
 
 export const useSimulationStore = create<SimulationState>((set) => ({
   status: SimulationStatus.Idle,
   results: null,
   error: null,
+  propertyPackage: 'PengRobinson',
 
   runSimulation: async () => {
     set({ status: SimulationStatus.Running, error: null });
@@ -39,8 +42,10 @@ export const useSimulationStore = create<SimulationState>((set) => ({
       targetHandle: e.targetHandle ?? '',
     }));
 
+    const { propertyPackage } = useSimulationStore.getState();
+
     try {
-      const data = await apiRunSimulation({ nodes: simNodes, edges: simEdges });
+      const data = await apiRunSimulation({ nodes: simNodes, edges: simEdges, property_package: propertyPackage });
       if (data.status === 'error') {
         set({
           status: SimulationStatus.Error,
@@ -69,4 +74,5 @@ export const useSimulationStore = create<SimulationState>((set) => ({
 
   setStatus: (status) => set({ status }),
   setResults: (results) => set({ results }),
+  setPropertyPackage: (pkg) => set({ propertyPackage: pkg }),
 }));

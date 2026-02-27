@@ -29,6 +29,7 @@ class SimulationRequest(BaseModel):
     flowsheet_id: uuid.UUID | None = None
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
+    property_package: str = "PengRobinson"
 
 
 class SimulationResponse(BaseModel):
