@@ -1,0 +1,16 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.1
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+psycopg[binary]>=3.1.0
+alembic==1.14.1
+openai==1.58.1
+httpx==0.28.1
+# pythonnet - install separately if DWSIM is available (requires Python <3.13)
+# CoolProp - install separately if needed (binary wheels may not be available)
+thermo>=0.3.0
+fluids>=1.0.26
+python-dotenv==1.0.1
+python-multipart==0.0.20
