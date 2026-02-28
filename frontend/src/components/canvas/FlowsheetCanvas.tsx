@@ -4,6 +4,7 @@ import {
   Background,
   Controls,
   MiniMap,
+  ConnectionLineType,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
@@ -76,6 +77,7 @@ export default function FlowsheetCanvas() {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
+        connectionLineType={ConnectionLineType.SmoothStep}
         fitView
         deleteKeyCode={['Backspace', 'Delete']}
         className="bg-gray-950"

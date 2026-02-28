@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
-import { type AgentMessage } from '../types';
-import { agentChat } from '../lib/api-client';
+import { EquipmentType, type AgentMessage, type EquipmentData } from '../types';
+import { agentChat, type FlowsheetActionData } from '../lib/api-client';
+import { getDefaultParameters } from '../lib/equipment-library';
+import { autoLayout } from '../lib/auto-layout';
+import { useFlowsheetStore } from './flowsheetStore';
 
 interface AgentState {
   messages: AgentMessage[];
@@ -14,12 +17,83 @@ interface AgentState {
   setLoading: (loading: boolean) => void;
 }
 
+const VALID_TYPES = new Set<string>(Object.values(EquipmentType));
+
+function applyFlowsheetAction(action: FlowsheetActionData): void {
+  // Filter out invalid equipment types
+  const validEquipment = action.equipment.filter((eq) => {
+    if (!VALID_TYPES.has(eq.type)) {
+      console.warn(`Skipping unknown equipment type from AI: ${eq.type}`);
+      return false;
+    }
+    return true;
+  });
+
+  // Map temp IDs → real UUIDs
+  const idMap = new Map<string, string>();
+  for (const eq of validEquipment) {
+    idMap.set(eq.id, uuidv4());
+  }
+
+  // Filter connections to only reference valid equipment
+  const validIds = new Set(validEquipment.map((eq) => eq.id));
+  const validConnections = action.connections.filter(
+    (c) => validIds.has(c.source_id) && validIds.has(c.target_id)
+  );
+
+  // Compute positions via auto-layout
+  const positions = autoLayout(
+    validEquipment.map((eq) => eq.id),
+    validConnections,
+  );
+  const posMap = new Map(positions.map((p) => [p.id, { x: p.x, y: p.y }]));
+
+  // Build equipment array
+  const equipment: EquipmentData[] = validEquipment.map((eq) => {
+    const eqType = eq.type as EquipmentType;
+    const defaults = getDefaultParameters(eqType);
+    const params = { ...defaults };
+
+    // Merge AI-specified parameters over defaults
+    if (eq.parameters) {
+      for (const [key, value] of Object.entries(eq.parameters)) {
+        if (key === 'feedComposition' && typeof value === 'object' && value !== null) {
+          // Stringify if AI sent object instead of string
+          params[key] = JSON.stringify(value);
+        } else {
+          params[key] = value as number | string | boolean;
+        }
+      }
+    }
+
+    return {
+      id: idMap.get(eq.id)!,
+      type: eqType,
+      name: eq.name,
+      parameters: params,
+      position: posMap.get(eq.id) ?? { x: 100, y: 100 },
+    };
+  });
+
+  // Build streams array
+  const streams = validConnections.map((conn) => ({
+    id: uuidv4(),
+    sourceId: idMap.get(conn.source_id) ?? conn.source_id,
+    sourcePort: conn.source_port,
+    targetId: idMap.get(conn.target_id) ?? conn.target_id,
+    targetPort: conn.target_port,
+  }));
+
+  // Atomic replace via loadFlowsheet
+  useFlowsheetStore.getState().loadFlowsheet(equipment, streams);
+}
+
 export const useAgentStore = create<AgentState>((set, get) => ({
   messages: [
     {
       id: uuidv4(),
       role: 'system',
-      content: 'Welcome to ProSim Cloud AI Assistant. I can help you build and optimize your process flowsheet. Try asking me to add equipment or configure your simulation.',
+      content: 'Welcome to ProSim Cloud AI Assistant. I can help you build and optimize your process flowsheet. Try asking me to build a flowsheet or configure your simulation.',
       timestamp: new Date(),
     },
   ],
@@ -39,16 +113,34 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }));
 
     try {
-      const chatMessages = get().messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
+      const chatMessages = get().messages
+        .filter((m) => m.role !== 'system')
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
       const data = await agentChat(chatMessages);
+
+      // Apply flowsheet action if present
+      let flowsheetAction: AgentMessage['flowsheetAction'] | undefined;
+      if (data.flowsheet_action) {
+        try {
+          applyFlowsheetAction(data.flowsheet_action);
+          flowsheetAction = {
+            equipmentCount: data.flowsheet_action.equipment.length,
+            connectionCount: data.flowsheet_action.connections.length,
+          };
+        } catch (e) {
+          console.error('Failed to apply flowsheet action:', e);
+        }
+      }
+
       const assistantMessage: AgentMessage = {
         id: uuidv4(),
         role: 'assistant',
         content: data.message?.content ?? 'No response received.',
         timestamp: new Date(),
+        flowsheetAction,
       };
       set((state) => ({
         messages: [...state.messages, assistantMessage],

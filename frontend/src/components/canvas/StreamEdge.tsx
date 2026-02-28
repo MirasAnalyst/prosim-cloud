@@ -1,7 +1,7 @@
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getBezierPath,
+  getSmoothStepPath,
   type EdgeProps,
 } from '@xyflow/react';
 import { useSimulationStore } from '../../stores/simulationStore';
@@ -22,13 +22,14 @@ export default function StreamEdge({
   const results = useSimulationStore((s) => s.results);
   const status = useSimulationStore((s) => s.status);
 
-  const [edgePath, labelX, labelY] = getBezierPath({
+  const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
     sourcePosition,
     targetX,
     targetY,
     targetPosition,
+    borderRadius: 8,
   });
 
   const streamResult =

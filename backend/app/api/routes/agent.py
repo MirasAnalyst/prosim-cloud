@@ -1,3 +1,4 @@
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -18,11 +19,11 @@ async def chat(body: ChatRequest):
         raise HTTPException(status_code=400, detail="Messages list cannot be empty")
 
     try:
-        message, usage = await agent_service.chat(
+        message, usage, flowsheet_action = await agent_service.chat(
             messages=body.messages,
             flowsheet_context=body.flowsheet_context,
         )
-        return ChatResponse(message=message, usage=usage)
+        return ChatResponse(message=message, usage=usage, flowsheet_action=flowsheet_action)
     except Exception as exc:
         logger.exception("Agent chat failed")
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
@@ -42,7 +43,7 @@ async def chat_stream(body: ChatRequest):
                 yield chunk
         except Exception as exc:
             logger.exception("Agent stream failed")
-            yield f"data: {{\"error\": \"{exc}\"}}\n\n"
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
     return StreamingResponse(
         event_generator(),

@@ -16,7 +16,7 @@ ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI 
 - **Schemas**: `backend/app/schemas/flowsheet.py` (NodeData, EdgeData with camelCase aliases), `backend/app/schemas/simulation.py` (SimulationRequest with property_package).
 - **E2E tests**: `frontend/e2e/` with Playwright config in `frontend/playwright.config.ts`. Tests call `/api/simulation/run` in-browser and verify result correctness + UI rendering.
 
-## Current State (Phase 3 Complete)
+## Current State (Phase 4 Complete)
 - 13 equipment types with thermo-integrated calculations (Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor)
 - Compound search endpoint with 40+ curated compounds + optional thermo library lookup
 - Feed Conditions editor in PropertyInspector (compound search, composition table, auto-normalize)
@@ -38,6 +38,14 @@ ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI 
   - Mixer HP flash for outlet temperature (not h_mix / Cp_water)
   - Quick fixes: 0°C heater outlet accepted, feed param guards removed, flash logs upgraded to warning, xylene CAS fixed to o-xylene (95-47-6)
   - 7 Playwright E2E tests validating all fixes
+- **Phase 4 — AI-powered flowsheet generation from text prompts**:
+  - OpenAI function calling (tools) with `generate_flowsheet` tool definition (13 equipment types, port IDs, parameter keys)
+  - Backend parses tool call → FlowsheetAction, follow-up call for text explanation
+  - Frontend `applyFlowsheetAction()`: maps temp IDs → UUIDs, auto-layout (topological sort), merges AI params over defaults
+  - Auto-layout: longest-path Kahn's algorithm, left-to-right columns, vertical centering
+  - ChatMessage green badge: "Created N equipment with M connections"
+  - Equipment type validation, feedComposition stringify, system message filtering
+  - `loadFlowsheet()` now triggers `debounceSave()` for persistence
 
 ## Key Lessons
 
@@ -61,6 +69,20 @@ Built full stack in parallel, then chem-soft review caught 14 critical mismatche
 2. **Separator default params override inlet conditions**: Separator `params.get("temperature", ...)` returns its *default parameter value* (25°C) even when upstream sends 150°C, because the equipment library populates defaults. Test showed compressor work 914 kW instead of 120 kW. Fix: downstream equipment should not pass default feed params — only user-specified overrides. In E2E tests, omit params for non-feed equipment.
 
 3. **Playwright drag-and-drop fragility**: React Flow canvas drag-and-drop via mouse events is unreliable in headless Chromium. Fix: use API-level simulation calls in-browser (`page.evaluate` + `fetch`) for accuracy tests, reserve UI interaction tests for verifying badge/label rendering on already-loaded flowsheets.
+
+### Phase 4: Mistakes and Resolutions
+
+1. **GPT-4o returned empty parameters**: Tool schema had `parameters` as optional with `additionalProperties: True` — model skipped populating it. Fix: made `parameters` required and added a few-shot example in the system prompt showing populated params.
+
+2. **`_normalize_nodes()` read `data.label` but nodes store `data.name`**: All AI-generated equipment showed UUIDs instead of display names in simulation logs. Fix: changed to `data.get("name", data.get("label", ...))`.
+
+3. **`loadFlowsheet()` never called `debounceSave()`**: AI-generated flowsheets were lost on page refresh — every other mutation triggered auto-save except this one. Fix: added `debounceSave(get)` after `set()`.
+
+4. **`model_dump()` included None fields in follow-up OpenAI call**: Could cause API errors from extra null fields like `refusal`, `audio`. Fix: changed to `model_dump(exclude_none=True)`.
+
+5. **AI couldn't generate CSTR, PFR, or DistillationColumn**: GPT-4o returned text instead of calling the tool for complex equipment. Fix: added few-shot examples for all three in the system prompt (Examples 4–6). All three now generate and converge.
+
+6. **Mixer/HeatExchanger only received one feed stream**: Tool schema couldn't represent two independent feeds per equipment. Fix: taught the AI to create Heater pass-through nodes (outletTemperature=feedTemperature) as feed sources for each inlet, with dedicated examples (Examples 2–3). Mixer now shows correct 2 kg/s total flow; HX now computes correct cold outlet temperature.
 
 ## Dev Commands
 ```bash

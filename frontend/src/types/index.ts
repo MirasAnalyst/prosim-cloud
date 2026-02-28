@@ -96,6 +96,7 @@ export interface AgentMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
+  flowsheetAction?: { equipmentCount: number; connectionCount: number };
 }
 
 export interface Project {

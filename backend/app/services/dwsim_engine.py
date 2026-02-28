@@ -249,7 +249,7 @@ class DWSIMEngine:
                 normalized.append({
                     "id": node.get("id", ""),
                     "type": eq_type,
-                    "name": data.get("label", node.get("id", "")),
+                    "name": data.get("name", data.get("label", node.get("id", ""))),
                     "parameters": data.get("parameters", {}),
                     "position": node.get("position", {}),
                 })

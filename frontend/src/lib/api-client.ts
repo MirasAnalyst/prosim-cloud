@@ -120,9 +120,29 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface FlowsheetEquipment {
+  id: string;
+  type: string;
+  name: string;
+  parameters?: Record<string, number | string | boolean>;
+}
+
+export interface FlowsheetConnection {
+  source_id: string;
+  source_port: string;
+  target_id: string;
+  target_port: string;
+}
+
+export interface FlowsheetActionData {
+  equipment: FlowsheetEquipment[];
+  connections: FlowsheetConnection[];
+}
+
 export interface ChatResponseData {
   message: ChatMessage;
   usage: Record<string, number> | null;
+  flowsheet_action: FlowsheetActionData | null;
 }
 
 export function agentChat(messages: ChatMessage[], flowsheetContext?: Record<string, unknown>) {

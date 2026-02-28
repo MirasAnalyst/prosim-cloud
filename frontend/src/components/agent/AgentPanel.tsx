@@ -6,7 +6,7 @@ import AgentInput from './AgentInput';
 import SuggestionCard from './SuggestionCard';
 
 const suggestions = [
-  'Add a heater followed by a separator',
+  'Build a natural gas plant with a heater to 150C, a separator, and compress the vapor to 5000 kPa',
   'What equipment do I need for distillation?',
   'Optimize the heat exchanger network',
   'Check my flowsheet for errors',

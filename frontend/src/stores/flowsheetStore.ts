@@ -157,6 +157,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       animated: true,
     }));
     set({ nodes, edges, selectedNodeId: null });
+    debounceSave(get);
   },
 
   getUpstreamNodes: (nodeId: string) => {
