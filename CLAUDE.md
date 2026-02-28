@@ -4,19 +4,22 @@
 ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI co-pilot. Monorepo: `/frontend` (Vite+React+TS, React Flow, Zustand, Tailwind) and `/backend` (FastAPI, SQLAlchemy+psycopg, Supabase PostgreSQL, OpenAI). Backend runs on port 8000, frontend on 5173 with Vite proxy for `/api`.
 
 ## Architecture
-- **Backend engine**: `backend/app/services/dwsim_engine.py` (~1420 lines) — simulation engine with thermo library integration. Priority: DWSIM (pythonnet) → thermo (PR/SRK EOS flash) → basic energy/mass balance fallback. Key internals:
+- **Backend engine**: `backend/app/services/dwsim_engine.py` (~1800 lines) — simulation engine with thermo library integration. Priority: DWSIM (pythonnet) → thermo (PR/SRK EOS flash) → basic energy/mass balance fallback. Key internals:
   - `_flash_tp()` — shared TP flash helper returning H, S, Cp, VF, rho_liquid, flasher object, MW_mix. Uses `FlashPureVLS` for single-component, `FlashVL` for mixtures.
   - `_normalize_nodes()` — converts React Flow `{type:"equipment", data:{equipmentType}}` to flat `{type:"Heater"}` format.
   - `_build_feed_from_params()` — builds SI feed from user params with thermo flash for real enthalpy.
   - `_get_mw()` — cached molecular weight lookup (thermo + builtin table of 40+ compounds).
   - `_estimate_cp()` — composition-weighted Cp fallback when thermo unavailable.
+  - `_get_density()` — flash-based density helper; gas-aware (ideal gas fallback `P*MW/R/T`), liquid uses `rho_liquid`.
+  - `_topological_sort()` — returns `(sorted_ids, cycle_ids)` tuple for recycle detection.
+  - Per-equipment try/except inside simulation loop — individual failures produce `{"error": str}` without losing other results.
 - **Frontend stores**: Zustand stores in `frontend/src/stores/` — `flowsheetStore.ts` (nodes/edges/persistence), `simulationStore.ts` (run sim/results/property package).
 - **Unit convention**: Frontend uses °C/kPa/kW/%. Engine uses K/Pa/W/fraction internally. Conversion helpers (`_c_to_k`, `_kpa_to_pa`, `_w_to_kw`) at I/O boundaries in `dwsim_engine.py`.
 - **API routes**: `/api/projects`, `/api/projects/{id}/flowsheet`, `/api/simulation/run`, `/api/compounds/search`, `/api/agent/chat`.
-- **Schemas**: `backend/app/schemas/flowsheet.py` (NodeData, EdgeData with camelCase aliases), `backend/app/schemas/simulation.py` (SimulationRequest with property_package).
-- **E2E tests**: `frontend/e2e/` with Playwright config in `frontend/playwright.config.ts`. Tests call `/api/simulation/run` in-browser and verify result correctness + UI rendering.
+- **Schemas**: `backend/app/schemas/flowsheet.py` (NodeData, EdgeData with camelCase aliases), `backend/app/schemas/simulation.py` (SimulationRequest with property_package validation + node/edge limits).
+- **E2E tests**: `frontend/e2e/` with Playwright config in `frontend/playwright.config.ts`. 15 tests: 7 Phase 3 accuracy, 3 AI flowsheet, 5 Tier 2 engine improvements. Tests call `/api/simulation/run` in-browser and verify result correctness + UI rendering.
 
-## Current State (Phase 4 Complete)
+## Current State (Tier 2 Complete)
 - 13 equipment types with thermo-integrated calculations (Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor)
 - Compound search endpoint with 40+ curated compounds + optional thermo library lookup
 - Feed Conditions editor in PropertyInspector (compound search, composition table, auto-normalize)
@@ -46,6 +49,21 @@ ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI 
   - ChatMessage green badge: "Created N equipment with M connections"
   - Equipment type validation, feedComposition stringify, system message filtering
   - `loadFlowsheet()` now triggers `debounceSave()` for persistence
+- **Tier 2 — Engine correctness & robustness** (13 items):
+  - Per-equipment try/except: one failure no longer loses all results, returns `status: "partial"` with `converged: false`
+  - Division-by-zero guards: pump rho≤0, compressor P_in≤0 / P_out<P_in, mf≤0 clamped to 1e-10
+  - `_get_density()` helper: flash-based, gas uses `gas.rho_mass()` or ideal gas fallback, liquid uses `rho_liquid`
+  - CSTR/PFR use real density — gas-phase methane at 300°C/2000kPa gives rho≈9 kg/m³ (was hardcoded 1000)
+  - ConversionReactor applies conversion: reduces key reactant mole fraction by `(1-X)`, adds "products" pseudo-component
+  - Heater/Cooler duty-mode: HP flash for real T_out and VF (heating water past 100°C now shows VF>0)
+  - `_GAMMA_TABLE` (30 compounds): composition-weighted heat capacity ratio for compressor gamma fallback
+  - Pump Cp from flash when available (same pattern as HX)
+  - HX hot/cold swap: tracks `swapped` flag, reverses outlet port assignment so `out-hot` always maps to original hot stream
+  - Distillation FUG (Fenske-Underwood-Gilliland): K-values from bubble-point flash, proper component split with HK recovery baseline, boiling-point fallback
+  - NRTL warning: logs "using Peng-Robinson fallback" when NRTL selected
+  - Recycle detection: `_topological_sort` returns cycle_ids, sets `converged: false` + `recycle_detected: true`
+  - SimulationRequest validation: `property_package` must be PengRobinson/SRK/NRTL, nodes max 200 with `id`, edges max 500 with `source`/`target`
+  - 5 new Playwright E2E tests (15 total: 7 Phase 3 + 3 AI + 5 Tier 2)
 
 ## Key Lessons
 
@@ -72,17 +90,28 @@ Built full stack in parallel, then chem-soft review caught 14 critical mismatche
 
 ### Phase 4: Mistakes and Resolutions
 
-1. **GPT-4o returned empty parameters**: Tool schema had `parameters` as optional with `additionalProperties: True` — model skipped populating it. Fix: made `parameters` required and added a few-shot example in the system prompt showing populated params.
+1. **GPT-4o returned empty parameters**: `additionalProperties: True` with optional field — model skipped it. Fix: made `parameters` required + added few-shot example.
 
-2. **`_normalize_nodes()` read `data.label` but nodes store `data.name`**: All AI-generated equipment showed UUIDs instead of display names in simulation logs. Fix: changed to `data.get("name", data.get("label", ...))`.
+2. **`_normalize_nodes()` read `data.label` not `data.name`**: AI nodes showed UUIDs in sim logs. Fix: `data.get("name", data.get("label", ...))`.
 
-3. **`loadFlowsheet()` never called `debounceSave()`**: AI-generated flowsheets were lost on page refresh — every other mutation triggered auto-save except this one. Fix: added `debounceSave(get)` after `set()`.
+3. **`loadFlowsheet()` missing `debounceSave()`**: AI flowsheets lost on refresh. Fix: added `debounceSave(get)` after `set()`.
 
-4. **`model_dump()` included None fields in follow-up OpenAI call**: Could cause API errors from extra null fields like `refusal`, `audio`. Fix: changed to `model_dump(exclude_none=True)`.
+4. **`model_dump()` included None fields**: Follow-up OpenAI call could fail from null `refusal`/`audio`. Fix: `model_dump(exclude_none=True)`.
 
-5. **AI couldn't generate CSTR, PFR, or DistillationColumn**: GPT-4o returned text instead of calling the tool for complex equipment. Fix: added few-shot examples for all three in the system prompt (Examples 4–6). All three now generate and converge.
+5. **AI couldn't generate CSTR/PFR/DistillationColumn**: GPT-4o returned text instead of tool call for complex equipment. Fix: added few-shot examples (Examples 4–6).
 
-6. **Mixer/HeatExchanger only received one feed stream**: Tool schema couldn't represent two independent feeds per equipment. Fix: taught the AI to create Heater pass-through nodes (outletTemperature=feedTemperature) as feed sources for each inlet, with dedicated examples (Examples 2–3). Mixer now shows correct 2 kg/s total flow; HX now computes correct cold outlet temperature.
+6. **Mixer/HX only received one feed**: Tool schema can't represent two independent feeds. Fix: AI creates Heater pass-throughs as feed sources for each inlet (Examples 2–3).
+
+### Tier 2: Mistakes and Resolutions
+
+1. **FUG K-values all 1.0 for subcooled feed**: Benzene/toluene at 90°C/101kPa is all-liquid (VF=0), so `gas_zs == liq_zs` giving K=1, alpha=1, and FUG silently fell back to boiling-point method. Fix: detect single-phase feeds and flash at bubble point (`VF=0`) to get two-phase K-values.
+
+2. **FUG purity only 66.7% instead of 99%**: Component split formula `d_i/b_i = alpha_i^N_eff` was missing the HK recovery baseline — heavy key splits 50/50 regardless of stages. Fix: use `d_i/b_i = (d_hk/b_hk) * alpha_i^N_eff` with `d_hk/b_hk = 0.01/0.99` for 99% HK recovery in bottoms.
+
+3. **Re-indenting 1025 lines for try/except**: Per-equipment try/except required adding 4 spaces to every line inside the equipment processing loop. Manual Edit calls impractical. Fix: wrote a Python transformation script via Bash that identifies the range, re-indents, and inserts try/except blocks.
+
+### Phase 5 Fix: AI Compound Name Mismatch
+GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") which the engine didn't recognize. Fix: added `### Supported compounds` list (42 exact names from curated list) and rule #7 ("ONLY use compound names from the list") to `SYSTEM_PROMPT` in `openai_agent.py`. AI now outputs "carbon dioxide", "hydrogen sulfide", "n-butane" etc.
 
 ## Dev Commands
 ```bash
