@@ -139,6 +139,115 @@ export function clearChatHistory(projectId: string) {
   return request<void>(`/api/projects/${projectId}/chat`, { method: 'DELETE' });
 }
 
+// ── Versions ──
+
+export interface VersionResponse {
+  id: string;
+  flowsheet_id: string;
+  version_number: number;
+  label: string | null;
+  property_package: string | null;
+  created_at: string;
+}
+
+export interface VersionDiffResponse {
+  added_nodes: Record<string, unknown>[];
+  removed_nodes: Record<string, unknown>[];
+  modified_nodes: Record<string, unknown>[];
+  added_edges: Record<string, unknown>[];
+  removed_edges: Record<string, unknown>[];
+  modified_edges: Record<string, unknown>[];
+}
+
+export function listVersions(projectId: string) {
+  return request<VersionResponse[]>(`/api/projects/${projectId}/versions`);
+}
+
+export function createVersion(projectId: string, label?: string) {
+  return request<VersionResponse>(`/api/projects/${projectId}/versions`, {
+    method: 'POST',
+    body: JSON.stringify({ label: label ?? null }),
+  });
+}
+
+export function deleteVersion(projectId: string, versionId: string) {
+  return request<void>(`/api/projects/${projectId}/versions/${versionId}`, { method: 'DELETE' });
+}
+
+export function restoreVersion(projectId: string, versionId: string) {
+  return request<VersionResponse>(`/api/projects/${projectId}/versions/${versionId}/restore`, {
+    method: 'POST',
+  });
+}
+
+export function diffVersions(projectId: string, v1: string, v2: string) {
+  return request<VersionDiffResponse>(`/api/projects/${projectId}/versions/${v1}/diff/${v2}`);
+}
+
+// ── Export / Import ──
+
+export async function exportFlowsheet(projectId: string, format: string): Promise<Response> {
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/export?format=${format}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res;
+}
+
+export async function importFlowsheet(projectId: string, file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/import`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+// ── Validation ──
+
+export interface ValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export function validateFlowsheet(nodes: Record<string, unknown>[], edges: Record<string, unknown>[]) {
+  return request<ValidationResult>('/api/flowsheet/validate', {
+    method: 'POST',
+    body: JSON.stringify({ nodes, edges }),
+  });
+}
+
+// ── Results Export ──
+
+export async function exportSimulationResults(results: Record<string, unknown>, format: string): Promise<Response> {
+  const res = await fetch(`${API_BASE}/api/simulation/export?format=${format}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(results),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res;
+}
+
+// ── Backup / Restore ──
+
+export async function downloadBackup(projectId: string): Promise<Response> {
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/backup`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res;
+}
+
+export function restoreBackup(backupData: Record<string, unknown>) {
+  return request<ProjectResponse>('/api/projects/restore', {
+    method: 'POST',
+    body: JSON.stringify(backupData),
+  });
+}
+
 // ── Agent Chat ──
 
 export interface ChatMessage {

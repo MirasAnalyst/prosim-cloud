@@ -1,8 +1,11 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { ChevronUp, ChevronDown, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, Download } from 'lucide-react';
+import { ChevronUp, ChevronDown, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, Download, ChevronDown as ChevronDownSmall } from 'lucide-react';
+import { toast } from 'sonner';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { SimulationStatus } from '../../types';
+import { exportSimulationResults } from '../../lib/api-client';
+import { downloadBlob } from '../../lib/download-utils';
 
 type SortCol = 'stream' | 'temperature' | 'pressure' | 'flowRate' | 'vapor_fraction' | 'composition';
 type SortDir = 'asc' | 'desc';
@@ -80,6 +83,20 @@ export default function BottomPanel() {
     return entries;
   }, [results?.streamResults, sortCol, sortDir]);
 
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
+  const exportDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!exportDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (exportDropdownRef.current && !exportDropdownRef.current.contains(e.target as HTMLElement)) {
+        setExportDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [exportDropdownOpen]);
+
   const exportCsv = useCallback(() => {
     if (sortedStreamEntries.length === 0) return;
     const header = 'Stream,Temperature (C),Pressure (kPa),Flow (kg/s),VF,Composition';
@@ -94,7 +111,26 @@ export default function BottomPanel() {
     a.download = 'stream_results.csv';
     a.click();
     URL.revokeObjectURL(url);
+    setExportDropdownOpen(false);
   }, [sortedStreamEntries]);
+
+  const exportExcel = useCallback(async () => {
+    if (!results) return;
+    setExportDropdownOpen(false);
+    try {
+      const rawResults: Record<string, unknown> = {
+        stream_results: results.streamResults,
+        equipment_results: results.equipmentResults,
+        convergence_info: results.convergenceInfo,
+      };
+      const res = await exportSimulationResults(rawResults, 'xlsx');
+      const blob = await res.blob();
+      downloadBlob(blob, 'simulation_results.xlsx');
+      toast.success('Results exported as Excel');
+    } catch (err) {
+      toast.error(`Export failed: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
+  }, [results]);
 
   if (status === SimulationStatus.Idle) return null;
 
@@ -195,13 +231,22 @@ export default function BottomPanel() {
                 <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Stream Results
                 </h3>
-                <button
-                  onClick={exportCsv}
-                  className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
-                >
-                  <Download size={12} />
-                  CSV Export
-                </button>
+                <div className="relative" ref={exportDropdownRef}>
+                  <button
+                    onClick={() => setExportDropdownOpen(!exportDropdownOpen)}
+                    className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+                  >
+                    <Download size={12} />
+                    Export
+                    <ChevronDownSmall size={10} />
+                  </button>
+                  {exportDropdownOpen && (
+                    <div className="absolute right-0 bottom-full mb-1 w-32 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded shadow-lg z-50 py-1">
+                      <button onClick={exportCsv} className="w-full text-left px-3 py-1 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">CSV</button>
+                      <button onClick={exportExcel} className="w-full text-left px-3 py-1 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">Excel (XLSX)</button>
+                    </div>
+                  )}
+                </div>
               </div>
               <table className="w-full text-xs">
                 <thead>

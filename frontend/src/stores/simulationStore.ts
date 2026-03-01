@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import { SimulationStatus, type SimulationResult } from '../types';
 import { useFlowsheetStore } from './flowsheetStore';
+import { validateFlowsheet } from '../lib/flowsheet-validator';
 
 interface ConvergenceSettings {
   maxIter: number;
@@ -65,6 +66,19 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       });
       return;
     }
+
+    // Client-side validation
+    const validation = validateFlowsheet(nodes, edges);
+    if (!validation.valid) {
+      for (const err of validation.errors) toast.error(err);
+      set({
+        status: SimulationStatus.Error,
+        error: `Validation failed: ${validation.errors.join('; ')}`,
+        abortController: null,
+      });
+      return;
+    }
+    for (const w of validation.warnings) toast.warning(w);
 
     // Validate feed compositions (B4)
     const feedNodeIds = new Set(nodes.map((n) => n.id));

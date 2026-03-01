@@ -6,6 +6,7 @@ import EquipmentPalette from '../equipment/EquipmentPalette';
 import FlowsheetCanvas from '../canvas/FlowsheetCanvas';
 import PropertyInspector from '../inspector/PropertyInspector';
 import AgentPanel from '../agent/AgentPanel';
+import VersionPanel from '../version/VersionPanel';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useAgentStore } from '../../stores/agentStore';
@@ -114,6 +115,7 @@ export default function AppLayout() {
       </div>
       <BottomPanel />
       <AgentPanel />
+      <VersionPanel />
     </div>
   );
 }

@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from itertools import product
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,6 +174,30 @@ async def run_batch_simulation(body: BatchSimulationRequest):
         parameter_matrix.append(param_set)
 
     return {"results": results, "parameter_matrix": parameter_matrix}
+
+
+@router.post("/export")
+async def export_simulation_results(
+    body: dict,
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+):
+    """Export simulation results as CSV or Excel."""
+    from app.services.results_exporter import export_csv, export_xlsx
+
+    if format == "xlsx":
+        xlsx_bytes = export_xlsx(body)
+        return Response(
+            content=xlsx_bytes,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": 'attachment; filename="simulation_results.xlsx"'},
+        )
+    else:
+        csv_content = export_csv(body)
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="simulation_results.csv"'},
+        )
 
 
 @router.post("/report")

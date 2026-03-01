@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,3 +68,34 @@ async def delete_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     await db.delete(project)
+
+
+@router.get("/{project_id}/backup")
+async def backup_project(project_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Download a full backup of the project."""
+    import json
+    from app.services.backup_service import create_backup
+
+    try:
+        backup_data = await create_backup(db, project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    content = json.dumps(backup_data, indent=2, default=str)
+    safe_name = backup_data["project"]["name"].replace('"', '_').replace('\n', '_').replace('\r', '_')
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.prosim-backup.json"'},
+    )
+
+
+@router.post("/restore", response_model=ProjectResponse, status_code=201)
+async def restore_project(body: dict, db: AsyncSession = Depends(get_db)):
+    """Restore a project from backup data."""
+    from app.services.backup_service import restore_backup
+
+    new_project_id = await restore_backup(db, body)
+    result = await db.execute(select(Project).where(Project.id == new_project_id))
+    project = result.scalar_one_or_none()
+    return project

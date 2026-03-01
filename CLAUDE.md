@@ -173,6 +173,16 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 3. **Stale background processes accumulate across sessions**: Each `run_in_background` server start (uvicorn/vite) spawns a process that persists after the session ends. Over days, 5+ orphaned Vite instances held ports 5173-5177, causing port conflicts and wasting ~300MB RAM. Fix: always check `ps aux | grep -E "uvicorn|vite"` before starting servers; kill stale ones first. **Before starting dev servers, verify no orphaned instances exist from previous sessions.**
 
+### Phase 6: Mistakes and Resolutions
+
+1. **Flowsheet validator checked wrong node path — all validation was dead code**: `validate_flowsheet()` used `n.get("parameters", {})` but React Flow nodes store params at `n["data"]["parameters"]`. Every parameter check (feed completeness, composition sums, numeric ranges) silently returned empty dict and never fired. Fix: added `_get_params()` helper that checks `data.parameters` first, falls back to top-level `parameters`. **When writing code that accesses node data, always account for the React Flow `{type:"equipment", data:{equipmentType, parameters}}` wrapper structure.**
+
+2. **Version routes allowed cross-project access via unscoped queries**: `get_version`, `delete_version`, `restore_version`, and `diff_versions` queried `FlowsheetVersion.id == version_id` without filtering by `flowsheet_id`. Any user could access/modify versions belonging to other projects by guessing UUIDs. Fix: added `.where(FlowsheetVersion.flowsheet_id == flowsheet.id)` to all 4 endpoints. **Always scope child resource queries by the parent's FK, even when the URL includes the parent ID.**
+
+3. **Exporter produced `<Type>equipment</Type>` instead of actual equipment type**: `node.get("type")` returns React Flow's wrapper type `"equipment"`, not the actual type. The `_PROSIM_TO_DWSIM` mapping couldn't find `"equipment"` and fell through to using it literally. Fix: prioritize `data.equipmentType` over `type` — `node.get("data", {}).get("equipmentType", "") or node.get("type", "")`. **Same React Flow wrapper issue as the validator — any code touching stored nodes must extract the real type from `data.equipmentType`.**
+
+4. **Supabase pgbouncer double-pooling caused connection exhaustion under test concurrency**: SQLAlchemy's default connection pool (pool_size=5) layered on top of Supabase's pgbouncer pooler (port 6543) created pool-on-pool conflicts. Under Playwright's parallel test load, connections exhausted and `POST /api/projects` returned 500. Fix: detect Supabase pooler URL and use `NullPool` (let pgbouncer handle pooling). **When using an external connection pooler (pgbouncer, PgBouncer, RDS Proxy), always use `NullPool` in SQLAlchemy to avoid double-pooling.**
+
 ## Dev Commands
 ```bash
 # Backend
