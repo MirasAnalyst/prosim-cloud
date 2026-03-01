@@ -26,6 +26,15 @@ export interface EquipmentNodeData extends Record<string, unknown> {
   parameters: Record<string, number | string | boolean>;
 }
 
+export interface EquipmentGroup {
+  id: string;
+  label: string;
+  nodeIds: string[];
+  collapsed: boolean;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+}
+
 interface FlowsheetState {
   nodes: Node<EquipmentNodeData>[];
   edges: Edge[];
@@ -33,6 +42,27 @@ interface FlowsheetState {
   currentProjectId: string | null;
   projectName: string;
   saveStatus: 'saved' | 'saving' | 'error';
+
+  // Equipment Groups
+  groups: EquipmentGroup[];
+  createGroup: (label: string, nodeIds: string[]) => void;
+  removeGroup: (id: string) => void;
+  toggleGroupCollapse: (id: string) => void;
+
+  // Undo/Redo
+  history: Array<{ nodes: Node<EquipmentNodeData>[]; edges: Edge[] }>;
+  historyIndex: number;
+  _isRestoring: boolean;
+  pushHistory: () => void;
+  undo: () => void;
+  redo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+
+  // Copy/Paste
+  clipboard: { nodes: Node<EquipmentNodeData>[]; edges: Edge[] } | null;
+  copySelected: () => void;
+  pasteClipboard: () => void;
 
   addNode: (type: EquipmentType, position: { x: number; y: number }) => void;
   removeNode: (id: string) => void;
@@ -70,6 +100,143 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   projectName: 'Untitled Project',
   saveStatus: 'saved' as const,
 
+  // Equipment Groups
+  groups: [],
+
+  createGroup: (label, nodeIds) => {
+    const { nodes } = get();
+    const groupNodes = nodes.filter(n => nodeIds.includes(n.id));
+    if (groupNodes.length < 2) return;
+
+    const minX = Math.min(...groupNodes.map(n => n.position.x)) - 20;
+    const minY = Math.min(...groupNodes.map(n => n.position.y)) - 40;
+    const maxX = Math.max(...groupNodes.map(n => n.position.x)) + 200;
+    const maxY = Math.max(...groupNodes.map(n => n.position.y)) + 120;
+
+    set(state => ({
+      groups: [...state.groups, {
+        id: crypto.randomUUID(),
+        label,
+        nodeIds,
+        collapsed: false,
+        position: { x: minX, y: minY },
+        size: { width: maxX - minX, height: maxY - minY },
+      }],
+    }));
+  },
+
+  removeGroup: (id) => {
+    set(state => ({ groups: state.groups.filter(g => g.id !== id) }));
+  },
+
+  toggleGroupCollapse: (id) => {
+    set(state => ({
+      groups: state.groups.map(g => g.id === id ? { ...g, collapsed: !g.collapsed } : g),
+    }));
+  },
+
+  // Undo/Redo state
+  history: [],
+  historyIndex: -1,
+  _isRestoring: false,
+
+  pushHistory: () => {
+    if (get()._isRestoring) return;
+    const { nodes, edges, history, historyIndex } = get();
+    const snapshot = {
+      nodes: JSON.parse(JSON.stringify(nodes)),
+      edges: JSON.parse(JSON.stringify(edges)),
+    };
+    const newHistory = history.slice(0, historyIndex + 1);
+    newHistory.push(snapshot);
+    // Cap at 50 entries
+    if (newHistory.length > 50) {
+      newHistory.shift();
+      set({ history: newHistory, historyIndex: newHistory.length - 1 });
+    } else {
+      set({ history: newHistory, historyIndex: newHistory.length - 1 });
+    }
+  },
+
+  undo: () => {
+    const { historyIndex, history } = get();
+    if (historyIndex <= 0) return;
+    const newIndex = historyIndex - 1;
+    const snapshot = history[newIndex];
+    set({ _isRestoring: true });
+    set({
+      nodes: JSON.parse(JSON.stringify(snapshot.nodes)),
+      edges: JSON.parse(JSON.stringify(snapshot.edges)),
+      historyIndex: newIndex,
+    });
+    set({ _isRestoring: false });
+    debounceSave(get, set);
+  },
+
+  redo: () => {
+    const { historyIndex, history } = get();
+    if (historyIndex >= history.length - 1) return;
+    const newIndex = historyIndex + 1;
+    const snapshot = history[newIndex];
+    set({ _isRestoring: true });
+    set({
+      nodes: JSON.parse(JSON.stringify(snapshot.nodes)),
+      edges: JSON.parse(JSON.stringify(snapshot.edges)),
+      historyIndex: newIndex,
+    });
+    set({ _isRestoring: false });
+    debounceSave(get, set);
+  },
+
+  canUndo: () => get().historyIndex > 0,
+  canRedo: () => get().historyIndex < get().history.length - 1,
+
+  // Copy/Paste state
+  clipboard: null,
+
+  copySelected: () => {
+    const { nodes, edges } = get();
+    const selectedNodes = nodes.filter((n) => n.selected);
+    if (selectedNodes.length === 0) return;
+    const selectedIds = new Set(selectedNodes.map((n) => n.id));
+    const selectedEdges = edges.filter(
+      (e) => selectedIds.has(e.source) && selectedIds.has(e.target)
+    );
+    set({
+      clipboard: {
+        nodes: JSON.parse(JSON.stringify(selectedNodes)),
+        edges: JSON.parse(JSON.stringify(selectedEdges)),
+      },
+    });
+  },
+
+  pasteClipboard: () => {
+    const { clipboard } = get();
+    if (!clipboard || clipboard.nodes.length === 0) return;
+    const idMap = new Map<string, string>();
+    clipboard.nodes.forEach((n) => {
+      idMap.set(n.id, crypto.randomUUID());
+    });
+    const newNodes = clipboard.nodes.map((n) => ({
+      ...JSON.parse(JSON.stringify(n)),
+      id: idMap.get(n.id)!,
+      position: { x: n.position.x + 40, y: n.position.y + 40 },
+      selected: false,
+    }));
+    const newEdges = clipboard.edges.map((e) => ({
+      ...JSON.parse(JSON.stringify(e)),
+      id: crypto.randomUUID(),
+      source: idMap.get(e.source) ?? e.source,
+      target: idMap.get(e.target) ?? e.target,
+    }));
+    set((state) => ({
+      nodes: [...state.nodes, ...newNodes],
+      edges: [...state.edges, ...newEdges],
+    }));
+    get().pushHistory();
+    debounceSave(get, set);
+  },
+
   addNode: (type, position) => {
     const def = equipmentLibrary[type];
     const id = uuidv4();
@@ -84,6 +251,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       },
     };
     set((state) => ({ nodes: [...state.nodes, newNode] }));
+    get().pushHistory();
     debounceSave(get, set);
   },
 
@@ -93,6 +261,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       edges: state.edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: state.selectedNodeId === id ? null : state.selectedNodeId,
     }));
+    get().pushHistory();
     debounceSave(get, set);
   },
 
@@ -114,6 +283,10 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
     const selectChange = changes.find((c) => c.type === 'select');
     if (selectChange && selectChange.type === 'select') {
       set({ selectedNodeId: selectChange.selected ? selectChange.id : null });
+    }
+    // Push history for remove changes
+    if (changes.some((c) => c.type === 'remove')) {
+      get().pushHistory();
     }
     // Save position/dimension changes (not just selection)
     if (changes.some((c) => c.type === 'position' || c.type === 'dimensions' || c.type === 'remove')) {
@@ -141,6 +314,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
         state.edges
       ),
     }));
+    get().pushHistory();
     debounceSave(get, set);
   },
 
@@ -169,6 +343,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       animated: true,
     }));
     set({ nodes, edges, selectedNodeId: null });
+    get().pushHistory();
     debounceSave(get, set);
   },
 

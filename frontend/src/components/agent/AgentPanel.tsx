@@ -29,23 +29,23 @@ export default function AgentPanel() {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed right-0 top-12 bottom-0 w-96 bg-gray-900 border-l border-gray-800 z-40 flex flex-col shadow-2xl">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
+    <div className="fixed right-0 top-12 bottom-0 w-96 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-800 z-40 flex flex-col shadow-2xl">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800">
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          <h2 className="text-sm font-semibold text-gray-200">AI Assistant</h2>
+          <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-200">AI Assistant</h2>
         </div>
         <div className="flex items-center gap-1">
           <button
             onClick={clearMessages}
-            className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
+            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
             title="Clear chat"
           >
             <Trash2 size={14} />
           </button>
           <button
             onClick={togglePanel}
-            className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
+            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
           >
             <X size={16} />
           </button>
@@ -58,7 +58,7 @@ export default function AgentPanel() {
         ))}
 
         {isLoading && (
-          <div className="flex items-center gap-2 text-gray-400 text-sm">
+          <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 text-sm">
             <Loader2 size={14} className="animate-spin" />
             <span>Thinking...</span>
           </div>

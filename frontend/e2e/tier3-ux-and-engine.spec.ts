@@ -158,8 +158,7 @@ test.describe('Tier 3: UX & Engine Fixes', () => {
   });
 
   test('Test 4: Simulation logs contain WARNING prefix for appropriate conditions', async ({ page }) => {
-    // Separator fallback (when flash fails for exotic comp) produces WARNING
-    // We use a simple setup that triggers a known warning path
+    // A standalone Mixer with no connected inlets triggers unit validation WARNING
     const simResponse = await page.evaluate(async () => {
       const res = await fetch('/api/simulation/run', {
         method: 'POST',
@@ -167,20 +166,18 @@ test.describe('Tier 3: UX & Engine Fixes', () => {
         body: JSON.stringify({
           nodes: [
             {
-              id: 'heater-1', type: 'Heater', name: 'Heater-1',
+              id: 'mixer-1', type: 'Mixer', name: 'Mixer-1',
               parameters: {
                 feedTemperature: 25,
                 feedPressure: 101.325,
                 feedFlowRate: 1.0,
                 feedComposition: JSON.stringify({ water: 1.0 }),
-                outletTemperature: 80,
-                pressureDrop: 0,
               },
               position: { x: 100, y: 200 },
             },
           ],
           edges: [],
-          property_package: 'NRTL',
+          property_package: 'PengRobinson',
         }),
       });
       return res.json();
@@ -189,7 +186,7 @@ test.describe('Tier 3: UX & Engine Fixes', () => {
     const results = simResponse.results;
     expect(results).toBeDefined();
 
-    // NRTL triggers "using Peng-Robinson fallback" warning
+    // Mixer with 0 connected inlets triggers validation WARNING
     const logs: string[] = results.logs;
     const warningLogs = logs.filter((l: string) => l.includes('WARNING'));
     expect(warningLogs.length).toBeGreaterThan(0);

@@ -37,3 +37,18 @@ class ChatResponse(BaseModel):
     message: ChatMessage
     usage: dict[str, int] | None = None
     flowsheet_action: FlowsheetAction | None = None
+
+
+class ChatHistoryMessage(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: str
+
+
+class ChatHistoryResponse(BaseModel):
+    messages: list[ChatHistoryMessage]
+
+
+class SaveChatMessagesRequest(BaseModel):
+    messages: list[ChatMessage]

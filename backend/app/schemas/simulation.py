@@ -25,7 +25,34 @@ class EquipmentResults(BaseModel):
     extra: dict[str, Any] = {}
 
 
-_VALID_PROPERTY_PACKAGES = {"PengRobinson", "SRK", "NRTL"}
+_VALID_PROPERTY_PACKAGES = {"PengRobinson", "SRK", "NRTL", "UNIQUAC"}
+
+
+class ConvergenceSettings(BaseModel):
+    max_iter: int = 50
+    tolerance: float = 1e-4
+    damping: float = 0.5
+
+    @field_validator("max_iter")
+    @classmethod
+    def validate_max_iter(cls, v: int) -> int:
+        if v < 1 or v > 500:
+            raise ValueError("max_iter must be between 1 and 500")
+        return v
+
+    @field_validator("tolerance")
+    @classmethod
+    def validate_tolerance(cls, v: float) -> float:
+        if v < 1e-10 or v > 1.0:
+            raise ValueError("tolerance must be between 1e-10 and 1.0")
+        return v
+
+    @field_validator("damping")
+    @classmethod
+    def validate_damping(cls, v: float) -> float:
+        if v < 0.01 or v > 1.0:
+            raise ValueError("damping must be between 0.01 and 1.0")
+        return v
 
 
 class SimulationRequest(BaseModel):
@@ -33,6 +60,7 @@ class SimulationRequest(BaseModel):
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     property_package: str = "PengRobinson"
+    convergence_settings: ConvergenceSettings | None = None
 
     @field_validator("property_package")
     @classmethod
@@ -63,6 +91,27 @@ class SimulationRequest(BaseModel):
                 raise ValueError(f"Edge at index {i} is missing required 'source' field.")
             if "target" not in edge:
                 raise ValueError(f"Edge at index {i} is missing required 'target' field.")
+        return v
+
+
+class ParameterVariation(BaseModel):
+    node_id: str
+    parameter_key: str
+    values: list[float]
+
+
+class BatchSimulationRequest(BaseModel):
+    base_nodes: list[dict[str, Any]] = []
+    base_edges: list[dict[str, Any]] = []
+    property_package: str = "PengRobinson"
+    convergence_settings: ConvergenceSettings | None = None
+    variations: list[ParameterVariation] = []
+
+    @field_validator("property_package")
+    @classmethod
+    def validate_property_package(cls, v: str) -> str:
+        if v not in _VALID_PROPERTY_PACKAGES:
+            raise ValueError(f"Invalid property_package '{v}'. Must be one of: {', '.join(sorted(_VALID_PROPERTY_PACKAGES))}")
         return v
 
 

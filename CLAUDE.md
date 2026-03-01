@@ -4,7 +4,7 @@
 ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI co-pilot. Monorepo: `/frontend` (Vite+React+TS, React Flow, Zustand, Tailwind) and `/backend` (FastAPI, SQLAlchemy+psycopg, Supabase PostgreSQL, OpenAI). Backend runs on port 8000, frontend on 5173 with Vite proxy for `/api`.
 
 ## Architecture
-- **Backend engine**: `backend/app/services/dwsim_engine.py` (~1800 lines) — simulation engine with thermo library integration. Priority: DWSIM (pythonnet) → thermo (PR/SRK EOS flash) → basic energy/mass balance fallback. Key internals:
+- **Backend engine**: `backend/app/services/dwsim_engine.py` (~2100 lines) — simulation engine with thermo library integration. Priority: DWSIM (pythonnet) → thermo (PR/SRK/NRTL/UNIQUAC flash) → basic energy/mass balance fallback. Key internals:
   - `_flash_tp()` — shared TP flash helper returning H, S, Cp, VF, rho_liquid, flasher object, MW_mix. Uses `FlashPureVLS` for single-component, `FlashVL` for mixtures.
   - `_normalize_nodes()` — converts React Flow `{type:"equipment", data:{equipmentType}}` to flat `{type:"Heater"}` format.
   - `_build_feed_from_params()` — builds SI feed from user params with thermo flash for real enthalpy.
@@ -17,13 +17,13 @@ ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI 
 - **Unit convention**: Frontend uses °C/kPa/kW/%. Engine uses K/Pa/W/fraction internally. Conversion helpers (`_c_to_k`, `_kpa_to_pa`, `_w_to_kw`) at I/O boundaries in `dwsim_engine.py`.
 - **API routes**: `/api/projects`, `/api/projects/{id}/flowsheet`, `/api/simulation/run`, `/api/compounds/search`, `/api/agent/chat`.
 - **Schemas**: `backend/app/schemas/flowsheet.py` (NodeData, EdgeData with camelCase aliases), `backend/app/schemas/simulation.py` (SimulationRequest with property_package validation + node/edge limits).
-- **E2E tests**: `frontend/e2e/` with Playwright config in `frontend/playwright.config.ts`. 15 tests: 7 Phase 3 accuracy, 3 AI flowsheet, 5 Tier 2 engine improvements. Tests call `/api/simulation/run` in-browser and verify result correctness + UI rendering.
+- **E2E tests**: `frontend/e2e/` with Playwright config in `frontend/playwright.config.ts`. 29 tests: 7 Phase 3 accuracy, 3 AI flowsheet, 5 Tier 2, 4 Tier 3, 6 Tier 4, 4 Tier 5. Tests call `/api/simulation/run` in-browser and verify result correctness + UI rendering.
 
-## Current State (Tier 2 Complete)
-- 13 equipment types with thermo-integrated calculations (Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor)
+## Current State (Tier 5 Complete)
+- 16 equipment types with thermo-integrated calculations (Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor, Absorber, Stripper, Cyclone)
 - Compound search endpoint with 40+ curated compounds + optional thermo library lookup
 - Feed Conditions editor in PropertyInspector (compound search, composition table, auto-normalize)
-- Property package selection (Peng-Robinson, SRK, NRTL) — dropdown in TopNav, passed through to engine
+- Property package selection (Peng-Robinson, SRK, NRTL, UNIQUAC) — dropdown in TopNav, passed through to engine
 - Stream labels on canvas edges (T°C | P kPa | flow kg/s) after simulation
 - Equipment result badges on nodes (Q kW, W kW, VF) after simulation
 - Flowsheet persistence with debounced auto-save (1s) and project load on mount
@@ -64,6 +64,24 @@ ProSim Cloud — cloud-based process simulation SaaS (like Aspen HYSYS) with AI 
   - Recycle detection: `_topological_sort` returns cycle_ids, sets `converged: false` + `recycle_detected: true`
   - SimulationRequest validation: `property_package` must be PengRobinson/SRK/NRTL, nodes max 200 with `id`, edges max 500 with `source`/`target`
   - 5 new Playwright E2E tests (15 total: 7 Phase 3 + 3 AI + 5 Tier 2)
+- **Tier 4 — Core simulation capabilities** (6 items):
+  - UNIQUAC + proper NRTL: `_flash_tp()` builds `GibbsExcessLiquid` with `NRTLModel`/`UNIQUACModel` for activity coefficient models; BIPs from IPDB with zero-matrix fallback; gas stays `CEOSGas(PRMIX)`; uses `UNIFAC_Rs`/`UNIFAC_Qs` for UNIQUAC r/q parameters
+  - Tear-stream convergence: outer iteration loop (max 50) with Wegstein acceleration (`q = s/(s-1)`, clamped `[-5, 0.9]`) and damping (0.5); tear edges detected from topological sort back-edges
+  - Mass/energy balance validation: post-loop check of `sum(inlet flows) vs sum(outlet flows)` per node; stores `mass_balance_ok`, `energy_balance_ok` in `convergence_info`
+  - Unit operation validation: pre-loop topology checks (Mixer ≥2 inlets, HX 2 inlets, Splitter ≥2 outlets) with WARNING logs
+  - Absorber & Stripper: Kremser equation `N = ln[(y_in/y_out)(1-1/A)+1/A] / ln(A)` with `A = L/(mG)`; K-values from flash; mass flows computed from component material balance; 4 ports each
+  - Chat memory persistence: `ChatMessage` SQLAlchemy model, `GET/POST/DELETE /api/projects/{id}/chat`, frontend load/save in agentStore
+  - 6 new Playwright E2E tests (25 total)
+- **Tier 5 — Enhancements** (8 items):
+  - Equipment sizing: Souders-Brown (separators), `A=Q/(U*LMTD)` (HX), Fair's flooding (columns); `sizing` dict in equipment results
+  - Color-coded streams: VF-based stroke color (blue liquid, red gas, orange two-phase)
+  - Grid snapping: `snapToGrid snapGrid={[20, 20]}` on ReactFlow
+  - Toast notifications: `sonner` library, toasts on sim complete/error and AI flowsheet apply
+  - Keyboard shortcuts: `Ctrl+S` save, `Ctrl+Enter` simulate, `Escape` deselect
+  - Sortable stream table: click-to-sort headers, CSV export button in BottomPanel
+  - Cyclone equipment: Shepherd-Lapple `ΔP = K * ρ * V² / 2`, 2 outlets (gas + solids)
+  - Troubleshooting assistant: expert rules in AI system prompt for convergence failures, equipment errors, property package guidance
+  - 4 new Playwright E2E tests (29 total)
 
 ## Key Lessons
 
@@ -119,6 +137,20 @@ Built full stack in parallel, then chem-soft review caught 14 critical mismatche
 3. **HX inlet fallback broken by Python `is` identity check**: `hot = dict(_DEFAULT_FEED)` creates a new object, so `hot is _DEFAULT_FEED` is always `False` — position-based inlet assignment never triggered. Fix: use `None` sentinel instead of `dict()` copy, check `hot is None`.
 
 4. **Compressor flash used wrong variable name after refactor**: Changed `zs_v` (valve's variable) instead of `zs` (compressor's variable) in outlet flash call, causing compressor to crash silently and return no `work` result. Fix: use correct local variable `zs` for each equipment section.
+
+### Tier 4/5: Mistakes and Resolutions
+
+1. **UNIQUAC used Van der Waals volumes instead of UNIFAC r/q parameters**: `UNIQUACModel(rs=constants.Van_der_Waals_volumes, qs=constants.Van_der_Waals_areas)` passed m³/mol values where dimensionless UNIQUAC parameters are expected. Activity coefficients were meaningless but no crash — results silently wrong. Fix: use `constants.UNIFAC_Rs` and `constants.UNIFAC_Qs` (dimensionless) with per-component `None` fallbacks. **Always verify thermo library parameter types match the model's expected units.**
+
+2. **Absorber mass flow hardcoded at 80/20 split**: `mf_out1 = mf1 * 0.8` ignored the Kremser component material balance entirely. The Kremser equation correctly computed compositions but the mass flows were arbitrary. Fix: compute outlet mass flows from actual molar material balance (`sum(moles_c * MW_c)` per outlet), then scale to enforce overall mass balance. **After implementing a thermodynamic model (Kremser), always derive ALL outputs (composition AND flows) from the model — never hardcode mass splits.**
+
+3. **Wegstein acceleration clamped to `[-5, 0]` — no acceleration possible**: Clamping `q` to `max(-5, min(0, q))` only allowed damping (q < 0) or direct substitution (q = 0), never acceleration (0 < q < 1). Recycle loops converged but unnecessarily slowly. Fix: clamp to `[-5, 0.9]` to allow acceleration while avoiding instability near q = 1.
+
+4. **Toast notifications caused Playwright strict mode violations**: Adding `sonner` toasts created duplicate text elements on the page (e.g., "Simulation Complete" appeared in both the bottom panel and a toast). Pre-existing Playwright locators like `page.locator('text=Simulation Complete')` resolved to 2 elements, failing with strict mode error. Fix: add `.first()` to ambiguous locators. **When adding UI notifications (toasts, alerts), check if E2E tests use text-based locators that might match the new elements.**
+
+5. **NRTL test invalidated by proper implementation**: Tier 3 test checked for `WARNING` logs from NRTL's "using Peng-Robinson fallback" message. After T4-1 implemented proper NRTL, there's no fallback and no WARNING. Test silently broke. Fix: updated test to use a Mixer with <2 inlets (triggers T4-4 validation WARNING instead). **When replacing a workaround with a proper implementation, check if tests relied on the workaround's side effects.**
+
+6. **Re-indenting 1100+ lines for tear-stream iteration wrapper**: Wrapping the entire equipment processing loop (lines 858-1959) in an outer `for iteration in range(max_iterations):` required adding 4 spaces to every line. Single Edit call impractical. Fix: wrote Python transformation script to read file, re-indent target range, and write back. Same pattern as Tier 2's try/except re-indent.
 
 ### Phase 5 Fix: AI Compound Name Mismatch
 GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") which the engine didn't recognize. Fix: added `### Supported compounds` list (42 exact names from curated list) and rule #7 ("ONLY use compound names from the list") to `SYSTEM_PROMPT` in `openai_agent.py`. AI now outputs "carbon dioxide", "hydrogen sulfide", "n-butane" etc.

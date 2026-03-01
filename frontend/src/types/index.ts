@@ -12,6 +12,13 @@ export enum EquipmentType {
   CSTRReactor = 'CSTRReactor',
   PFRReactor = 'PFRReactor',
   ConversionReactor = 'ConversionReactor',
+  Absorber = 'Absorber',
+  Stripper = 'Stripper',
+  Cyclone = 'Cyclone',
+  ThreePhaseSeparator = 'ThreePhaseSeparator',
+  Crystallizer = 'Crystallizer',
+  Dryer = 'Dryer',
+  Filter = 'Filter',
 }
 
 export enum EquipmentCategory {

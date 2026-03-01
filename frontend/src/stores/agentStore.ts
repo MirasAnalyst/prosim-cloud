@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
+import { toast } from 'sonner';
 import { EquipmentType, type AgentMessage, type EquipmentData } from '../types';
-import { agentChat, type FlowsheetActionData } from '../lib/api-client';
+import { agentChat, getChatHistory, saveChatMessages, clearChatHistory, type FlowsheetActionData } from '../lib/api-client';
 import { getDefaultParameters } from '../lib/equipment-library';
 import { autoLayout } from '../lib/auto-layout';
 import { useFlowsheetStore } from './flowsheetStore';
@@ -17,6 +18,7 @@ interface AgentState {
   addMessage: (role: AgentMessage['role'], content: string) => void;
   setLoading: (loading: boolean) => void;
   clearMessages: () => void;
+  loadChatHistory: (projectId: string) => Promise<void>;
 }
 
 const VALID_TYPES = new Set<string>(Object.values(EquipmentType));
@@ -184,6 +186,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             streams: simResults.streamResults,
             equipment: simResults.equipmentResults,
             converged: simResults.convergenceInfo?.converged,
+            iterations: simResults.convergenceInfo?.iterations,
+            logs: simResults.logs?.filter(
+              (l) => l.startsWith('WARNING') || l.startsWith('ERROR')
+            ).slice(0, 20),
           };
         }
       }
@@ -202,6 +208,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             equipmentCount: data.flowsheet_action.equipment.length,
             connectionCount: data.flowsheet_action.connections.length,
           };
+          toast.success(`Created ${flowsheetAction.equipmentCount} equipment with ${flowsheetAction.connectionCount} connections`);
           // Auto-simulate after AI generates a flowsheet
           setTimeout(() => {
             useSimulationStore.getState().runSimulation().catch((err) => {
@@ -224,6 +231,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         messages: [...state.messages, assistantMessage],
         isLoading: false,
       }));
+
+      // Persist new messages to backend
+      const projectId = useFlowsheetStore.getState().currentProjectId;
+      if (projectId) {
+        saveChatMessages(projectId, [
+          { role: 'user', content },
+          { role: 'assistant', content: assistantMessage.content },
+        ]).catch((err) => console.error('Failed to save chat messages:', err));
+      }
     } catch {
       const errorMessage: AgentMessage = {
         id: uuidv4(),
@@ -267,5 +283,36 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         },
       ],
     });
+    const projectId = useFlowsheetStore.getState().currentProjectId;
+    if (projectId) {
+      clearChatHistory(projectId).catch((err) =>
+        console.error('Failed to clear chat history:', err)
+      );
+    }
+  },
+
+  loadChatHistory: async (projectId: string) => {
+    try {
+      const data = await getChatHistory(projectId);
+      if (data.messages.length > 0) {
+        const loaded: AgentMessage[] = [
+          {
+            id: uuidv4(),
+            role: 'system',
+            content: 'Welcome to ProSim Cloud AI Assistant. I can help you build and optimize your process flowsheet. Try asking me to build a flowsheet or configure your simulation.',
+            timestamp: new Date(),
+          },
+          ...data.messages.map((m) => ({
+            id: m.id,
+            role: m.role as AgentMessage['role'],
+            content: m.content,
+            timestamp: new Date(m.created_at),
+          })),
+        ];
+        set({ messages: loaded });
+      }
+    } catch {
+      // Chat history not available, keep default welcome message
+    }
   },
 }));

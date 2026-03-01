@@ -1,13 +1,19 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
-import { ChevronUp, ChevronDown, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { ChevronUp, ChevronDown, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, Download } from 'lucide-react';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { SimulationStatus } from '../../types';
 
+type SortCol = 'stream' | 'temperature' | 'pressure' | 'flowRate' | 'vapor_fraction' | 'composition';
+type SortDir = 'asc' | 'desc';
+
 export default function BottomPanel() {
   const [expanded, setExpanded] = useState(false);
+  const [sortCol, setSortCol] = useState<SortCol>('stream');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
   const status = useSimulationStore((s) => s.status);
   const results = useSimulationStore((s) => s.results);
+  const progress = useSimulationStore((s) => s.progress);
   const error = useSimulationStore((s) => s.error);
   const nodes = useFlowsheetStore((s) => s.nodes);
   const edges = useFlowsheetStore((s) => s.edges);
@@ -47,17 +53,60 @@ export default function BottomPanel() {
       .join(', ');
   };
 
+  const toggleSort = useCallback((col: SortCol) => {
+    setSortDir((prev) => (sortCol === col ? (prev === 'asc' ? 'desc' : 'asc') : 'asc'));
+    setSortCol(col);
+  }, [sortCol]);
+
+  const sortedStreamEntries = useMemo(() => {
+    if (!results?.streamResults) return [];
+    const entries = Object.entries(results.streamResults).map(([id, cond]) => ({
+      id,
+      streamName: getStreamName(id),
+      ...cond,
+    }));
+    entries.sort((a, b) => {
+      let cmp = 0;
+      switch (sortCol) {
+        case 'stream': cmp = a.streamName.localeCompare(b.streamName); break;
+        case 'temperature': cmp = a.temperature - b.temperature; break;
+        case 'pressure': cmp = a.pressure - b.pressure; break;
+        case 'flowRate': cmp = a.flowRate - b.flowRate; break;
+        case 'vapor_fraction': cmp = (a.vapor_fraction ?? 0) - (b.vapor_fraction ?? 0); break;
+        case 'composition': cmp = formatComposition(a.composition).localeCompare(formatComposition(b.composition)); break;
+      }
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return entries;
+  }, [results?.streamResults, sortCol, sortDir]);
+
+  const exportCsv = useCallback(() => {
+    if (sortedStreamEntries.length === 0) return;
+    const header = 'Stream,Temperature (C),Pressure (kPa),Flow (kg/s),VF,Composition';
+    const rows = sortedStreamEntries.map((e) =>
+      `"${e.streamName}",${e.temperature.toFixed(1)},${e.pressure.toFixed(1)},${e.flowRate.toFixed(3)},${e.vapor_fraction?.toFixed(3) ?? ''},"${formatComposition(e.composition)}"`
+    );
+    const csv = [header, ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'stream_results.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [sortedStreamEntries]);
+
   if (status === SimulationStatus.Idle) return null;
 
   return (
     <div
-      className={`bg-gray-900 border-t border-gray-800 transition-all ${
+      className={`bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 transition-all ${
         expanded ? 'h-64' : 'h-10'
       }`}
     >
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full h-10 px-4 flex items-center justify-between text-sm hover:bg-gray-800/50 transition-colors"
+        className="w-full h-10 px-4 flex items-center justify-between text-sm hover:bg-gray-100/50 dark:hover:bg-gray-800/50 transition-colors"
       >
         <div className="flex items-center gap-2">
           {status === SimulationStatus.Error ? (
@@ -67,7 +116,7 @@ export default function BottomPanel() {
           ) : (
             <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
           )}
-          <span className="text-gray-300 font-medium">
+          <span className="text-gray-700 dark:text-gray-300 font-medium">
             {status === SimulationStatus.Running && 'Simulation Running...'}
             {status === SimulationStatus.Completed && 'Simulation Complete'}
             {status === SimulationStatus.Error && 'Simulation Error'}
@@ -88,6 +137,28 @@ export default function BottomPanel() {
 
       {expanded && (
         <div className="h-[calc(100%-2.5rem)] overflow-y-auto custom-scrollbar px-4 pb-4">
+          {status === SimulationStatus.Running && (
+            <div className="px-4 py-2 space-y-2">
+              {progress && (
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="flex-1 bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                    <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${(progress.index / progress.total) * 100}%` }} />
+                  </div>
+                  <span className="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                    {progress.equipment} ({progress.index}/{progress.total})
+                  </span>
+                </div>
+              )}
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="flex gap-4">
+                  <div className="animate-pulse bg-gray-700 dark:bg-gray-700 rounded h-4 w-24" />
+                  <div className="animate-pulse bg-gray-700 dark:bg-gray-700 rounded h-4 w-16" />
+                  <div className="animate-pulse bg-gray-700 dark:bg-gray-700 rounded h-4 w-16" />
+                  <div className="animate-pulse bg-gray-700 dark:bg-gray-700 rounded h-4 w-16" />
+                </div>
+              ))}
+            </div>
+          )}
           {error && (
             <div className="mb-3 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-300">
               {error}
@@ -96,10 +167,10 @@ export default function BottomPanel() {
 
           {results?.logs && results.logs.length > 0 && (
             <div className="space-y-1">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+              <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">
                 Simulation Log
               </h3>
-              <div className="bg-gray-950 rounded-lg p-3 font-mono text-xs space-y-0.5">
+              <div className="bg-gray-50 dark:bg-gray-950 rounded-lg p-3 font-mono text-xs space-y-0.5">
                 {results.logs.map((log, i) => (
                   <div
                     key={i}
@@ -118,36 +189,61 @@ export default function BottomPanel() {
             </div>
           )}
 
-          {results?.streamResults && Object.keys(results.streamResults).length > 0 && (
+          {sortedStreamEntries.length > 0 && (
             <div className="mt-3">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                Stream Results
-              </h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                  Stream Results
+                </h3>
+                <button
+                  onClick={exportCsv}
+                  className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
+                >
+                  <Download size={12} />
+                  CSV Export
+                </button>
+              </div>
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="text-gray-500 border-b border-gray-800">
-                    <th className="text-left py-1 pr-4">Stream</th>
-                    <th className="text-right py-1 pr-4">Temp (°C)</th>
-                    <th className="text-right py-1 pr-4">Pressure (kPa)</th>
-                    <th className="text-right py-1 pr-4">Flow (kg/s)</th>
-                    <th className="text-right py-1 pr-4">VF</th>
-                    <th className="text-left py-1">Composition</th>
+                  <tr className="text-gray-500 border-b border-gray-200 dark:border-gray-800">
+                    {([
+                      ['stream', 'text-left', 'Stream'],
+                      ['temperature', 'text-right', 'Temp (\u00B0C)'],
+                      ['pressure', 'text-right', 'Pressure (kPa)'],
+                      ['flowRate', 'text-right', 'Flow (kg/s)'],
+                      ['vapor_fraction', 'text-right', 'VF'],
+                      ['composition', 'text-left', 'Composition'],
+                    ] as [SortCol, string, string][]).map(([col, align, label]) => (
+                      <th
+                        key={col}
+                        className={`${align} py-1 pr-4 cursor-pointer select-none hover:text-gray-700 dark:hover:text-gray-300 transition-colors`}
+                        onClick={() => toggleSort(col)}
+                      >
+                        <span className="inline-flex items-center gap-0.5">
+                          {label}
+                          {sortCol === col && (
+                            sortDir === 'asc'
+                              ? <ArrowUp size={10} />
+                              : <ArrowDown size={10} />
+                          )}
+                        </span>
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(results.streamResults).map(([id, cond]) => {
-                    const streamName = getStreamName(id);
-                    const compStr = formatComposition(cond.composition);
+                  {sortedStreamEntries.map((entry) => {
+                    const compStr = formatComposition(entry.composition);
                     return (
-                      <tr key={id} className="text-gray-300 border-b border-gray-800/50">
-                        <td className="py-1 pr-4 max-w-[200px] truncate" title={streamName}>
-                          {streamName}
+                      <tr key={entry.id} className="text-gray-700 dark:text-gray-300 border-b border-gray-200/50 dark:border-gray-800/50">
+                        <td className="py-1 pr-4 max-w-[200px] truncate" title={entry.streamName}>
+                          {entry.streamName}
                         </td>
-                        <td className="text-right py-1 pr-4">{cond.temperature.toFixed(1)}</td>
-                        <td className="text-right py-1 pr-4">{cond.pressure.toFixed(1)}</td>
-                        <td className="text-right py-1 pr-4">{cond.flowRate.toFixed(3)}</td>
-                        <td className="text-right py-1 pr-4">{cond.vapor_fraction?.toFixed(3) ?? '—'}</td>
-                        <td className="py-1 max-w-[300px] truncate text-gray-400" title={compStr}>
+                        <td className="text-right py-1 pr-4">{entry.temperature.toFixed(1)}</td>
+                        <td className="text-right py-1 pr-4">{entry.pressure.toFixed(1)}</td>
+                        <td className="text-right py-1 pr-4">{entry.flowRate.toFixed(3)}</td>
+                        <td className="text-right py-1 pr-4">{entry.vapor_fraction?.toFixed(3) ?? '\u2014'}</td>
+                        <td className="py-1 max-w-[300px] truncate text-gray-500 dark:text-gray-400" title={compStr}>
                           {compStr}
                         </td>
                       </tr>

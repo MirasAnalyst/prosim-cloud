@@ -49,6 +49,9 @@ except Exception as exc:
 _thermo_available = False
 try:
     from thermo import ChemicalConstantsPackage, CEOSGas, CEOSLiquid, PRMIX, FlashVL, FlashPureVLS  # type: ignore[import-untyped]
+    from thermo import GibbsExcessLiquid  # type: ignore[import-untyped]
+    from thermo.nrtl import NRTL as NRTLModel  # type: ignore[import-untyped]
+    from thermo.uniquac import UNIQUAC as UNIQUACModel  # type: ignore[import-untyped]
     from thermo.interaction_parameters import IPDB  # type: ignore[import-untyped]
 
     _thermo_available = True
@@ -123,6 +126,13 @@ EQUIPMENT_TYPE_MAP: dict[str, str] = {
     "CSTRReactor": "CSTR",
     "PFRReactor": "PFR",
     "ConversionReactor": "ConversionReactor",
+    "Absorber": "Absorber",
+    "Stripper": "Stripper",
+    "Cyclone": "Cyclone",
+    "ThreePhaseSeparator": "ThreePhaseSeparator",
+    "Crystallizer": "Crystallizer",
+    "Dryer": "Dryer",
+    "Filter": "Filter",
 }
 
 # Default feed conditions (SI units) when no upstream data and no user params
@@ -335,7 +345,9 @@ class DWSIMEngine:
                 logger.exception("DWSIM simulation failed, trying fallback")
 
         # Fallback: basic calculations (works with or without thermo/CoolProp)
-        return await self._simulate_basic(nodes, edges, property_package)
+        convergence_settings = flowsheet_data.get("convergence_settings") or {}
+        progress_callback = flowsheet_data.get("progress_callback")
+        return await self._simulate_basic(nodes, edges, property_package, convergence_settings, progress_callback)
 
     # ------------------------------------------------------------------
     # Shared flash helper (reusable across equipment types)
@@ -368,35 +380,90 @@ class DWSIMEngine:
 
             constants, properties = ChemicalConstantsPackage.from_IDs(comp_names)
 
-            # Try to get binary interaction parameters — match BIP source to EOS
-            bip_source = "ChemSep SRK" if property_package == "SRK" else "ChemSep PR"
-            try:
-                kijs = IPDB.get_ip_asymmetric_matrix(bip_source, constants.CASs, "kij")
-            except Exception:
-                kijs = [[0.0] * len(comp_names) for _ in comp_names]
+            # Build gas + liquid phase objects based on property package
+            if property_package in ("NRTL", "UNIQUAC") and len(comp_names) >= 2:
+                # Activity coefficient models for non-ideal liquid mixtures
+                # Gas phase: always use PR EOS
+                pr_kijs = [[0.0] * len(comp_names) for _ in comp_names]
+                try:
+                    pr_kijs = IPDB.get_ip_asymmetric_matrix("ChemSep PR", constants.CASs, "kij")
+                except Exception:
+                    pass
+                eos_kwargs_gas = {
+                    "Pcs": constants.Pcs, "Tcs": constants.Tcs,
+                    "omegas": constants.omegas, "kijs": pr_kijs,
+                }
+                gas = CEOSGas(
+                    PRMIX, eos_kwargs_gas,
+                    HeatCapacityGases=properties.HeatCapacityGases,
+                    T=T, P=P, zs=zs_norm,
+                )
 
-            eos_kwargs = {
-                "Pcs": constants.Pcs,
-                "Tcs": constants.Tcs,
-                "omegas": constants.omegas,
-                "kijs": kijs,
-            }
+                # Liquid phase: GibbsExcessLiquid with NRTL or UNIQUAC
+                if property_package == "NRTL":
+                    try:
+                        taus = IPDB.get_ip_asymmetric_matrix("ChemSep NRTL", constants.CASs, "bij")
+                        alphas = IPDB.get_ip_asymmetric_matrix("ChemSep NRTL", constants.CASs, "alphaij")
+                    except Exception:
+                        n = len(comp_names)
+                        taus = [[0.0] * n for _ in range(n)]
+                        alphas = [[0.3] * n for _ in range(n)]
+                        logger.warning("NRTL BIPs not found for %s, using zero-interaction matrix", comp_names)
+                    ge_model = NRTLModel(T=T, xs=zs_norm, tau_bs=taus, alpha_cs=alphas)
+                else:  # UNIQUAC
+                    try:
+                        taus = IPDB.get_ip_asymmetric_matrix("ChemSep UNIQUAC", constants.CASs, "bij")
+                    except Exception:
+                        n = len(comp_names)
+                        taus = [[0.0] * n for _ in range(n)]
+                        logger.warning("UNIQUAC BIPs not found for %s, using zero-interaction matrix", comp_names)
+                    # UNIQUAC r/q: use UNIFAC dimensionless parameters, NOT Van der Waals volumes/areas
+                    rs = constants.UNIFAC_Rs if constants.UNIFAC_Rs is not None else [2.0] * len(comp_names)
+                    qs = constants.UNIFAC_Qs if constants.UNIFAC_Qs is not None else [1.8] * len(comp_names)
+                    # Individual None entries: fallback per-component
+                    rs = [r if r is not None else 2.0 for r in rs]
+                    qs = [q if q is not None else 1.8 for q in qs]
+                    ge_model = UNIQUACModel(
+                        T=T, xs=zs_norm, tau_bs=taus,
+                        rs=rs, qs=qs,
+                    )
 
-            # Select EOS based on property package
-            EOS_class = PRMIX  # default
-            if property_package == "SRK" and SRKMIX is not None:
-                EOS_class = SRKMIX
+                liq = GibbsExcessLiquid(
+                    VaporPressures=properties.VaporPressures,
+                    HeatCapacityGases=properties.HeatCapacityGases,
+                    VolumeLiquids=properties.VolumeLiquids,
+                    GibbsExcessModel=ge_model,
+                    T=T, P=P, zs=zs_norm,
+                )
+            else:
+                # Cubic EOS (PR or SRK) for both phases
+                bip_source = "ChemSep SRK" if property_package == "SRK" else "ChemSep PR"
+                try:
+                    kijs = IPDB.get_ip_asymmetric_matrix(bip_source, constants.CASs, "kij")
+                except Exception:
+                    kijs = [[0.0] * len(comp_names) for _ in comp_names]
 
-            gas = CEOSGas(
-                EOS_class, eos_kwargs,
-                HeatCapacityGases=properties.HeatCapacityGases,
-                T=T, P=P, zs=zs_norm,
-            )
-            liq = CEOSLiquid(
-                EOS_class, eos_kwargs,
-                HeatCapacityGases=properties.HeatCapacityGases,
-                T=T, P=P, zs=zs_norm,
-            )
+                eos_kwargs = {
+                    "Pcs": constants.Pcs,
+                    "Tcs": constants.Tcs,
+                    "omegas": constants.omegas,
+                    "kijs": kijs,
+                }
+
+                EOS_class = PRMIX  # default
+                if property_package == "SRK" and SRKMIX is not None:
+                    EOS_class = SRKMIX
+
+                gas = CEOSGas(
+                    EOS_class, eos_kwargs,
+                    HeatCapacityGases=properties.HeatCapacityGases,
+                    T=T, P=P, zs=zs_norm,
+                )
+                liq = CEOSLiquid(
+                    EOS_class, eos_kwargs,
+                    HeatCapacityGases=properties.HeatCapacityGases,
+                    T=T, P=P, zs=zs_norm,
+                )
             # Use FlashPureVLS for single-component (FlashVL fails with div/0)
             if len(comp_names) == 1:
                 flasher = FlashPureVLS(constants, properties, liquids=[liq], gas=gas, solids=[])
@@ -685,17 +752,19 @@ class DWSIMEngine:
     async def _simulate_basic(
         self, nodes: list[dict], edges: list[dict],
         property_package: str = "PengRobinson",
+        convergence_settings: dict[str, Any] | None = None,
+        progress_callback: Any = None,
     ) -> dict[str, Any]:
         try:
             logs: list[str] = []
             equipment_results: dict[str, Any] = {}
             has_errors = False
 
-            # NRTL warning (T2-18)
-            if property_package == "NRTL":
+            # Activity coefficient model info
+            if property_package in ("NRTL", "UNIQUAC"):
                 logs.append(
-                    "WARNING: NRTL not implemented, using Peng-Robinson fallback. "
-                    "Results may be inaccurate for non-ideal liquid mixtures."
+                    f"Using {property_package} activity coefficient model for liquid phase, "
+                    "Peng-Robinson EOS for gas phase."
                 )
 
             # Build adjacency with target handles for port-aware routing
@@ -714,1120 +783,2098 @@ class DWSIMEngine:
             node_map = {n["id"]: n for n in nodes}
             sorted_ids, cycle_ids = self._topological_sort(nodes, edges)
 
-            # Recycle loop detection (T2-03)
+            # ----------------------------------------------------------
+            # T4-4: Unit operation topology validation
+            # ----------------------------------------------------------
+            _INLET_REQUIREMENTS: dict[str, int] = {
+                "Mixer": 2, "HeatExchanger": 2, "Absorber": 2, "Stripper": 2,
+            }
+            _OUTLET_REQUIREMENTS: dict[str, int] = {
+                "Splitter": 2, "Separator": 2, "DistillationColumn": 2,
+                "Absorber": 2, "Stripper": 2,
+            }
+            for node in nodes:
+                nid = node.get("id", "")
+                ntype = node.get("type", "")
+                nname = node.get("name", nid)
+                n_inlets = len(upstream.get(nid, []))
+                n_outlets = len(downstream.get(nid, []))
+                min_in = _INLET_REQUIREMENTS.get(ntype, 0)
+                min_out = _OUTLET_REQUIREMENTS.get(ntype, 0)
+                if min_in > 0 and n_inlets < min_in:
+                    logs.append(
+                        f"WARNING: {nname} ({ntype}) expects at least {min_in} "
+                        f"inlet(s) but has {n_inlets} — simulation may use default feed conditions"
+                    )
+                if min_out > 0 and n_outlets < min_out:
+                    logs.append(
+                        f"WARNING: {nname} ({ntype}) expects at least {min_out} "
+                        f"outlet(s) but has {n_outlets} — some products will not propagate downstream"
+                    )
+
+            # ----------------------------------------------------------
+            # T4-2: Tear-stream convergence for recycle loops
+            # ----------------------------------------------------------
+            # Detect tear edges: back-edges where target appears before source in topo order
+            sorted_set = set()
+            tear_edges: list[dict] = []
+            non_tear_edges = list(edges)
             if cycle_ids:
-                cycle_names = [node_map.get(cid, {}).get("name", cid) for cid in cycle_ids]
-                logs.append(
-                    f"WARNING: Recycle loop detected involving: {', '.join(cycle_names)}. "
-                    "Tear-stream convergence not implemented — results for cycle nodes may be inaccurate."
-                )
+                order_idx = {nid: i for i, nid in enumerate(sorted_ids)}
+                tear_edges = []
+                non_tear_keep = []
+                for edge in edges:
+                    src = edge.get("source", "")
+                    tgt = edge.get("target", "")
+                    if src in order_idx and tgt in order_idx and order_idx[tgt] <= order_idx[src]:
+                        tear_edges.append(edge)
+                    else:
+                        non_tear_keep.append(edge)
+                non_tear_edges = non_tear_keep if tear_edges else list(edges)
+                if tear_edges:
+                    tear_names = []
+                    for te in tear_edges:
+                        sn = node_map.get(te["source"], {}).get("name", te["source"])
+                        tn = node_map.get(te["target"], {}).get("name", te["target"])
+                        tear_names.append(f"{sn}→{tn}")
+                    logs.append(f"Tear streams identified: {', '.join(tear_names)}")
 
-            # Outlet conditions per (node_id, port_id) – in SI units internally
-            port_conditions: dict[tuple[str, str], dict[str, Any]] = {}
+            conv_settings = convergence_settings or {}
+            max_iterations = conv_settings.get("max_iter", 50)
+            tolerance = conv_settings.get("tolerance", 1e-4)
+            damping = conv_settings.get("damping", 0.5)
+            converged_recycle = not bool(tear_edges)  # True if no recycle
+            actual_iterations = 1
 
-            for nid in sorted_ids:
-                node = node_map.get(nid)
-                if not node:
-                    continue
+            # Wegstein acceleration state: stores previous two iterates per tear edge key
+            wegstein_prev: dict[str, list[float]] = {}  # key → [x_prev, g_prev]
 
-                try:
-                    ntype = node.get("type", "")
-                    if ntype not in EQUIPMENT_TYPE_MAP:
-                        logs.append(f"Skipping unknown type '{ntype}' for node {nid}")
+            # Initialize tear stream conditions with default feed for first pass
+            tear_stream_conditions: dict[str, dict[str, Any]] = {}
+            for te in tear_edges:
+                te_key = f"{te['source']}_{te.get('sourceHandle', 'out-1')}"
+                tear_stream_conditions[te_key] = dict(_DEFAULT_FEED)
+
+            for iteration in range(1, max_iterations + 1):
+                actual_iterations = iteration
+
+                # Outlet conditions per (node_id, port_id) – in SI units internally
+                port_conditions: dict[tuple[str, str], dict[str, Any]] = {}
+                equipment_results = {}
+                has_errors = False
+
+                # Inject tear stream conditions so downstream equipment can see them
+                for te in tear_edges:
+                    src = te.get("source", "")
+                    sh = te.get("sourceHandle", "out-1")
+                    te_key = f"{src}_{sh}"
+                    if te_key in tear_stream_conditions:
+                        port_conditions[(src, sh)] = dict(tear_stream_conditions[te_key])
+
+                for nid in sorted_ids:
+                    node = node_map.get(nid)
+                    if not node:
                         continue
 
-                    params = node.get("parameters", {})
-                    name = node.get("name", nid)
+                    try:
+                        ntype = node.get("type", "")
+                        if ntype not in EQUIPMENT_TYPE_MAP:
+                            logs.append(f"Skipping unknown type '{ntype}' for node {nid}")
+                            continue
 
-                    # Collect inlet conditions (SI), tagged with targetHandle
-                    inlets: list[dict[str, Any]] = []
-                    inlet_handles: list[str] = []  # parallel list of target handles
-                    for src_id, _sh, tgt_handle in upstream.get(nid, []):
-                        # Find the matching source outlet port
-                        for tgt_id, sh2, _th2 in downstream.get(src_id, []):
-                            if tgt_id == nid:
-                                cond = port_conditions.get((src_id, sh2))
-                                if cond:
-                                    inlets.append(cond)
-                                    inlet_handles.append(tgt_handle)
-                                break
+                        params = node.get("parameters", {})
+                        name = node.get("name", nid)
 
-                    # If no upstream connections, build feed from node parameters
-                    if not inlets:
-                        inlets = [self._build_feed_from_params(params)]
+                        # Collect inlet conditions (SI), tagged with targetHandle
+                        inlets: list[dict[str, Any]] = []
+                        inlet_handles: list[str] = []  # parallel list of target handles
+                        for src_id, _sh, tgt_handle in upstream.get(nid, []):
+                            # Find the matching source outlet port
+                            for tgt_id, sh2, _th2 in downstream.get(src_id, []):
+                                if tgt_id == nid:
+                                    cond = port_conditions.get((src_id, sh2))
+                                    if cond:
+                                        inlets.append(cond)
+                                        inlet_handles.append(tgt_handle)
+                                    break
 
-                    # ----------------------------------------------------------
-                    # Equipment-specific calculations (all SI internally)
-                    # ----------------------------------------------------------
-                    eq_res: dict[str, Any] = {"equipment_type": ntype, "name": name}
-                    outlets: dict[str, dict[str, Any]] = {}
+                        # If no upstream connections, build feed from node parameters
+                        if not inlets:
+                            inlets = [self._build_feed_from_params(params)]
 
-                    if ntype in ("Heater", "Cooler"):
-                        inlet = inlets[0]
-                        T_in = inlet["temperature"]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        comp = inlet.get("composition", {})
-                        dp = _kpa_to_pa(float(params.get("pressureDrop", 0)))
-                        P_out = P_in - dp
+                        # ----------------------------------------------------------
+                        # Equipment-specific calculations (all SI internally)
+                        # ----------------------------------------------------------
+                        eq_res: dict[str, Any] = {"equipment_type": ntype, "name": name}
+                        outlets: dict[str, dict[str, Any]] = {}
 
-                        # Outlet temp: user-specified or default
-                        T_out_c = params.get("outletTemperature")
-                        duty_kw = params.get("duty")
+                        if ntype in ("Heater", "Cooler"):
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+                            dp = _kpa_to_pa(float(params.get("pressureDrop", 0)))
+                            P_out = P_in - dp
 
-                        # Try thermo flash for real Cp
-                        cp = _estimate_cp(comp)  # composition-aware fallback
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-                        flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
-                        flash_out = None
-                        used_thermo = False
+                            # Outlet temp: user-specified or default
+                            T_out_c = params.get("outletTemperature")
+                            duty_kw = params.get("duty")
 
-                        if T_out_c is not None:
-                            T_out = _c_to_k(float(T_out_c))
-                            # Use real enthalpy difference if thermo available
-                            flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                            if flash_in and flash_out and flash_in["MW_mix"] > 0:
-                                # H is J/mol, convert to J/kg: H / (MW/1000)
-                                mw_kg = flash_in["MW_mix"] / 1000.0  # kg/mol
-                                H_in = flash_in["H"] / mw_kg if mw_kg > 0 else 0  # J/kg
-                                H_out = flash_out["H"] / mw_kg if mw_kg > 0 else 0
-                                duty_w = mf * (H_out - H_in)
-                                used_thermo = True
+                            # Try thermo flash for real Cp
+                            cp = _estimate_cp(comp)  # composition-aware fallback
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                            flash_out = None
+                            used_thermo = False
+
+                            if T_out_c is not None:
+                                T_out = _c_to_k(float(T_out_c))
+                                # Use real enthalpy difference if thermo available
+                                flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                                if flash_in and flash_out and flash_in["MW_mix"] > 0:
+                                    # H is J/mol, convert to J/kg: H / (MW/1000)
+                                    mw_kg = flash_in["MW_mix"] / 1000.0  # kg/mol
+                                    H_in = flash_in["H"] / mw_kg if mw_kg > 0 else 0  # J/kg
+                                    H_out = flash_out["H"] / mw_kg if mw_kg > 0 else 0
+                                    duty_w = mf * (H_out - H_in)
+                                    used_thermo = True
+                                else:
+                                    duty_w = mf * cp * (T_out - T_in)
+                            elif duty_kw is not None and float(duty_kw) != 0:
+                                duty_w = _kw_to_w(float(duty_kw))
+                                if ntype == "Cooler":
+                                    duty_w = -abs(duty_w)
+                                # Cp-based estimate first
+                                T_out = T_in + duty_w / (mf * cp) if mf > 0 else T_in
+                                # HP flash for real T_out (T2-05)
+                                if flash_in and flash_in.get("flasher") and flash_in["MW_mix"] > 0:
+                                    try:
+                                        mw_kg = flash_in["MW_mix"] / 1000.0
+                                        H_in_mol = flash_in["H"]  # J/mol
+                                        H_out_mol = H_in_mol + (duty_w / mf) * mw_kg if mf > 0 else H_in_mol
+                                        flasher = flash_in["flasher"]
+                                        state_out = flasher.flash(H=H_out_mol, P=P_out, zs=flash_in["zs"])
+                                        T_out = state_out.T
+                                        flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                                        used_thermo = True
+                                    except Exception as exc:
+                                        logger.warning("Heater/Cooler HP flash failed: %s", exc)
                             else:
+                                T_out = T_in + (50 if ntype == "Heater" else -50)
                                 duty_w = mf * cp * (T_out - T_in)
-                        elif duty_kw is not None and float(duty_kw) != 0:
-                            duty_w = _kw_to_w(float(duty_kw))
-                            if ntype == "Cooler":
-                                duty_w = -abs(duty_w)
-                            # Cp-based estimate first
-                            T_out = T_in + duty_w / (mf * cp) if mf > 0 else T_in
-                            # HP flash for real T_out (T2-05)
-                            if flash_in and flash_in.get("flasher") and flash_in["MW_mix"] > 0:
-                                try:
-                                    mw_kg = flash_in["MW_mix"] / 1000.0
-                                    H_in_mol = flash_in["H"]  # J/mol
-                                    H_out_mol = H_in_mol + (duty_w / mf) * mw_kg if mf > 0 else H_in_mol
-                                    flasher = flash_in["flasher"]
-                                    state_out = flasher.flash(H=H_out_mol, P=P_out, zs=flash_in["zs"])
-                                    T_out = state_out.T
-                                    flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                                    used_thermo = True
-                                except Exception as exc:
-                                    logger.warning("Heater/Cooler HP flash failed: %s", exc)
-                        else:
-                            T_out = T_in + (50 if ntype == "Heater" else -50)
-                            duty_w = mf * cp * (T_out - T_in)
 
-                        # Flash outlet for VF regardless of mode (T2-05)
-                        if not flash_out and comp_names:
-                            flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                            # Flash outlet for VF regardless of mode (T2-05)
+                            if not flash_out and comp_names:
+                                flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
 
-                        eq_res["duty"] = round(_w_to_kw(duty_w), 3)
-                        eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
-                        eq_res["pressureDrop"] = round(_pa_to_kpa(dp), 3)
+                            eq_res["duty"] = round(_w_to_kw(duty_w), 3)
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                            eq_res["pressureDrop"] = round(_pa_to_kpa(dp), 3)
 
-                        # Get VF from flash at outlet conditions
-                        vf_out = 0.0
-                        if flash_out:
-                            vf_out = flash_out.get("VF", 0.0)
+                            # Get VF from flash at outlet conditions
+                            vf_out = 0.0
+                            if flash_out:
+                                vf_out = flash_out.get("VF", 0.0)
 
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        # Store real enthalpy for downstream propagation
-                        if flash_out and flash_out.get("MW_mix", 0) > 0:
-                            mw_kg_out = flash_out["MW_mix"] / 1000.0
-                            outlet["enthalpy"] = flash_out["H"] / mw_kg_out  # J/kg
-                        else:
-                            outlet["enthalpy"] = cp * (T_out - _T_REF)
-                        outlet["vapor_fraction"] = vf_out
-                        outlet["composition"] = dict(comp)
-                        outlets["out-1"] = outlet
-                        engine_note = " (thermo)" if used_thermo else ""
-                        logs.append(f"{name}: duty = {eq_res['duty']:.1f} kW, T_out = {eq_res['outletTemperature']:.1f} °C{engine_note}")
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            # Store real enthalpy for downstream propagation
+                            if flash_out and flash_out.get("MW_mix", 0) > 0:
+                                mw_kg_out = flash_out["MW_mix"] / 1000.0
+                                outlet["enthalpy"] = flash_out["H"] / mw_kg_out  # J/kg
+                            else:
+                                outlet["enthalpy"] = cp * (T_out - _T_REF)
+                            outlet["vapor_fraction"] = vf_out
+                            outlet["composition"] = dict(comp)
+                            outlets["out-1"] = outlet
+                            engine_note = " (thermo)" if used_thermo else ""
+                            logs.append(f"{name}: duty = {eq_res['duty']:.1f} kW, T_out = {eq_res['outletTemperature']:.1f} °C{engine_note}")
 
-                    elif ntype == "Pump":
-                        inlet = inlets[0]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        if mf <= 0:
-                            logs.append(f"WARNING: {name} mass flow ≤ 0, clamping to 1e-10")
-                            mf = 1e-10
-                        T_in = inlet["temperature"]
-                        comp = inlet.get("composition", {})
+                        elif ntype == "Pump":
+                            inlet = inlets[0]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            if mf <= 0:
+                                logs.append(f"WARNING: {name} mass flow ≤ 0, clamping to 1e-10")
+                                mf = 1e-10
+                            T_in = inlet["temperature"]
+                            comp = inlet.get("composition", {})
 
-                        # Density from _get_density helper (T2-02a, T2-15)
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-                        rho = self._get_density(comp_names, zs, T_in, P_in, property_package)
-                        flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
-                        if flash_in:
-                            vf_in = flash_in.get("VF", 0)
-                            if vf_in > 0.5:
-                                logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — pump expects liquid feed")
-                            elif vf_in > 0.01:
-                                logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — significant vapor in pump feed")
+                            # Density from _get_density helper (T2-02a, T2-15)
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            rho = self._get_density(comp_names, zs, T_in, P_in, property_package)
+                            flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                            if flash_in:
+                                vf_in = flash_in.get("VF", 0)
+                                if vf_in > 0.5:
+                                    logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — pump expects liquid feed")
+                                elif vf_in > 0.01:
+                                    logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — significant vapor in pump feed")
 
-                        # Guard rho (T2-15)
-                        if rho <= 0:
-                            logs.append(f"WARNING: {name} density ≤ 0, using 1000 kg/m³ fallback")
-                            rho = 1000.0
+                            # Guard rho (T2-15)
+                            if rho <= 0:
+                                logs.append(f"WARNING: {name} density ≤ 0, using 1000 kg/m³ fallback")
+                                rho = 1000.0
 
-                        P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 2))))
-                        eff = float(params.get("efficiency", 75)) / 100.0
-                        if eff <= 0:
-                            eff = 0.75
+                            P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 2))))
+                            eff = float(params.get("efficiency", 75)) / 100.0
+                            if eff <= 0:
+                                eff = 0.75
 
-                        # Ideal work: W_ideal = V·ΔP = m·ΔP/ρ
-                        w_ideal = mf * (P_out - P_in) / rho  # W
-                        w_actual = w_ideal / eff  # W
+                            # Pump curve mode: use rated flow/head to compute head and efficiency
+                            use_pump_curve = bool(params.get("pumpCurve", False))
+                            if use_pump_curve:
+                                rated_flow_m3h = float(params.get("ratedFlow", 10))
+                                rated_head_m = float(params.get("ratedHead", 50))
+                                # Actual volumetric flow
+                                Q_m3s = mf / rho if rho > 0 else 0
+                                Q_m3h = Q_m3s * 3600
+                                # Simple quadratic pump curve: H = H_rated * (1 - 0.5*(Q/Q_rated)^2)
+                                Q_ratio = Q_m3h / rated_flow_m3h if rated_flow_m3h > 0 else 0
+                                head_m = rated_head_m * max(0.0, 1.0 - 0.5 * Q_ratio ** 2)
+                                P_out = P_in + head_m * rho * 9.81  # Pa
+                                logs.append(f"{name}: pump curve Q={Q_m3h:.1f} m³/h, H={head_m:.1f} m")
 
-                        # Temperature rise from pump inefficiency — Cp from flash (T2-13)
-                        cp = _estimate_cp(comp)
-                        if flash_in and flash_in.get("Cp") and flash_in["MW_mix"] > 0:
-                            mw_kg = flash_in["MW_mix"] / 1000.0
-                            cp = flash_in["Cp"] / mw_kg  # J/(kg·K)
-                        dT_friction = (w_actual - w_ideal) / (mf * cp) if mf > 0 else 0
-                        T_out = T_in + dT_friction
+                            # NPSH check
+                            npsh_a = float(params.get("npshAvailable", 0))
+                            if npsh_a > 0:
+                                npsh_r = 3.0  # default NPSH_required, m
+                                if npsh_a < npsh_r:
+                                    logs.append(f"WARNING: {name} NPSH_available ({npsh_a:.1f} m) < NPSH_required ({npsh_r:.1f} m) — cavitation risk")
+                                eq_res["npshAvailable"] = round(npsh_a, 1)
 
-                        eq_res["work"] = round(_w_to_kw(w_actual), 3)
-                        eq_res["efficiency"] = round(eff * 100, 1)
-                        eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
-                        eq_res["temperatureRise"] = round(dT_friction, 3)
+                            # Ideal work: W_ideal = V·ΔP = m·ΔP/ρ
+                            w_ideal = mf * (P_out - P_in) / rho  # W
+                            w_actual = w_ideal / eff  # W
 
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        # Thermo-based outlet enthalpy for reference state consistency
-                        flash_pump_out = self._flash_tp(list(comp.keys()), [float(v) for v in comp.values()], T_out, P_out, property_package)
-                        if flash_pump_out and flash_pump_out.get("MW_mix", 0) > 0:
-                            outlet["enthalpy"] = flash_pump_out["H"] / (flash_pump_out["MW_mix"] / 1000.0)
-                        else:
-                            outlet["enthalpy"] = inlet["enthalpy"] + (w_actual / mf if mf > 0 else 0)
-                        outlet["composition"] = dict(comp)
-                        outlets["out-1"] = outlet
-                        logs.append(f"{name}: work = {eq_res['work']:.1f} kW, ΔT = {dT_friction:.2f} K")
-
-                    elif ntype == "Compressor":
-                        inlet = inlets[0]
-                        T_in = inlet["temperature"]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        if mf <= 0:
-                            logs.append(f"WARNING: {name} mass flow ≤ 0, clamping to 1e-10")
-                            mf = 1e-10
-                        comp = inlet.get("composition", {})
-
-                        # Guard P_in (T2-15)
-                        if P_in <= 0:
-                            logs.append(f"WARNING: {name} inlet pressure ≤ 0, using 101325 Pa")
-                            P_in = 101325.0
-
-                        P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 3))))
-                        if P_out < P_in:
-                            logs.append(f"WARNING: {name} P_out < P_in — this is expansion, not compression")
-
-                        eff = float(params.get("efficiency", 75)) / 100.0
-                        if eff <= 0:
-                            eff = 0.75
-
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-                        flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
-                        used_thermo = False
-                        used_entropy = False
-
-                        if flash_in:
-                            vf_in = flash_in.get("VF", 1.0)
-                            if vf_in < 0.5:
-                                logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — compressor expects vapor feed")
-                            elif vf_in < 0.99:
-                                logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — wet gas in compressor feed")
-
-                        # Preferred: entropy-based isentropic calculation (Fix 5)
-                        if flash_in and flash_in.get("S") and flash_in.get("flasher"):
-                            try:
-                                S_in = flash_in["S"]     # J/(mol·K)
-                                H_in_mol = flash_in["H"]  # J/mol
-                                flasher = flash_in["flasher"]
-                                zs_norm = flash_in["zs"]
-                                mw_kg = flash_in["MW_mix"] / 1000.0  # kg/mol
-
-                                # Isentropic outlet: flash at (S_in, P_out)
-                                state_isen = flasher.flash(S=S_in, P=P_out, zs=zs_norm)
-                                H_out_isen = state_isen.H()  # J/mol
-
-                                # Actual work: W = (H_isen - H_in) / eta
-                                dH_isen = H_out_isen - H_in_mol  # J/mol
-                                dH_actual = dH_isen / eff         # J/mol
-                                H_out_actual = H_in_mol + dH_actual
-
-                                # Actual outlet T: flash at (H_actual, P_out)
-                                state_actual = flasher.flash(H=H_out_actual, P=P_out, zs=zs_norm)
-                                T_out = state_actual.T
-
-                                work_w = mf * dH_actual / mw_kg if mw_kg > 0 else 0  # W
-                                used_thermo = True
-                                used_entropy = True
-                            except Exception as exc:
-                                logger.warning("Compressor entropy flash failed: %s, falling back to gamma", exc)
-                                used_entropy = False
-
-                        if not used_entropy:
-                            # Fallback: gamma-based method with composition-weighted gamma (T2-04)
-                            gamma = 1.4
-                            if comp:
-                                gamma_sum = 0.0
-                                z_sum = 0.0
-                                for c_name, z_frac in comp.items():
-                                    g = _GAMMA_TABLE.get(c_name.lower(), _GAMMA_TABLE.get(c_name, 1.4))
-                                    gamma_sum += z_frac * g
-                                    z_sum += z_frac
-                                if z_sum > 0:
-                                    gamma = gamma_sum / z_sum
+                            # Temperature rise from pump inefficiency — Cp from flash (T2-13)
                             cp = _estimate_cp(comp)
-                            if flash_in and flash_in.get("Cp") is not None:
+                            if flash_in and flash_in.get("Cp") and flash_in["MW_mix"] > 0:
+                                mw_kg = flash_in["MW_mix"] / 1000.0
+                                cp = flash_in["Cp"] / mw_kg  # J/(kg·K)
+                            dT_friction = (w_actual - w_ideal) / (mf * cp) if mf > 0 else 0
+                            T_out = T_in + dT_friction
+
+                            eq_res["work"] = round(_w_to_kw(w_actual), 3)
+                            eq_res["efficiency"] = round(eff * 100, 1)
+                            eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
+                            eq_res["temperatureRise"] = round(dT_friction, 3)
+
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            # Thermo-based outlet enthalpy for reference state consistency
+                            flash_pump_out = self._flash_tp(list(comp.keys()), [float(v) for v in comp.values()], T_out, P_out, property_package)
+                            if flash_pump_out and flash_pump_out.get("MW_mix", 0) > 0:
+                                outlet["enthalpy"] = flash_pump_out["H"] / (flash_pump_out["MW_mix"] / 1000.0)
+                            else:
+                                outlet["enthalpy"] = inlet["enthalpy"] + (w_actual / mf if mf > 0 else 0)
+                            outlet["composition"] = dict(comp)
+                            outlets["out-1"] = outlet
+                            logs.append(f"{name}: work = {eq_res['work']:.1f} kW, ΔT = {dT_friction:.2f} K")
+
+                        elif ntype == "Compressor":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            if mf <= 0:
+                                logs.append(f"WARNING: {name} mass flow ≤ 0, clamping to 1e-10")
+                                mf = 1e-10
+                            comp = inlet.get("composition", {})
+
+                            # Guard P_in (T2-15)
+                            if P_in <= 0:
+                                logs.append(f"WARNING: {name} inlet pressure ≤ 0, using 101325 Pa")
+                                P_in = 101325.0
+
+                            P_out_final = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 3))))
+                            if P_out_final < P_in:
+                                logs.append(f"WARNING: {name} P_out < P_in — this is expansion, not compression")
+
+                            eff = float(params.get("efficiency", 75)) / 100.0
+                            if eff <= 0:
+                                eff = 0.75
+
+                            n_stages = max(1, int(params.get("stages", 1)))
+                            intercool_temp = _c_to_k(float(params.get("intercoolTemp", 35)))
+
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            flash_in = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                            used_thermo = False
+                            used_entropy = False
+
+                            if flash_in:
+                                vf_in = flash_in.get("VF", 1.0)
+                                if vf_in < 0.5:
+                                    logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — compressor expects vapor feed")
+                                elif vf_in < 0.99:
+                                    logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — wet gas in compressor feed")
+
+                            # Multi-stage compression
+                            if n_stages > 1:
+                                r_stage = (P_out_final / P_in) ** (1.0 / n_stages) if P_in > 0 else 1.0
+                                total_work = 0.0
+                                T_stage_in = T_in
+                                P_stage_in = P_in
+                                stage_data = []
+                                for stg in range(n_stages):
+                                    P_stage_out = P_stage_in * r_stage
+                                    if stg == n_stages - 1:
+                                        P_stage_out = P_out_final  # ensure exact final pressure
+
+                                    # Use gamma method for each stage
+                                    gamma_stg = 1.4
+                                    cp_stg = _estimate_cp(comp)
+                                    flash_stg = self._flash_tp(comp_names, zs, T_stage_in, P_stage_in, property_package)
+                                    if flash_stg and flash_stg.get("Cp") is not None:
+                                        try:
+                                            Cp_mol = flash_stg["Cp"]
+                                            R_gas = 8.314
+                                            Cv_mol = Cp_mol - R_gas
+                                            if Cv_mol > 0:
+                                                gamma_stg = Cp_mol / Cv_mol
+                                            mw_kg = flash_stg["MW_mix"] / 1000.0
+                                            if mw_kg > 0:
+                                                cp_stg = Cp_mol / mw_kg
+                                        except Exception:
+                                            pass
+
+                                    ratio_stg = P_stage_out / P_stage_in if P_stage_in > 0 else 1.0
+                                    T_stg_isen = T_stage_in * (ratio_stg ** ((gamma_stg - 1) / gamma_stg))
+                                    T_stg_out = T_stage_in + (T_stg_isen - T_stage_in) / eff
+                                    w_stg = mf * cp_stg * (T_stg_out - T_stage_in)
+                                    total_work += w_stg
+
+                                    stage_data.append({
+                                        "stage": stg + 1,
+                                        "T_in": round(_k_to_c(T_stage_in), 1),
+                                        "T_out": round(_k_to_c(T_stg_out), 1),
+                                        "P_in": round(_pa_to_kpa(P_stage_in), 1),
+                                        "P_out": round(_pa_to_kpa(P_stage_out), 1),
+                                        "work_kW": round(_w_to_kw(w_stg), 2),
+                                    })
+
+                                    # Intercooling: cool back to intercool_temp before next stage
+                                    if stg < n_stages - 1:
+                                        T_stage_in = intercool_temp
+                                    else:
+                                        T_stage_in = T_stg_out
+                                    P_stage_in = P_stage_out
+
+                                T_out = T_stage_in
+                                work_w = total_work
+                                P_out = P_out_final
+                                used_thermo = True
+                                eq_res["stages"] = n_stages
+                                eq_res["stage_data"] = stage_data
+                                logs.append(f"{name}: {n_stages}-stage compression, total work = {_w_to_kw(total_work):.1f} kW")
+                            else:
+                                P_out = P_out_final
+                                # Preferred: entropy-based isentropic calculation (Fix 5)
+                                if flash_in and flash_in.get("S") and flash_in.get("flasher"):
+                                    try:
+                                        S_in = flash_in["S"]     # J/(mol·K)
+                                        H_in_mol = flash_in["H"]  # J/mol
+                                        flasher = flash_in["flasher"]
+                                        zs_norm = flash_in["zs"]
+                                        mw_kg = flash_in["MW_mix"] / 1000.0  # kg/mol
+
+                                        # Isentropic outlet: flash at (S_in, P_out)
+                                        state_isen = flasher.flash(S=S_in, P=P_out, zs=zs_norm)
+                                        H_out_isen = state_isen.H()  # J/mol
+
+                                        # Actual work: W = (H_isen - H_in) / eta
+                                        dH_isen = H_out_isen - H_in_mol  # J/mol
+                                        dH_actual = dH_isen / eff         # J/mol
+                                        H_out_actual = H_in_mol + dH_actual
+
+                                        # Actual outlet T: flash at (H_actual, P_out)
+                                        state_actual = flasher.flash(H=H_out_actual, P=P_out, zs=zs_norm)
+                                        T_out = state_actual.T
+
+                                        work_w = mf * dH_actual / mw_kg if mw_kg > 0 else 0  # W
+                                        used_thermo = True
+                                        used_entropy = True
+                                    except Exception as exc:
+                                        logger.warning("Compressor entropy flash failed: %s, falling back to gamma", exc)
+                                        used_entropy = False
+
+                                if not used_entropy:
+                                    # Fallback: gamma-based method with composition-weighted gamma (T2-04)
+                                    gamma = 1.4
+                                    if comp:
+                                        gamma_sum = 0.0
+                                        z_sum = 0.0
+                                        for c_name, z_frac in comp.items():
+                                            g = _GAMMA_TABLE.get(c_name.lower(), _GAMMA_TABLE.get(c_name, 1.4))
+                                            gamma_sum += z_frac * g
+                                            z_sum += z_frac
+                                        if z_sum > 0:
+                                            gamma = gamma_sum / z_sum
+                                    cp = _estimate_cp(comp)
+                                    if flash_in and flash_in.get("Cp") is not None:
+                                        try:
+                                            Cp_mol = flash_in["Cp"]
+                                            R = 8.314
+                                            Cv_mol = Cp_mol - R
+                                            if Cv_mol > 0:
+                                                gamma = Cp_mol / Cv_mol
+                                            mw_kg = flash_in["MW_mix"] / 1000.0
+                                            if mw_kg > 0:
+                                                cp = Cp_mol / mw_kg
+                                            used_thermo = True
+                                        except Exception:
+                                            pass
+
+                                    ratio = P_out / P_in if P_in > 0 else 1.0
+                                    T_out_isen = T_in * (ratio ** ((gamma - 1) / gamma))
+                                    T_out = T_in + (T_out_isen - T_in) / eff
+                                    work_w = mf * cp * (T_out - T_in)
+
+                            eq_res["work"] = round(_w_to_kw(work_w), 3)
+                            eq_res["efficiency"] = round(eff * 100, 1)
+                            eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            # Thermo-based outlet enthalpy for reference state consistency
+                            flash_comp_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                            if flash_comp_out and flash_comp_out.get("MW_mix", 0) > 0:
+                                outlet["enthalpy"] = flash_comp_out["H"] / (flash_comp_out["MW_mix"] / 1000.0)
+                            else:
+                                outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
+                            outlet["composition"] = dict(comp)
+                            outlets["out-1"] = outlet
+                            engine_note = " (entropy)" if used_entropy else (" (γ)" if used_thermo else "")
+                            logs.append(f"{name}: work = {eq_res['work']:.1f} kW, T_out = {_k_to_c(T_out):.1f} °C{engine_note}")
+
+                        elif ntype == "Valve":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+
+                            P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in / 2))))
+
+                            # Isenthalpic expansion – Joule-Thomson effect (Fix 6)
+                            T_out = T_in  # default: ideal gas approximation
+                            vf_out = inlet.get("vapor_fraction", 0.0)
+                            comp_names = list(comp.keys())
+                            zs_v = [float(v) for v in comp.values()]
+
+                            # Preferred: thermo HP flash for multi-component JT
+                            if comp_names and len(comp_names) >= 1:
+                                flash_in = self._flash_tp(comp_names, zs_v, T_in, P_in, property_package)
+                                if flash_in and flash_in.get("flasher"):
+                                    try:
+                                        H_in_mol = flash_in["H"]  # J/mol
+                                        flasher = flash_in["flasher"]
+                                        zs_norm = flash_in["zs"]
+                                        state_out = flasher.flash(H=H_in_mol, P=P_out, zs=zs_norm)
+                                        T_out = state_out.T
+                                        vf_out = state_out.VF if state_out.VF is not None else 0.0
+                                    except Exception as exc:
+                                        logger.warning("Valve HP flash failed: %s", exc)
+                            elif _coolprop_available and len(comp) == 1:
+                                # CoolProp fallback for single component
+                                comp_name = list(comp.keys())[0]
                                 try:
-                                    Cp_mol = flash_in["Cp"]
-                                    R = 8.314
-                                    Cv_mol = Cp_mol - R
-                                    if Cv_mol > 0:
-                                        gamma = Cp_mol / Cv_mol
-                                    mw_kg = flash_in["MW_mix"] / 1000.0
-                                    if mw_kg > 0:
-                                        cp = Cp_mol / mw_kg
-                                    used_thermo = True
+                                    h_in = CP.PropsSI("H", "T", T_in, "P", P_in, comp_name)
+                                    T_out = CP.PropsSI("T", "H", h_in, "P", P_out, comp_name)
                                 except Exception:
                                     pass
 
-                            ratio = P_out / P_in if P_in > 0 else 1.0
-                            T_out_isen = T_in * (ratio ** ((gamma - 1) / gamma))
-                            T_out = T_in + (T_out_isen - T_in) / eff
-                            work_w = mf * cp * (T_out - T_in)
+                            eq_res["pressureDrop"] = round(_pa_to_kpa(P_in - P_out), 3)
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
 
-                        eq_res["work"] = round(_w_to_kw(work_w), 3)
-                        eq_res["efficiency"] = round(eff * 100, 1)
-                        eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
-                        eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                            # Cv calculation
+                            dp_psi = _pa_to_kpa(P_in - P_out) * 0.145038  # kPa to psi
+                            rho = self._get_density(comp_names, zs_v, T_in, P_in, property_package) if comp_names else 1000.0
+                            sg = rho / 999.0 if rho > 0 else 1.0  # specific gravity relative to water
+                            Q_gpm = (mf / rho * 15850.3) if rho > 0 else 0  # m³/s to US GPM
+                            if dp_psi > 0 and Q_gpm > 0:
+                                cv_calc = Q_gpm * math.sqrt(sg / dp_psi)
+                                eq_res["cv"] = round(cv_calc, 2)
 
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        # Thermo-based outlet enthalpy for reference state consistency
-                        flash_comp_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                        if flash_comp_out and flash_comp_out.get("MW_mix", 0) > 0:
-                            outlet["enthalpy"] = flash_comp_out["H"] / (flash_comp_out["MW_mix"] / 1000.0)
-                        else:
-                            outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
-                        outlet["composition"] = dict(comp)
-                        outlets["out-1"] = outlet
-                        engine_note = " (entropy)" if used_entropy else (" (γ)" if used_thermo else "")
-                        logs.append(f"{name}: work = {eq_res['work']:.1f} kW, T_out = {_k_to_c(T_out):.1f} °C{engine_note}")
-
-                    elif ntype == "Valve":
-                        inlet = inlets[0]
-                        T_in = inlet["temperature"]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        comp = inlet.get("composition", {})
-
-                        P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in / 2))))
-
-                        # Isenthalpic expansion – Joule-Thomson effect (Fix 6)
-                        T_out = T_in  # default: ideal gas approximation
-                        vf_out = inlet.get("vapor_fraction", 0.0)
-                        comp_names = list(comp.keys())
-                        zs_v = [float(v) for v in comp.values()]
-
-                        # Preferred: thermo HP flash for multi-component JT
-                        if comp_names and len(comp_names) >= 1:
-                            flash_in = self._flash_tp(comp_names, zs_v, T_in, P_in, property_package)
-                            if flash_in and flash_in.get("flasher"):
-                                try:
-                                    H_in_mol = flash_in["H"]  # J/mol
-                                    flasher = flash_in["flasher"]
-                                    zs_norm = flash_in["zs"]
-                                    state_out = flasher.flash(H=H_in_mol, P=P_out, zs=zs_norm)
-                                    T_out = state_out.T
-                                    vf_out = state_out.VF if state_out.VF is not None else 0.0
-                                except Exception as exc:
-                                    logger.warning("Valve HP flash failed: %s", exc)
-                        elif _coolprop_available and len(comp) == 1:
-                            # CoolProp fallback for single component
-                            comp_name = list(comp.keys())[0]
-                            try:
-                                h_in = CP.PropsSI("H", "T", T_in, "P", P_in, comp_name)
-                                T_out = CP.PropsSI("T", "H", h_in, "P", P_out, comp_name)
-                            except Exception:
-                                pass
-
-                        eq_res["pressureDrop"] = round(_pa_to_kpa(P_in - P_out), 3)
-                        eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
-
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        # Thermo-based outlet enthalpy for reference state consistency
-                        flash_valve_out = self._flash_tp(comp_names, zs_v, T_out, P_out, property_package)
-                        if flash_valve_out and flash_valve_out.get("MW_mix", 0) > 0:
-                            outlet["enthalpy"] = flash_valve_out["H"] / (flash_valve_out["MW_mix"] / 1000.0)
-                        else:
-                            outlet["enthalpy"] = inlet["enthalpy"]  # isenthalpic fallback
-                        outlet["vapor_fraction"] = vf_out
-                        outlet["composition"] = dict(comp)
-                        outlets["out-1"] = outlet
-                        logs.append(f"{name}: ΔP = {eq_res['pressureDrop']:.1f} kPa, T_out = {_k_to_c(T_out):.1f} °C")
-
-                    elif ntype == "Mixer":
-                        total_mass = 0.0
-                        total_enthalpy_rate = 0.0  # W  (mass_flow * specific_enthalpy)
-                        mixed_comp_molar: dict[str, float] = {}  # accumulate molar amounts
-                        total_molar = 0.0
-                        P_min = float("inf")
-
-                        for s in inlets:
-                            mf = s.get("mass_flow", 1.0)
-                            h = s.get("enthalpy", 0.0)  # J/kg
-                            total_mass += mf
-                            total_enthalpy_rate += mf * h
-                            P_min = min(P_min, s.get("pressure", 101325.0))
-
-                            # Molar weighting for composition (Fix 2)
-                            s_comp = s.get("composition", {})
-                            if s_comp:
-                                MW_mix_s = sum(z * _get_mw(c) for c, z in s_comp.items())
-                                if MW_mix_s > 0:
-                                    n_molar = mf / (MW_mix_s / 1000.0)  # mol/s
-                                else:
-                                    n_molar = mf / 0.018  # fallback to water MW
-                                for cname, zfrac in s_comp.items():
-                                    mixed_comp_molar[cname] = mixed_comp_molar.get(cname, 0.0) + zfrac * n_molar
-                                total_molar += n_molar
-
-                        # Normalize mole fractions
-                        mixed_comp: dict[str, float] = {}
-                        if total_molar > 0:
-                            for cname in mixed_comp_molar:
-                                mixed_comp[cname] = mixed_comp_molar[cname] / total_molar
-                        else:
-                            mixed_comp = {}
-
-                        if total_mass > 0:
-                            h_mix = total_enthalpy_rate / total_mass  # J/kg
-                        else:
-                            h_mix = 0.0
-
-                        if P_min == float("inf"):
-                            P_min = 101325.0
-
-                        # User-specified outlet pressure or pressure drop
-                        dp = _kpa_to_pa(float(params.get("pressureDrop", 0)))
-                        P_out = P_min - dp
-
-                        # Use HP flash for correct outlet T (Fix 9)
-                        vf_out = 0.0
-                        used_thermo = False
-                        comp_names = list(mixed_comp.keys())
-                        zs = [float(v) for v in mixed_comp.values()]
-
-                        # Estimate T for fallback
-                        cp_est = _estimate_cp(mixed_comp)
-                        T_out = _T_REF + h_mix / cp_est if cp_est > 0 else _T_REF
-
-                        if comp_names and len(comp_names) >= 1:
-                            # Try HP flash: given mixed H (molar) and P_out, find T
-                            try:
-                                MW_mix_out = sum(z * _get_mw(c) for c, z in mixed_comp.items())
-                                H_molar = h_mix * (MW_mix_out / 1000.0)  # J/kg → J/mol
-                                # Build flasher for HP flash
-                                test_flash = self._flash_tp(comp_names, zs, max(T_out, 200.0), P_out, property_package)
-                                if test_flash and test_flash.get("flasher"):
-                                    flasher = test_flash["flasher"]
-                                    state_hp = flasher.flash(H=H_molar, P=P_out, zs=test_flash["zs"])
-                                    T_out = state_hp.T
-                                    vf_out = state_hp.VF if state_hp.VF is not None else 0.0
-                                    used_thermo = True
-                            except Exception as exc:
-                                logger.warning("Mixer HP flash failed: %s", exc)
-                                # Keep estimated T_out
-
-                        eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
-                        eq_res["totalMassFlow"] = round(total_mass, 4)
-
-                        outlet = {
-                            "temperature": T_out,
-                            "pressure": P_out,
-                            "mass_flow": total_mass,
-                            "enthalpy": h_mix,
-                            "vapor_fraction": vf_out,
-                            "composition": mixed_comp,
-                        }
-                        outlets["out-1"] = outlet
-                        engine_note = " (thermo)" if used_thermo else ""
-                        logs.append(f"{name}: mixed flow = {total_mass:.2f} kg/s{engine_note}")
-
-                    elif ntype == "Splitter":
-                        inlet = inlets[0]
-                        mf = inlet["mass_flow"]
-                        ratio = float(params.get("splitRatio", 0.5))
-                        ratio = max(0.0, min(1.0, ratio))
-
-                        eq_res["splitRatio"] = ratio
-
-                        out1 = dict(inlet)
-                        out1["mass_flow"] = mf * ratio
-                        out1["composition"] = dict(inlet.get("composition", {}))
-                        out2 = dict(inlet)
-                        out2["mass_flow"] = mf * (1.0 - ratio)
-                        out2["composition"] = dict(inlet.get("composition", {}))
-
-                        outlets["out-1"] = out1
-                        outlets["out-2"] = out2
-                        logs.append(f"{name}: split {ratio:.0%} / {1-ratio:.0%}")
-
-                    elif ntype == "HeatExchanger":
-                        # Two-stream heat exchanger — match inlets by port handle
-                        hot = None
-                        cold = None
-
-                        for i, handle in enumerate(inlet_handles):
-                            if i < len(inlets):
-                                if handle == "in-hot":
-                                    hot = inlets[i]
-                                elif handle == "in-cold":
-                                    cold = inlets[i]
-
-                        # If no handles matched (old-style position-based), use index
-                        if hot is None and len(inlets) >= 1:
-                            hot = inlets[0]
-                        if cold is None and len(inlets) >= 2:
-                            cold = inlets[1]
-                        if hot is None:
-                            hot = dict(_DEFAULT_FEED)
-                        if cold is None:
-                            cold = dict(_DEFAULT_FEED)
-
-                        # Ensure hot is actually hotter (T2-08: track swap for correct outlet mapping)
-                        swapped = False
-                        if cold["temperature"] > hot["temperature"]:
-                            hot, cold = cold, hot
-                            swapped = True
-
-                        T_hot_in = hot["temperature"]
-                        T_cold_in = cold["temperature"]
-                        mf_hot = hot["mass_flow"]
-                        mf_cold = cold["mass_flow"]
-                        P_hot_in = hot.get("pressure", 101325.0)
-                        P_cold_in = cold.get("pressure", 101325.0)
-
-                        # Real Cp from thermo flash (Fix 7)
-                        hot_comp = hot.get("composition", {})
-                        cold_comp = cold.get("composition", {})
-                        cp_hot = _estimate_cp(hot_comp)  # composition-aware fallback
-                        cp_cold = _estimate_cp(cold_comp)
-
-                        hot_comp_names = list(hot_comp.keys())
-                        hot_zs = [float(v) for v in hot_comp.values()]
-                        cold_comp_names = list(cold_comp.keys())
-                        cold_zs = [float(v) for v in cold_comp.values()]
-
-                        flash_hot = self._flash_tp(hot_comp_names, hot_zs, T_hot_in, P_hot_in, property_package)
-                        flash_cold = self._flash_tp(cold_comp_names, cold_zs, T_cold_in, P_cold_in, property_package)
-                        if flash_hot and flash_hot.get("Cp") and flash_hot["MW_mix"] > 0:
-                            mw_hot_kg = flash_hot["MW_mix"] / 1000.0
-                            cp_hot = flash_hot["Cp"] / mw_hot_kg  # J/(kg·K)
-                        if flash_cold and flash_cold.get("Cp") and flash_cold["MW_mix"] > 0:
-                            mw_cold_kg = flash_cold["MW_mix"] / 1000.0
-                            cp_cold = flash_cold["Cp"] / mw_cold_kg  # J/(kg·K)
-
-                        dp_hot = _kpa_to_pa(float(params.get("pressureDropHot", 10)))
-                        dp_cold = _kpa_to_pa(float(params.get("pressureDropCold", 10)))
-
-                        # Use specified outlet temps if provided
-                        T_hot_out_c = params.get("hotOutletTemp")
-                        T_cold_out_c = params.get("coldOutletTemp")
-
-                        if T_hot_out_c is not None and T_cold_out_c is not None:
-                            T_hot_out = _c_to_k(float(T_hot_out_c))
-                            T_cold_out = _c_to_k(float(T_cold_out_c))
-                            duty_hot = mf_hot * cp_hot * (T_hot_in - T_hot_out)
-                            duty_cold = mf_cold * cp_cold * (T_cold_out - T_cold_in)
-                            duty = duty_hot  # use hot-side duty as primary
-                            if max(abs(duty_hot), abs(duty_cold)) > 0:
-                                imbalance = abs(duty_hot - duty_cold) / max(abs(duty_hot), abs(duty_cold))
-                                if imbalance > 0.05:
-                                    logs.append(
-                                        f"WARNING: {name} specified outlet temps imply {imbalance:.0%} energy imbalance "
-                                        f"— adjusting cold outlet to match hot-side duty"
-                                    )
-                                    T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
-                        elif T_hot_out_c is not None:
-                            T_hot_out = _c_to_k(float(T_hot_out_c))
-                            duty = mf_hot * cp_hot * (T_hot_in - T_hot_out)
-                            T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
-                        elif T_cold_out_c is not None:
-                            T_cold_out = _c_to_k(float(T_cold_out_c))
-                            duty = mf_cold * cp_cold * (T_cold_out - T_cold_in)
-                            T_hot_out = T_hot_in - duty / (mf_hot * cp_hot) if mf_hot * cp_hot > 0 else T_hot_in
-                        else:
-                            # Default: 10 K approach on hot side
-                            T_hot_out = T_cold_in + 10.0
-                            duty = mf_hot * cp_hot * (T_hot_in - T_hot_out)
-                            T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
-
-                        # Temperature cross check
-                        if T_hot_out < T_cold_in or T_cold_out > T_hot_in:
-                            logs.append(f"WARNING: {name} has a temperature cross – results may be infeasible")
-
-                        hot_out = dict(hot)
-                        hot_out["temperature"] = T_hot_out
-                        hot_out["pressure"] = P_hot_in - dp_hot
-                        # Store thermo-based enthalpy if available
-                        flash_hot_out = self._flash_tp(hot_comp_names, hot_zs, T_hot_out, P_hot_in - dp_hot, property_package)
-                        if flash_hot_out and flash_hot_out["MW_mix"] > 0:
-                            hot_out["enthalpy"] = flash_hot_out["H"] / (flash_hot_out["MW_mix"] / 1000.0)
-                        else:
-                            hot_out["enthalpy"] = cp_hot * (T_hot_out - _T_REF)
-                        hot_out["composition"] = dict(hot_comp)
-
-                        cold_out = dict(cold)
-                        cold_out["temperature"] = T_cold_out
-                        cold_out["pressure"] = P_cold_in - dp_cold
-                        flash_cold_out = self._flash_tp(cold_comp_names, cold_zs, T_cold_out, P_cold_in - dp_cold, property_package)
-                        if flash_cold_out and flash_cold_out["MW_mix"] > 0:
-                            cold_out["enthalpy"] = flash_cold_out["H"] / (flash_cold_out["MW_mix"] / 1000.0)
-                        else:
-                            cold_out["enthalpy"] = cp_cold * (T_cold_out - _T_REF)
-
-                        # Recompute duty from enthalpy difference (correct for phase change)
-                        if flash_hot and flash_hot_out and flash_hot["MW_mix"] > 0 and flash_hot_out["MW_mix"] > 0:
-                            h_hot_in = flash_hot["H"] / (flash_hot["MW_mix"] / 1000.0)
-                            h_hot_out_j = hot_out["enthalpy"]
-                            duty = mf_hot * (h_hot_in - h_hot_out_j)
-
-                        eq_res["duty"] = round(_w_to_kw(duty), 3)
-                        eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out), 2)
-                        eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out), 2)
-                        eq_res["LMTD"] = round(self._calc_lmtd(T_hot_in, T_hot_out, T_cold_in, T_cold_out), 2)
-                        cold_out["composition"] = dict(cold_comp)
-
-                        # T2-08: If streams were swapped, reverse outlet assignment
-                        if swapped:
-                            outlets["out-hot"] = cold_out
-                            outlets["out-cold"] = hot_out
-                        else:
-                            outlets["out-hot"] = hot_out
-                            outlets["out-cold"] = cold_out
-                        logs.append(f"{name}: duty = {eq_res['duty']:.1f} kW, LMTD = {eq_res['LMTD']:.1f} K")
-
-                    elif ntype == "Separator":
-                        inlet = inlets[0]
-                        mf = inlet["mass_flow"]
-                        comp = inlet.get("composition", {})
-
-                        # Operating conditions from parameters (user-specified T & P)
-                        T_op_c = params.get("temperature")
-                        T_op = _c_to_k(float(T_op_c)) if T_op_c is not None else inlet["temperature"]
-                        P_op_kpa = params.get("pressure")
-                        P_op = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else inlet["pressure"]
-
-                        vf = 0.0  # molar vapor fraction
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-
-                        # Use shared _flash_tp helper (Fix 3: >= 1 allows single-component)
-                        if len(comp_names) >= 1:
-                            flash_result = self._flash_tp(comp_names, zs, T_op, P_op, property_package)
-                            if flash_result:
-                                vf = flash_result["VF"]
-                                # Mass-based split
-                                MWs = flash_result["MWs"]
-                                gas_zs = flash_result["gas_zs"]
-                                liq_zs = flash_result["liquid_zs"]
-
-                                MW_vap = sum(z * mw for z, mw in zip(gas_zs, MWs))
-                                MW_liq = sum(z * mw for z, mw in zip(liq_zs, MWs))
-                                denom = vf * MW_vap + (1 - vf) * MW_liq
-                                mass_vap_frac = (vf * MW_vap) / denom if denom > 0 else vf
-
-                                vapor_comp = {comp_names[i]: gas_zs[i] for i in range(len(comp_names))}
-                                liquid_comp = {comp_names[i]: liq_zs[i] for i in range(len(comp_names))}
-
-                                # Per-phase enthalpy from flash state
-                                h_vap = 0.0
-                                h_liq = 0.0
-                                flasher = flash_result.get("flasher")
-                                if flasher:
+                            # Choked flow check
+                            if bool(params.get("chokedFlowCheck", False)):
+                                # Get vapor pressure from flash
+                                Pv = P_in * 0.1  # rough default
+                                Pc = P_in * 10.0  # rough default
+                                if flash_in and flash_in.get("flasher"):
                                     try:
-                                        state = flasher.flash(T=T_op, P=P_op, zs=flash_result["zs"])
-                                        gas_phase = getattr(state, 'gas', None)
-                                        liq_phase = getattr(state, 'liquid0', None)
-                                        if gas_phase and MW_vap > 0:
-                                            h_vap = gas_phase.H() / (MW_vap / 1000.0)  # J/kg
-                                        if liq_phase and MW_liq > 0:
-                                            h_liq = liq_phase.H() / (MW_liq / 1000.0)  # J/kg
+                                        consts = flash_in.get("constants")
+                                        if consts and hasattr(consts, "Pcs") and consts.Pcs:
+                                            Pc = sum(z * pc for z, pc in zip(zs_v, consts.Pcs)) if len(consts.Pcs) == len(zs_v) else Pc
+                                        # Estimate Pv from VF=0 flash
+                                        if flash_in.get("VF", 0) < 0.01:
+                                            Pv = P_in * 0.3  # subcooled liquid estimate
                                     except Exception:
                                         pass
+                                FF = 0.96 - 0.28 * math.sqrt(Pv / Pc) if Pc > 0 else 0.96
+                                P_choked = Pv * FF
+                                if P_out < P_choked:
+                                    logs.append(f"WARNING: {name} choked flow detected — P_out ({_pa_to_kpa(P_out):.1f} kPa) < P_choked ({_pa_to_kpa(P_choked):.1f} kPa)")
+                                    eq_res["chokedFlow"] = True
+                                else:
+                                    eq_res["chokedFlow"] = False
 
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            # Thermo-based outlet enthalpy for reference state consistency
+                            flash_valve_out = self._flash_tp(comp_names, zs_v, T_out, P_out, property_package)
+                            if flash_valve_out and flash_valve_out.get("MW_mix", 0) > 0:
+                                outlet["enthalpy"] = flash_valve_out["H"] / (flash_valve_out["MW_mix"] / 1000.0)
+                            else:
+                                outlet["enthalpy"] = inlet["enthalpy"]  # isenthalpic fallback
+                            outlet["vapor_fraction"] = vf_out
+                            outlet["composition"] = dict(comp)
+                            outlets["out-1"] = outlet
+                            logs.append(f"{name}: ΔP = {eq_res['pressureDrop']:.1f} kPa, T_out = {_k_to_c(T_out):.1f} °C")
+
+                        elif ntype == "Mixer":
+                            total_mass = 0.0
+                            total_enthalpy_rate = 0.0  # W  (mass_flow * specific_enthalpy)
+                            mixed_comp_molar: dict[str, float] = {}  # accumulate molar amounts
+                            total_molar = 0.0
+                            P_min = float("inf")
+
+                            for s in inlets:
+                                mf = s.get("mass_flow", 1.0)
+                                h = s.get("enthalpy", 0.0)  # J/kg
+                                total_mass += mf
+                                total_enthalpy_rate += mf * h
+                                P_min = min(P_min, s.get("pressure", 101325.0))
+
+                                # Molar weighting for composition (Fix 2)
+                                s_comp = s.get("composition", {})
+                                if s_comp:
+                                    MW_mix_s = sum(z * _get_mw(c) for c, z in s_comp.items())
+                                    if MW_mix_s > 0:
+                                        n_molar = mf / (MW_mix_s / 1000.0)  # mol/s
+                                    else:
+                                        n_molar = mf / 0.018  # fallback to water MW
+                                    for cname, zfrac in s_comp.items():
+                                        mixed_comp_molar[cname] = mixed_comp_molar.get(cname, 0.0) + zfrac * n_molar
+                                    total_molar += n_molar
+
+                            # Normalize mole fractions
+                            mixed_comp: dict[str, float] = {}
+                            if total_molar > 0:
+                                for cname in mixed_comp_molar:
+                                    mixed_comp[cname] = mixed_comp_molar[cname] / total_molar
+                            else:
+                                mixed_comp = {}
+
+                            if total_mass > 0:
+                                h_mix = total_enthalpy_rate / total_mass  # J/kg
+                            else:
+                                h_mix = 0.0
+
+                            if P_min == float("inf"):
+                                P_min = 101325.0
+
+                            # User-specified outlet pressure or pressure drop
+                            dp = _kpa_to_pa(float(params.get("pressureDrop", 0)))
+                            P_out = P_min - dp
+
+                            # Use HP flash for correct outlet T (Fix 9)
+                            vf_out = 0.0
+                            used_thermo = False
+                            comp_names = list(mixed_comp.keys())
+                            zs = [float(v) for v in mixed_comp.values()]
+
+                            # Estimate T for fallback
+                            cp_est = _estimate_cp(mixed_comp)
+                            T_out = _T_REF + h_mix / cp_est if cp_est > 0 else _T_REF
+
+                            if comp_names and len(comp_names) >= 1:
+                                # Try HP flash: given mixed H (molar) and P_out, find T
+                                try:
+                                    MW_mix_out = sum(z * _get_mw(c) for c, z in mixed_comp.items())
+                                    H_molar = h_mix * (MW_mix_out / 1000.0)  # J/kg → J/mol
+                                    # Build flasher for HP flash
+                                    test_flash = self._flash_tp(comp_names, zs, max(T_out, 200.0), P_out, property_package)
+                                    if test_flash and test_flash.get("flasher"):
+                                        flasher = test_flash["flasher"]
+                                        state_hp = flasher.flash(H=H_molar, P=P_out, zs=test_flash["zs"])
+                                        T_out = state_hp.T
+                                        vf_out = state_hp.VF if state_hp.VF is not None else 0.0
+                                        used_thermo = True
+                                except Exception as exc:
+                                    logger.warning("Mixer HP flash failed: %s", exc)
+                                    # Keep estimated T_out
+
+                            eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
+                            eq_res["totalMassFlow"] = round(total_mass, 4)
+
+                            outlet = {
+                                "temperature": T_out,
+                                "pressure": P_out,
+                                "mass_flow": total_mass,
+                                "enthalpy": h_mix,
+                                "vapor_fraction": vf_out,
+                                "composition": mixed_comp,
+                            }
+                            outlets["out-1"] = outlet
+                            engine_note = " (thermo)" if used_thermo else ""
+                            logs.append(f"{name}: mixed flow = {total_mass:.2f} kg/s{engine_note}")
+
+                        elif ntype == "Splitter":
+                            inlet = inlets[0]
+                            mf = inlet["mass_flow"]
+                            ratio = float(params.get("splitRatio", 0.5))
+                            ratio = max(0.0, min(1.0, ratio))
+
+                            eq_res["splitRatio"] = ratio
+
+                            out1 = dict(inlet)
+                            out1["mass_flow"] = mf * ratio
+                            out1["composition"] = dict(inlet.get("composition", {}))
+                            out2 = dict(inlet)
+                            out2["mass_flow"] = mf * (1.0 - ratio)
+                            out2["composition"] = dict(inlet.get("composition", {}))
+
+                            outlets["out-1"] = out1
+                            outlets["out-2"] = out2
+                            logs.append(f"{name}: split {ratio:.0%} / {1-ratio:.0%}")
+
+                        elif ntype == "HeatExchanger":
+                            # Two-stream heat exchanger — match inlets by port handle
+                            hot = None
+                            cold = None
+
+                            for i, handle in enumerate(inlet_handles):
+                                if i < len(inlets):
+                                    if handle == "in-hot":
+                                        hot = inlets[i]
+                                    elif handle == "in-cold":
+                                        cold = inlets[i]
+
+                            # If no handles matched (old-style position-based), use index
+                            if hot is None and len(inlets) >= 1:
+                                hot = inlets[0]
+                            if cold is None and len(inlets) >= 2:
+                                cold = inlets[1]
+                            if hot is None:
+                                hot = dict(_DEFAULT_FEED)
+                            if cold is None:
+                                cold = dict(_DEFAULT_FEED)
+
+                            # Ensure hot is actually hotter (T2-08: track swap for correct outlet mapping)
+                            swapped = False
+                            if cold["temperature"] > hot["temperature"]:
+                                hot, cold = cold, hot
+                                swapped = True
+
+                            T_hot_in = hot["temperature"]
+                            T_cold_in = cold["temperature"]
+                            mf_hot = hot["mass_flow"]
+                            mf_cold = cold["mass_flow"]
+                            P_hot_in = hot.get("pressure", 101325.0)
+                            P_cold_in = cold.get("pressure", 101325.0)
+
+                            # Real Cp from thermo flash (Fix 7)
+                            hot_comp = hot.get("composition", {})
+                            cold_comp = cold.get("composition", {})
+                            cp_hot = _estimate_cp(hot_comp)  # composition-aware fallback
+                            cp_cold = _estimate_cp(cold_comp)
+
+                            hot_comp_names = list(hot_comp.keys())
+                            hot_zs = [float(v) for v in hot_comp.values()]
+                            cold_comp_names = list(cold_comp.keys())
+                            cold_zs = [float(v) for v in cold_comp.values()]
+
+                            flash_hot = self._flash_tp(hot_comp_names, hot_zs, T_hot_in, P_hot_in, property_package)
+                            flash_cold = self._flash_tp(cold_comp_names, cold_zs, T_cold_in, P_cold_in, property_package)
+                            if flash_hot and flash_hot.get("Cp") and flash_hot["MW_mix"] > 0:
+                                mw_hot_kg = flash_hot["MW_mix"] / 1000.0
+                                cp_hot = flash_hot["Cp"] / mw_hot_kg  # J/(kg·K)
+                            if flash_cold and flash_cold.get("Cp") and flash_cold["MW_mix"] > 0:
+                                mw_cold_kg = flash_cold["MW_mix"] / 1000.0
+                                cp_cold = flash_cold["Cp"] / mw_cold_kg  # J/(kg·K)
+
+                            dp_hot = _kpa_to_pa(float(params.get("pressureDropHot", 10)))
+                            dp_cold = _kpa_to_pa(float(params.get("pressureDropCold", 10)))
+
+                            # Use specified outlet temps if provided
+                            T_hot_out_c = params.get("hotOutletTemp")
+                            T_cold_out_c = params.get("coldOutletTemp")
+
+                            if T_hot_out_c is not None and T_cold_out_c is not None:
+                                T_hot_out = _c_to_k(float(T_hot_out_c))
+                                T_cold_out = _c_to_k(float(T_cold_out_c))
+                                duty_hot = mf_hot * cp_hot * (T_hot_in - T_hot_out)
+                                duty_cold = mf_cold * cp_cold * (T_cold_out - T_cold_in)
+                                duty = duty_hot  # use hot-side duty as primary
+                                if max(abs(duty_hot), abs(duty_cold)) > 0:
+                                    imbalance = abs(duty_hot - duty_cold) / max(abs(duty_hot), abs(duty_cold))
+                                    if imbalance > 0.05:
+                                        logs.append(
+                                            f"WARNING: {name} specified outlet temps imply {imbalance:.0%} energy imbalance "
+                                            f"— adjusting cold outlet to match hot-side duty"
+                                        )
+                                        T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
+                            elif T_hot_out_c is not None:
+                                T_hot_out = _c_to_k(float(T_hot_out_c))
+                                duty = mf_hot * cp_hot * (T_hot_in - T_hot_out)
+                                T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
+                            elif T_cold_out_c is not None:
+                                T_cold_out = _c_to_k(float(T_cold_out_c))
+                                duty = mf_cold * cp_cold * (T_cold_out - T_cold_in)
+                                T_hot_out = T_hot_in - duty / (mf_hot * cp_hot) if mf_hot * cp_hot > 0 else T_hot_in
+                            else:
+                                # Default: 10 K approach on hot side
+                                T_hot_out = T_cold_in + 10.0
+                                duty = mf_hot * cp_hot * (T_hot_in - T_hot_out)
+                                T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
+
+                            # Temperature cross check
+                            if T_hot_out < T_cold_in or T_cold_out > T_hot_in:
+                                logs.append(f"WARNING: {name} has a temperature cross – results may be infeasible")
+
+                            hot_out = dict(hot)
+                            hot_out["temperature"] = T_hot_out
+                            hot_out["pressure"] = P_hot_in - dp_hot
+                            # Store thermo-based enthalpy if available
+                            flash_hot_out = self._flash_tp(hot_comp_names, hot_zs, T_hot_out, P_hot_in - dp_hot, property_package)
+                            if flash_hot_out and flash_hot_out["MW_mix"] > 0:
+                                hot_out["enthalpy"] = flash_hot_out["H"] / (flash_hot_out["MW_mix"] / 1000.0)
+                            else:
+                                hot_out["enthalpy"] = cp_hot * (T_hot_out - _T_REF)
+                            hot_out["composition"] = dict(hot_comp)
+
+                            cold_out = dict(cold)
+                            cold_out["temperature"] = T_cold_out
+                            cold_out["pressure"] = P_cold_in - dp_cold
+                            flash_cold_out = self._flash_tp(cold_comp_names, cold_zs, T_cold_out, P_cold_in - dp_cold, property_package)
+                            if flash_cold_out and flash_cold_out["MW_mix"] > 0:
+                                cold_out["enthalpy"] = flash_cold_out["H"] / (flash_cold_out["MW_mix"] / 1000.0)
+                            else:
+                                cold_out["enthalpy"] = cp_cold * (T_cold_out - _T_REF)
+
+                            # Recompute duty from enthalpy difference (correct for phase change)
+                            if flash_hot and flash_hot_out and flash_hot["MW_mix"] > 0 and flash_hot_out["MW_mix"] > 0:
+                                h_hot_in = flash_hot["H"] / (flash_hot["MW_mix"] / 1000.0)
+                                h_hot_out_j = hot_out["enthalpy"]
+                                duty = mf_hot * (h_hot_in - h_hot_out_j)
+
+                            eq_res["duty"] = round(_w_to_kw(duty), 3)
+                            eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out), 2)
+                            eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out), 2)
+                            eq_res["LMTD"] = round(self._calc_lmtd(T_hot_in, T_hot_out, T_cold_in, T_cold_out), 2)
+
+                            # NTU method override
+                            hx_method = str(params.get("method", "LMTD"))
+                            if hx_method == "NTU":
+                                geometry = str(params.get("geometry", "shell-tube"))
+                                fouling = float(params.get("foulingFactor", 0.0002))
+                                C_hot = mf_hot * cp_hot
+                                C_cold = mf_cold * cp_cold
+                                C_min = min(C_hot, C_cold)
+                                C_max = max(C_hot, C_cold)
+                                C_r = C_min / C_max if C_max > 0 else 0
+                                Q_max = C_min * abs(T_hot_in - T_cold_in)
+                                U = 500.0
+                                if fouling > 0:
+                                    U = 1.0 / (1.0 / U + fouling)
+                                lmtd_val = eq_res.get("LMTD", 10)
+                                A_ntu = abs(duty) / (U * max(lmtd_val, 1)) if lmtd_val > 0 else 10.0
+                                NTU = U * A_ntu / C_min if C_min > 0 else 0
+                                if C_r == 0:
+                                    epsilon = 1 - math.exp(-NTU) if NTU > 0 else 0
+                                elif geometry == "plate":
+                                    denom = 1 - C_r * math.exp(-NTU * (1 - C_r))
+                                    epsilon = (1 - math.exp(-NTU * (1 - C_r))) / denom if denom != 0 else 0
+                                else:
+                                    factor = math.sqrt(1 + C_r ** 2)
+                                    exp_val = math.exp(-NTU * factor)
+                                    numer = 1 + exp_val
+                                    denom_s = 1 - exp_val + 1e-30
+                                    epsilon = 2.0 / (1 + C_r + factor * numer / denom_s)
+                                epsilon = max(0, min(1, epsilon))
+                                Q_ntu = epsilon * Q_max
+                                T_hot_out = T_hot_in - Q_ntu / C_hot if C_hot > 0 else T_hot_in
+                                T_cold_out = T_cold_in + Q_ntu / C_cold if C_cold > 0 else T_cold_in
+                                hot_out["temperature"] = T_hot_out
+                                cold_out["temperature"] = T_cold_out
+                                eq_res["method"] = "NTU"
+                                eq_res["ntu"] = round(NTU, 3)
+                                eq_res["effectiveness"] = round(epsilon, 4)
+                                eq_res["duty"] = round(_w_to_kw(Q_ntu), 3)
+                                eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out), 2)
+                                eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out), 2)
+                                logs.append(f"{name}: NTU={NTU:.2f}, ε={epsilon:.3f}, Q={_w_to_kw(Q_ntu):.1f} kW")
+
+                            cold_out["composition"] = dict(cold_comp)
+
+                            # T2-08: If streams were swapped, reverse outlet assignment
+                            if swapped:
+                                outlets["out-hot"] = cold_out
+                                outlets["out-cold"] = hot_out
+                            else:
+                                outlets["out-hot"] = hot_out
+                                outlets["out-cold"] = cold_out
+                            logs.append(f"{name}: duty = {eq_res['duty']:.1f} kW, LMTD = {eq_res['LMTD']:.1f} K")
+
+                        elif ntype == "Separator":
+                            inlet = inlets[0]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+
+                            # Operating conditions from parameters (user-specified T & P)
+                            T_op_c = params.get("temperature")
+                            T_op = _c_to_k(float(T_op_c)) if T_op_c is not None else inlet["temperature"]
+                            P_op_kpa = params.get("pressure")
+                            P_op = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else inlet["pressure"]
+
+                            vf = 0.0  # molar vapor fraction
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+
+                            # Use shared _flash_tp helper (Fix 3: >= 1 allows single-component)
+                            if len(comp_names) >= 1:
+                                flash_result = self._flash_tp(comp_names, zs, T_op, P_op, property_package)
+                                if flash_result:
+                                    vf = flash_result["VF"]
+                                    # Mass-based split
+                                    MWs = flash_result["MWs"]
+                                    gas_zs = flash_result["gas_zs"]
+                                    liq_zs = flash_result["liquid_zs"]
+
+                                    MW_vap = sum(z * mw for z, mw in zip(gas_zs, MWs))
+                                    MW_liq = sum(z * mw for z, mw in zip(liq_zs, MWs))
+                                    denom = vf * MW_vap + (1 - vf) * MW_liq
+                                    mass_vap_frac = (vf * MW_vap) / denom if denom > 0 else vf
+
+                                    vapor_comp = {comp_names[i]: gas_zs[i] for i in range(len(comp_names))}
+                                    liquid_comp = {comp_names[i]: liq_zs[i] for i in range(len(comp_names))}
+
+                                    # Per-phase enthalpy from flash state
+                                    h_vap = 0.0
+                                    h_liq = 0.0
+                                    flasher = flash_result.get("flasher")
+                                    if flasher:
+                                        try:
+                                            state = flasher.flash(T=T_op, P=P_op, zs=flash_result["zs"])
+                                            gas_phase = getattr(state, 'gas', None)
+                                            liq_phase = getattr(state, 'liquid0', None)
+                                            if gas_phase and MW_vap > 0:
+                                                h_vap = gas_phase.H() / (MW_vap / 1000.0)  # J/kg
+                                            if liq_phase and MW_liq > 0:
+                                                h_liq = liq_phase.H() / (MW_liq / 1000.0)  # J/kg
+                                        except Exception:
+                                            pass
+
+                                    outlets["out-1"] = {
+                                        "temperature": T_op,
+                                        "pressure": P_op,
+                                        "mass_flow": mf * mass_vap_frac,
+                                        "vapor_fraction": 1.0,
+                                        "enthalpy": h_vap,
+                                        "composition": vapor_comp,
+                                    }
+                                    outlets["out-2"] = {
+                                        "temperature": T_op,
+                                        "pressure": P_op,
+                                        "mass_flow": mf * (1 - mass_vap_frac),
+                                        "vapor_fraction": 0.0,
+                                        "enthalpy": h_liq,
+                                        "composition": liquid_comp,
+                                    }
+                                    eq_res["vaporFraction"] = round(vf, 4)
+                                    eq_res["massVaporFraction"] = round(mass_vap_frac, 4)
+                                    logs.append(f"{name}: VF = {vf:.3f} (molar), mass VF = {mass_vap_frac:.3f}")
+
+                            if not outlets:
+                                # Simple fallback: assume 10% vapor (T3-05: differentiate V/L enthalpy)
+                                vf_est = 0.1
+                                cp_est = _estimate_cp(comp)
+                                h_liq_est = cp_est * (T_op - _T_REF)
+                                h_vap_est = h_liq_est + _estimate_hvap(comp)
                                 outlets["out-1"] = {
                                     "temperature": T_op,
                                     "pressure": P_op,
-                                    "mass_flow": mf * mass_vap_frac,
+                                    "mass_flow": mf * vf_est,
                                     "vapor_fraction": 1.0,
-                                    "enthalpy": h_vap,
-                                    "composition": vapor_comp,
+                                    "enthalpy": h_vap_est,
+                                    "composition": comp,
                                 }
                                 outlets["out-2"] = {
                                     "temperature": T_op,
                                     "pressure": P_op,
-                                    "mass_flow": mf * (1 - mass_vap_frac),
+                                    "mass_flow": mf * (1 - vf_est),
                                     "vapor_fraction": 0.0,
-                                    "enthalpy": h_liq,
-                                    "composition": liquid_comp,
+                                    "enthalpy": h_liq_est,
+                                    "composition": comp,
                                 }
-                                eq_res["vaporFraction"] = round(vf, 4)
-                                eq_res["massVaporFraction"] = round(mass_vap_frac, 4)
-                                logs.append(f"{name}: VF = {vf:.3f} (molar), mass VF = {mass_vap_frac:.3f}")
+                                eq_res["vaporFraction"] = vf_est
+                                logs.append(f"WARNING: {name}: flash failed, estimated VF = {vf_est:.1%}")
 
-                        if not outlets:
-                            # Simple fallback: assume 10% vapor (T3-05: differentiate V/L enthalpy)
-                            vf_est = 0.1
-                            cp_est = _estimate_cp(comp)
-                            h_liq_est = cp_est * (T_op - _T_REF)
-                            h_vap_est = h_liq_est + _estimate_hvap(comp)
-                            outlets["out-1"] = {
-                                "temperature": T_op,
-                                "pressure": P_op,
-                                "mass_flow": mf * vf_est,
-                                "vapor_fraction": 1.0,
-                                "enthalpy": h_vap_est,
-                                "composition": comp,
-                            }
-                            outlets["out-2"] = {
-                                "temperature": T_op,
-                                "pressure": P_op,
-                                "mass_flow": mf * (1 - vf_est),
-                                "vapor_fraction": 0.0,
-                                "enthalpy": h_liq_est,
-                                "composition": comp,
-                            }
-                            eq_res["vaporFraction"] = vf_est
-                            logs.append(f"WARNING: {name}: flash failed, estimated VF = {vf_est:.1%}")
+                        elif ntype == "DistillationColumn":
+                            inlet = inlets[0]
+                            mf = inlet["mass_flow"]
+                            T_feed = inlet["temperature"]
+                            P_feed = inlet["pressure"]
+                            comp = inlet.get("composition", {})
 
-                    elif ntype == "DistillationColumn":
-                        inlet = inlets[0]
-                        mf = inlet["mass_flow"]
-                        T_feed = inlet["temperature"]
-                        P_feed = inlet["pressure"]
-                        comp = inlet.get("composition", {})
+                            n_stages = int(params.get("numberOfStages", 10))
+                            reflux_ratio = float(params.get("refluxRatio", 1.5))
+                            P_cond = _kpa_to_pa(float(params.get("condenserPressure", _pa_to_kpa(P_feed))))
 
-                        n_stages = int(params.get("numberOfStages", 10))
-                        reflux_ratio = float(params.get("refluxRatio", 1.5))
-                        P_cond = _kpa_to_pa(float(params.get("condenserPressure", _pa_to_kpa(P_feed))))
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            fug_ok = False
 
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-                        fug_ok = False
+                            # Fenske-Underwood-Gilliland shortcut method (T2-01)
+                            if len(comp_names) >= 2 and _thermo_available:
+                                try:
+                                    # Flash feed for K-values
+                                    flash_feed = self._flash_tp(comp_names, zs, T_feed, P_feed, property_package)
+                                    if flash_feed and flash_feed.get("VF") is not None:
+                                        gas_zs = flash_feed["gas_zs"]
+                                        liq_zs = flash_feed["liquid_zs"]
+                                        vf_feed = flash_feed["VF"]
 
-                        # Fenske-Underwood-Gilliland shortcut method (T2-01)
-                        if len(comp_names) >= 2 and _thermo_available:
-                            try:
-                                # Flash feed for K-values
-                                flash_feed = self._flash_tp(comp_names, zs, T_feed, P_feed, property_package)
-                                if flash_feed and flash_feed.get("VF") is not None:
-                                    gas_zs = flash_feed["gas_zs"]
-                                    liq_zs = flash_feed["liquid_zs"]
-                                    vf_feed = flash_feed["VF"]
+                                        # If single-phase, flash at bubble point for K-values
+                                        if vf_feed <= 0.0 or vf_feed >= 1.0:
+                                            flasher = flash_feed.get("flasher")
+                                            if flasher:
+                                                try:
+                                                    state_bp = flasher.flash(VF=0, P=P_feed, zs=flash_feed["zs"])
+                                                    gas_bp = getattr(state_bp, 'gas', None)
+                                                    liq_bp = getattr(state_bp, 'liquid0', None)
+                                                    if gas_bp and liq_bp:
+                                                        gas_zs = list(gas_bp.zs)
+                                                        liq_zs = list(liq_bp.zs)
+                                                except Exception:
+                                                    pass
 
-                                    # If single-phase, flash at bubble point for K-values
-                                    if vf_feed <= 0.0 or vf_feed >= 1.0:
-                                        flasher = flash_feed.get("flasher")
-                                        if flasher:
-                                            try:
-                                                state_bp = flasher.flash(VF=0, P=P_feed, zs=flash_feed["zs"])
-                                                gas_bp = getattr(state_bp, 'gas', None)
-                                                liq_bp = getattr(state_bp, 'liquid0', None)
-                                                if gas_bp and liq_bp:
-                                                    gas_zs = list(gas_bp.zs)
-                                                    liq_zs = list(liq_bp.zs)
-                                            except Exception:
-                                                pass
-
-                                    # K-values: K_i = y_i / x_i
-                                    K_vals: list[float] = []
-                                    for i in range(len(comp_names)):
-                                        x_i = liq_zs[i] if liq_zs[i] > 1e-12 else 1e-12
-                                        y_i = gas_zs[i] if gas_zs[i] > 1e-12 else 1e-12
-                                        K_vals.append(y_i / x_i)
-
-                                    # Identify light key (highest K) and heavy key (lowest K)
-                                    lk_idx = K_vals.index(max(K_vals))
-                                    hk_idx = K_vals.index(min(K_vals))
-
-                                    K_lk = K_vals[lk_idx]
-                                    K_hk = K_vals[hk_idx]
-
-                                    # Relative volatilities: alpha_i = K_i / K_hk
-                                    alpha_lk_hk = K_lk / K_hk if K_hk > 1e-12 else 10.0
-                                    alphas = [K / K_hk if K_hk > 1e-12 else 1.0 for K in K_vals]
-
-                                    if alpha_lk_hk > 1.01:
-                                        # Fenske: N_min
-                                        # Using 99% recovery for LK and HK
-                                        N_min = math.log((0.99 / 0.01) ** 2) / math.log(alpha_lk_hk)
-
-                                        # Underwood: R_min (simplified)
-                                        R_min = 1.0 / (alpha_lk_hk - 1.0)
-
-                                        # Gilliland correlation
-                                        R = reflux_ratio
-                                        if R <= R_min:
-                                            R = R_min * 1.2
-                                            logs.append(f"WARNING: {name} R={reflux_ratio:.2f} ≤ R_min={R_min:.2f}, adjusting to {R:.2f}")
-                                        X = (R - R_min) / (R + 1.0)
-                                        Y = 0.75 * (1.0 - X ** 0.5668)
-                                        N_eff = (N_min + Y) / (1.0 - Y) if Y < 1.0 else n_stages
-
-                                        # Component recovery: d_i/b_i = (d_hk/b_hk) * alpha_i^N_eff
-                                        # Assume 99% HK recovery in bottoms
-                                        d_hk_over_b_hk = 0.01 / 0.99
-                                        d_fracs: list[float] = []
-                                        b_fracs: list[float] = []
+                                        # K-values: K_i = y_i / x_i
+                                        K_vals: list[float] = []
                                         for i in range(len(comp_names)):
-                                            alpha_N = alphas[i] ** N_eff if N_eff < 200 else 1e6
-                                            ratio_db = d_hk_over_b_hk * alpha_N
-                                            d_i = zs[i] * ratio_db / (1.0 + ratio_db)
-                                            b_i = zs[i] - d_i
-                                            d_fracs.append(max(d_i, 0.0))
-                                            b_fracs.append(max(b_i, 0.0))
+                                            x_i = liq_zs[i] if liq_zs[i] > 1e-12 else 1e-12
+                                            y_i = gas_zs[i] if gas_zs[i] > 1e-12 else 1e-12
+                                            K_vals.append(y_i / x_i)
 
-                                        # Normalize
-                                        d_total = sum(d_fracs) or 1e-12
-                                        b_total = sum(b_fracs) or 1e-12
-                                        distillate_comp = {comp_names[i]: d_fracs[i] / d_total for i in range(len(comp_names))}
-                                        bottoms_comp = {comp_names[i]: b_fracs[i] / b_total for i in range(len(comp_names))}
+                                        # Identify light key (highest K) and heavy key (lowest K)
+                                        lk_idx = K_vals.index(max(K_vals))
+                                        hk_idx = K_vals.index(min(K_vals))
 
-                                        # Mass splits
-                                        MWs = flash_feed["MWs"]
-                                        mass_dist = sum(d_fracs[i] * MWs[i] for i in range(len(comp_names)))
-                                        mass_bott = sum(b_fracs[i] * MWs[i] for i in range(len(comp_names)))
-                                        mass_total = mass_dist + mass_bott
-                                        frac_dist = mass_dist / mass_total if mass_total > 0 else 0.5
-                                        frac_bott = 1.0 - frac_dist
+                                        K_lk = K_vals[lk_idx]
+                                        K_hk = K_vals[hk_idx]
 
-                                        # Flash distillate and bottoms for temperatures
-                                        P_bott = P_cond + N_eff * 1000.0  # ~1 kPa per stage
-                                        d_names = list(distillate_comp.keys())
-                                        d_zs = [float(v) for v in distillate_comp.values()]
-                                        b_names = list(bottoms_comp.keys())
-                                        b_zs = [float(v) for v in bottoms_comp.values()]
+                                        # Relative volatilities: alpha_i = K_i / K_hk
+                                        alpha_lk_hk = K_lk / K_hk if K_hk > 1e-12 else 10.0
+                                        alphas = [K / K_hk if K_hk > 1e-12 else 1.0 for K in K_vals]
 
-                                        # Try bubble point flash for distillate
-                                        flash_dist = self._flash_tp(d_names, d_zs, T_feed - 20, P_cond, property_package)
-                                        if flash_dist:
-                                            T_dist = flash_dist["T"]
-                                            # Try proper bubble point
-                                            try:
-                                                flasher = flash_dist["flasher"]
-                                                state_bp = flasher.flash(VF=0, P=P_cond, zs=flash_dist["zs"])
-                                                T_dist = state_bp.T
-                                            except Exception:
-                                                pass
-                                        else:
-                                            T_dist = T_feed - 20
+                                        if alpha_lk_hk > 1.01:
+                                            # Fenske: N_min
+                                            # Using 99% recovery for LK and HK
+                                            N_min = math.log((0.99 / 0.01) ** 2) / math.log(alpha_lk_hk)
 
-                                        flash_bott = self._flash_tp(b_names, b_zs, T_feed + 20, P_bott, property_package)
-                                        if flash_bott:
-                                            T_bott = flash_bott["T"]
-                                            try:
-                                                flasher = flash_bott["flasher"]
-                                                state_bp = flasher.flash(VF=0, P=P_bott, zs=flash_bott["zs"])
-                                                T_bott = state_bp.T
-                                            except Exception:
-                                                pass
-                                        else:
-                                            T_bott = T_feed + 20
+                                            # Underwood: R_min (simplified)
+                                            R_min = 1.0 / (alpha_lk_hk - 1.0)
 
-                                        # Enthalpies
-                                        h_dist = 0.0
-                                        h_bott = 0.0
-                                        flash_d_out = self._flash_tp(d_names, d_zs, T_dist, P_cond, property_package)
-                                        if flash_d_out and flash_d_out.get("MW_mix", 0) > 0:
-                                            h_dist = flash_d_out["H"] / (flash_d_out["MW_mix"] / 1000.0)
-                                        flash_b_out = self._flash_tp(b_names, b_zs, T_bott, P_bott, property_package)
-                                        if flash_b_out and flash_b_out.get("MW_mix", 0) > 0:
-                                            h_bott = flash_b_out["H"] / (flash_b_out["MW_mix"] / 1000.0)
+                                            # Gilliland correlation
+                                            R = reflux_ratio
+                                            if R <= R_min:
+                                                R = R_min * 1.2
+                                                logs.append(f"WARNING: {name} R={reflux_ratio:.2f} ≤ R_min={R_min:.2f}, adjusting to {R:.2f}")
+                                            X = (R - R_min) / (R + 1.0)
+                                            Y = 0.75 * (1.0 - X ** 0.5668)
+                                            N_eff = (N_min + Y) / (1.0 - Y) if Y < 1.0 else n_stages
 
-                                        # Condenser/reboiler duties (with reflux ratio)
-                                        h_feed = inlet.get("enthalpy", 0.0)
-                                        D = mf * frac_dist  # distillate mass flow
-                                        B = mf * frac_bott  # bottoms mass flow
-                                        # Estimate vapor enthalpy at condenser from heat of vaporization
-                                        h_vap_dist = h_dist + _estimate_hvap(distillate_comp)
-                                        # Q_cond = V_top * (h_vap - h_dist), V_top = D * (R + 1)
-                                        Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
-                                        # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
-                                        Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
+                                            # Component recovery: d_i/b_i = (d_hk/b_hk) * alpha_i^N_eff
+                                            # Assume 99% HK recovery in bottoms
+                                            d_hk_over_b_hk = 0.01 / 0.99
+                                            d_fracs: list[float] = []
+                                            b_fracs: list[float] = []
+                                            for i in range(len(comp_names)):
+                                                alpha_N = alphas[i] ** N_eff if N_eff < 200 else 1e6
+                                                ratio_db = d_hk_over_b_hk * alpha_N
+                                                d_i = zs[i] * ratio_db / (1.0 + ratio_db)
+                                                b_i = zs[i] - d_i
+                                                d_fracs.append(max(d_i, 0.0))
+                                                b_fracs.append(max(b_i, 0.0))
 
-                                        # LK purity in distillate
-                                        lk_purity = distillate_comp.get(comp_names[lk_idx], 0.0)
+                                            # Normalize
+                                            d_total = sum(d_fracs) or 1e-12
+                                            b_total = sum(b_fracs) or 1e-12
+                                            distillate_comp = {comp_names[i]: d_fracs[i] / d_total for i in range(len(comp_names))}
+                                            bottoms_comp = {comp_names[i]: b_fracs[i] / b_total for i in range(len(comp_names))}
 
-                                        eq_res["numberOfStages"] = n_stages
-                                        eq_res["refluxRatio"] = reflux_ratio
-                                        eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
-                                        eq_res["N_min"] = round(N_min, 1)
-                                        eq_res["R_min"] = round(R_min, 3)
-                                        eq_res["N_eff"] = round(N_eff, 1)
-                                        eq_res["lightKeyPurity"] = round(lk_purity * 100, 1)
-                                        eq_res["lightKey"] = comp_names[lk_idx]
-                                        eq_res["heavyKey"] = comp_names[hk_idx]
-                                        eq_res["condenserDuty"] = round(_w_to_kw(Q_cond), 1)
-                                        eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb), 1)
-                                        eq_res["distillateTemperature"] = round(_k_to_c(T_dist), 1)
-                                        eq_res["bottomsTemperature"] = round(_k_to_c(T_bott), 1)
+                                            # Mass splits
+                                            MWs = flash_feed["MWs"]
+                                            mass_dist = sum(d_fracs[i] * MWs[i] for i in range(len(comp_names)))
+                                            mass_bott = sum(b_fracs[i] * MWs[i] for i in range(len(comp_names)))
+                                            mass_total = mass_dist + mass_bott
+                                            frac_dist = mass_dist / mass_total if mass_total > 0 else 0.5
+                                            frac_bott = 1.0 - frac_dist
 
-                                        outlets["out-1"] = {
-                                            "temperature": T_dist,
-                                            "pressure": P_cond,
-                                            "mass_flow": mf * frac_dist,
-                                            "vapor_fraction": 0.0,
-                                            "enthalpy": h_dist,
-                                            "composition": distillate_comp,
-                                        }
-                                        outlets["out-2"] = {
-                                            "temperature": T_bott,
-                                            "pressure": P_bott,
-                                            "mass_flow": mf * frac_bott,
-                                            "vapor_fraction": 0.0,
-                                            "enthalpy": h_bott,
-                                            "composition": bottoms_comp,
-                                        }
-                                        fug_ok = True
-                                        logs.append(
-                                            f"{name}: FUG — N_min={N_min:.1f}, R_min={R_min:.3f}, N_eff={N_eff:.1f}, "
-                                            f"LK purity={lk_purity:.1%}, T_dist={_k_to_c(T_dist):.1f}°C, T_bott={_k_to_c(T_bott):.1f}°C"
-                                        )
-                            except Exception as exc:
-                                logger.warning("Distillation FUG failed: %s, using boiling-point fallback", exc)
-                                logs.append(f"WARNING: {name} FUG method failed ({exc}), using boiling-point fallback")
+                                            # Flash distillate and bottoms for temperatures
+                                            P_bott = P_cond + N_eff * 1000.0  # ~1 kPa per stage
+                                            d_names = list(distillate_comp.keys())
+                                            d_zs = [float(v) for v in distillate_comp.values()]
+                                            b_names = list(bottoms_comp.keys())
+                                            b_zs = [float(v) for v in bottoms_comp.values()]
 
-                        # Boiling-point fallback (original method)
-                        if not fug_ok:
-                            comp_bp: list[tuple[str, float, float]] = []
-                            for cname, cfrac in comp.items():
-                                bp = 373.15
-                                if _thermo_available:
-                                    try:
-                                        c, _ = ChemicalConstantsPackage.from_IDs([cname])
-                                        bp = c.Tbs[0] if c.Tbs[0] else 373.15
-                                    except Exception:
-                                        pass
-                                elif _coolprop_available:
-                                    try:
-                                        bp = CP.PropsSI("T", "P", 101325, "Q", 0, cname)
-                                    except Exception:
-                                        pass
-                                comp_bp.append((cname, cfrac, bp))
+                                            # Try bubble point flash for distillate
+                                            flash_dist = self._flash_tp(d_names, d_zs, T_feed - 20, P_cond, property_package)
+                                            if flash_dist:
+                                                T_dist = flash_dist["T"]
+                                                # Try proper bubble point
+                                                try:
+                                                    flasher = flash_dist["flasher"]
+                                                    state_bp = flasher.flash(VF=0, P=P_cond, zs=flash_dist["zs"])
+                                                    T_dist = state_bp.T
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                T_dist = T_feed - 20
 
-                            comp_bp.sort(key=lambda x: x[2])
-                            distillate_comp = {}
-                            bottoms_comp = {}
-                            half = max(1, len(comp_bp) // 2)
-                            for i, (cname, cfrac, _bp) in enumerate(comp_bp):
-                                if i < half:
-                                    distillate_comp[cname] = cfrac
-                                else:
-                                    bottoms_comp[cname] = cfrac
+                                            flash_bott = self._flash_tp(b_names, b_zs, T_feed + 20, P_bott, property_package)
+                                            if flash_bott:
+                                                T_bott = flash_bott["T"]
+                                                try:
+                                                    flasher = flash_bott["flasher"]
+                                                    state_bp = flasher.flash(VF=0, P=P_bott, zs=flash_bott["zs"])
+                                                    T_bott = state_bp.T
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                T_bott = T_feed + 20
 
-                            dist_total = sum(distillate_comp.values()) or 1.0
-                            bott_total = sum(bottoms_comp.values()) or 1.0
-                            distillate_comp = {k: v / dist_total for k, v in distillate_comp.items()}
-                            bottoms_comp = {k: v / bott_total for k, v in bottoms_comp.items()}
+                                            # Enthalpies
+                                            h_dist = 0.0
+                                            h_bott = 0.0
+                                            flash_d_out = self._flash_tp(d_names, d_zs, T_dist, P_cond, property_package)
+                                            if flash_d_out and flash_d_out.get("MW_mix", 0) > 0:
+                                                h_dist = flash_d_out["H"] / (flash_d_out["MW_mix"] / 1000.0)
+                                            flash_b_out = self._flash_tp(b_names, b_zs, T_bott, P_bott, property_package)
+                                            if flash_b_out and flash_b_out.get("MW_mix", 0) > 0:
+                                                h_bott = flash_b_out["H"] / (flash_b_out["MW_mix"] / 1000.0)
 
-                            T_dist = T_feed - 20
-                            T_bott = T_feed + 20
+                                            # Condenser/reboiler duties (with reflux ratio)
+                                            h_feed = inlet.get("enthalpy", 0.0)
+                                            D = mf * frac_dist  # distillate mass flow
+                                            B = mf * frac_bott  # bottoms mass flow
+                                            # Estimate vapor enthalpy at condenser from heat of vaporization
+                                            h_vap_dist = h_dist + _estimate_hvap(distillate_comp)
+                                            # Q_cond = V_top * (h_vap - h_dist), V_top = D * (R + 1)
+                                            Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
+                                            # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
+                                            Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
+
+                                            # LK purity in distillate
+                                            lk_purity = distillate_comp.get(comp_names[lk_idx], 0.0)
+
+                                            eq_res["numberOfStages"] = n_stages
+                                            eq_res["refluxRatio"] = reflux_ratio
+                                            eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
+                                            eq_res["N_min"] = round(N_min, 1)
+                                            eq_res["R_min"] = round(R_min, 3)
+                                            eq_res["N_eff"] = round(N_eff, 1)
+                                            eq_res["lightKeyPurity"] = round(lk_purity * 100, 1)
+                                            eq_res["lightKey"] = comp_names[lk_idx]
+                                            eq_res["heavyKey"] = comp_names[hk_idx]
+                                            eq_res["condenserDuty"] = round(_w_to_kw(Q_cond), 1)
+                                            eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb), 1)
+                                            eq_res["distillateTemperature"] = round(_k_to_c(T_dist), 1)
+                                            eq_res["bottomsTemperature"] = round(_k_to_c(T_bott), 1)
+
+                                            outlets["out-1"] = {
+                                                "temperature": T_dist,
+                                                "pressure": P_cond,
+                                                "mass_flow": mf * frac_dist,
+                                                "vapor_fraction": 0.0,
+                                                "enthalpy": h_dist,
+                                                "composition": distillate_comp,
+                                            }
+                                            outlets["out-2"] = {
+                                                "temperature": T_bott,
+                                                "pressure": P_bott,
+                                                "mass_flow": mf * frac_bott,
+                                                "vapor_fraction": 0.0,
+                                                "enthalpy": h_bott,
+                                                "composition": bottoms_comp,
+                                            }
+                                            fug_ok = True
+                                            logs.append(
+                                                f"{name}: FUG — N_min={N_min:.1f}, R_min={R_min:.3f}, N_eff={N_eff:.1f}, "
+                                                f"LK purity={lk_purity:.1%}, T_dist={_k_to_c(T_dist):.1f}°C, T_bott={_k_to_c(T_bott):.1f}°C"
+                                            )
+                                except Exception as exc:
+                                    logger.warning("Distillation FUG failed: %s, using boiling-point fallback", exc)
+                                    logs.append(f"WARNING: {name} FUG method failed ({exc}), using boiling-point fallback")
+
+                            # Boiling-point fallback (original method)
+                            if not fug_ok:
+                                comp_bp: list[tuple[str, float, float]] = []
+                                for cname, cfrac in comp.items():
+                                    bp = 373.15
+                                    if _thermo_available:
+                                        try:
+                                            c, _ = ChemicalConstantsPackage.from_IDs([cname])
+                                            bp = c.Tbs[0] if c.Tbs[0] else 373.15
+                                        except Exception:
+                                            pass
+                                    elif _coolprop_available:
+                                        try:
+                                            bp = CP.PropsSI("T", "P", 101325, "Q", 0, cname)
+                                        except Exception:
+                                            pass
+                                    comp_bp.append((cname, cfrac, bp))
+
+                                comp_bp.sort(key=lambda x: x[2])
+                                distillate_comp = {}
+                                bottoms_comp = {}
+                                half = max(1, len(comp_bp) // 2)
+                                for i, (cname, cfrac, _bp) in enumerate(comp_bp):
+                                    if i < half:
+                                        distillate_comp[cname] = cfrac
+                                    else:
+                                        bottoms_comp[cname] = cfrac
+
+                                dist_total = sum(distillate_comp.values()) or 1.0
+                                bott_total = sum(bottoms_comp.values()) or 1.0
+                                distillate_comp = {k: v / dist_total for k, v in distillate_comp.items()}
+                                bottoms_comp = {k: v / bott_total for k, v in bottoms_comp.items()}
+
+                                T_dist = T_feed - 20
+                                T_bott = T_feed + 20
+
+                                eq_res["numberOfStages"] = n_stages
+                                eq_res["refluxRatio"] = reflux_ratio
+                                eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
+
+                                outlets["out-1"] = {
+                                    "temperature": T_dist,
+                                    "pressure": P_cond,
+                                    "mass_flow": mf * 0.5,
+                                    "vapor_fraction": 0.0,
+                                    "enthalpy": 0.0,
+                                    "composition": distillate_comp,
+                                }
+                                outlets["out-2"] = {
+                                    "temperature": T_bott,
+                                    "pressure": P_cond + 10000,
+                                    "mass_flow": mf * 0.5,
+                                    "vapor_fraction": 0.0,
+                                    "enthalpy": 0.0,
+                                    "composition": bottoms_comp,
+                                }
+                                logs.append(f"{name}: {n_stages} stages, RR = {reflux_ratio:.1f} (boiling-point fallback)")
+
+                        elif ntype == "CSTRReactor":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+
+                            volume = float(params.get("volume", 10.0))
+                            T_op_c = params.get("temperature")
+                            P_op_kpa = params.get("pressure")
+                            duty_kw = params.get("duty", 0)
+
+                            T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
+                            P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+
+                            # Residence time with real density (T2-02a)
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            rho = self._get_density(comp_names, zs, T_out, P_out, property_package)
+                            vol_flow = mf / rho if rho > 0 else 0
+                            tau = volume / vol_flow if vol_flow > 0 else float("inf")
+
+                            eq_res["volume"] = volume
+                            eq_res["residenceTime"] = round(tau, 1) if tau < 1e6 else "∞"
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                            eq_res["duty"] = round(float(duty_kw), 3)
+
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            # Thermo-based enthalpy (T3-01)
+                            flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                            if flash_out and flash_out.get("MW_mix", 0) > 0:
+                                mw_kg = flash_out["MW_mix"] / 1000.0
+                                outlet["enthalpy"] = flash_out["H"] / mw_kg
+                            else:
+                                outlet["enthalpy"] = _estimate_cp(comp) * (T_out - _T_REF)
+                            outlet["composition"] = dict(comp)
+
+                            # Arrhenius kinetics
+                            Ea_kj = float(params.get("activationEnergy", 0))
+                            A_pre = float(params.get("preExpFactor", 0))
+                            if Ea_kj > 0 and A_pre > 0:
+                                R_gas = 8.314e-3  # kJ/(mol·K)
+                                k_rate = A_pre * math.exp(-Ea_kj / (R_gas * T_out))
+                                X_arr = tau * k_rate / (1 + tau * k_rate) if tau < 1e6 else 0.999
+                                conversion_val = min(X_arr, 0.999)
+                                eq_res["rateConstant"] = round(k_rate, 4)
+                                eq_res["conversion"] = round(conversion_val * 100, 1)
+                                logs.append(f"  CSTR Arrhenius: k={k_rate:.4g} 1/s, X={conversion_val:.4f}")
+
+                            # Jacket heat transfer
+                            jacket_UA = float(params.get("jacketUA", 0))
+                            jacket_T_c = params.get("jacketTemp")
+                            if jacket_UA > 0 and jacket_T_c is not None:
+                                jacket_T = _c_to_k(float(jacket_T_c))
+                                Q_jacket = jacket_UA * 1000 * (jacket_T - T_out)
+                                eq_res["jacketDuty"] = round(Q_jacket / 1000, 2)
+                                logs.append(f"  CSTR jacket: Q={Q_jacket / 1000:.1f} kW")
+
+                            outlets["out-1"] = outlet
+                            logs.append(f"{name}: V = {volume} m³, τ = {tau:.0f} s")
+
+                        elif ntype == "PFRReactor":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+
+                            length = float(params.get("length", 5.0))
+                            diameter = float(params.get("diameter", 0.5))
+                            T_op_c = params.get("temperature")
+                            P_op_kpa = params.get("pressure")
+
+                            T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
+                            P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+
+                            volume = math.pi * (diameter / 2) ** 2 * length
+                            # Real density from flash (T2-02a)
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            rho = self._get_density(comp_names, zs, T_out, P_out, property_package)
+                            vol_flow = mf / rho if rho > 0 else 0
+                            tau = volume / vol_flow if vol_flow > 0 else float("inf")
+
+                            eq_res["volume"] = round(volume, 3)
+                            eq_res["length"] = length
+                            eq_res["diameter"] = diameter
+                            eq_res["residenceTime"] = round(tau, 1) if tau < 1e6 else "∞"
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            # Thermo-based enthalpy (T3-01)
+                            flash_pfr = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                            if flash_pfr and flash_pfr.get("MW_mix", 0) > 0:
+                                mw_kg = flash_pfr["MW_mix"] / 1000.0
+                                outlet["enthalpy"] = flash_pfr["H"] / mw_kg
+                            else:
+                                outlet["enthalpy"] = _estimate_cp(comp) * (T_out - _T_REF)
+                            outlet["composition"] = dict(comp)
+
+                            # PFR Ergun pressure drop
+                            Ea_kj = float(params.get("activationEnergy", 0))
+                            A_pre = float(params.get("preExpFactor", 0))
+                            eps = float(params.get("bedVoidFraction", 0.4))
+                            d_p = float(params.get("particleDiameter", 0.003))
+
+                            if d_p > 0 and eps > 0:
+                                mu = 1e-5  # Pa·s (gas viscosity approx)
+                                A_cross = math.pi * (diameter / 2) ** 2
+                                u_sup = mf / (rho * A_cross) if rho > 0 and A_cross > 0 else 1.0
+                                term1 = 150 * mu * (1 - eps) ** 2 / (d_p ** 2 * eps ** 3)
+                                term2 = 1.75 * rho * abs(u_sup) * (1 - eps) / (d_p * eps ** 3)
+                                dPdz = (term1 + term2) * abs(u_sup)
+                                dp_total = dPdz * length
+                                P_out_pfr = max(P_out - dp_total, 1000.0)
+                                outlet["pressure"] = P_out_pfr
+                                eq_res["pressureDrop"] = round(_pa_to_kpa(dp_total), 2)
+                                logs.append(f"  PFR Ergun ΔP = {_pa_to_kpa(dp_total):.1f} kPa")
+
+                            if Ea_kj > 0 and A_pre > 0:
+                                R_gas = 8.314e-3
+                                k_rate = A_pre * math.exp(-Ea_kj / (R_gas * T_out))
+                                X_pfr = 1.0 - math.exp(-k_rate * tau) if tau < 1e6 else 0.999
+                                eq_res["conversion"] = round(min(X_pfr, 0.999) * 100, 1)
+                                eq_res["rateConstant"] = round(k_rate, 4)
+                                logs.append(f"  PFR Arrhenius: k={k_rate:.4g} 1/s, X={X_pfr:.4f}")
+
+                            outlets["out-1"] = outlet
+                            logs.append(f"{name}: L = {length} m, D = {diameter} m, V = {volume:.2f} m³")
+
+                        elif ntype == "ConversionReactor":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            in_comp = inlet.get("composition", {})
+
+                            conversion = float(params.get("conversion", 80)) / 100.0
+                            conversion = max(0.0, min(1.0, conversion))
+                            T_op_c = params.get("temperature")
+                            P_op_kpa = params.get("pressure")
+                            duty_kw = params.get("duty", 0)
+
+                            T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
+                            P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+
+                            # Apply conversion to first component (key reactant) (T2-02b)
+                            out_comp = dict(in_comp)
+                            if out_comp:
+                                key_reactant = list(out_comp.keys())[0]
+                                z_before = out_comp[key_reactant]
+                                consumed = z_before * conversion
+                                out_comp[key_reactant] = z_before - consumed
+                                # Add consumed moles to "products" pseudo-component
+                                out_comp["products"] = out_comp.get("products", 0.0) + consumed
+                                # Renormalize
+                                total_z = sum(out_comp.values())
+                                if total_z > 0:
+                                    out_comp = {k: v / total_z for k, v in out_comp.items()}
+                                logs.append(f"{name}: key reactant '{key_reactant}' z={z_before:.4f} → {out_comp.get(key_reactant, 0):.4f}")
+
+                            # Flash outlet for enthalpy (T3-07: filter pseudo-components)
+                            clean_comp = _clean_composition(out_comp)
+                            out_comp_names = list(clean_comp.keys())
+                            out_zs = [float(v) for v in clean_comp.values()]
+                            flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
+
+                            eq_res["conversion"] = round(conversion * 100, 1)
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                            eq_res["duty"] = round(float(duty_kw), 3)
+
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            if flash_out and flash_out.get("MW_mix", 0) > 0:
+                                mw_kg = flash_out["MW_mix"] / 1000.0
+                                outlet["enthalpy"] = flash_out["H"] / mw_kg
+                            else:
+                                outlet["enthalpy"] = _estimate_cp(out_comp) * (T_out - _T_REF)
+                            outlet["composition"] = out_comp
+
+                            # Multi-reaction support
+                            reaction_count = int(params.get("reactionCount", 1))
+                            reactions_json = params.get("reactions", "[]")
+                            if reaction_count > 1 and reactions_json and reactions_json != "[]":
+                                try:
+                                    reactions = json.loads(reactions_json) if isinstance(reactions_json, str) else reactions_json
+                                    current_zs = dict(out_comp)
+                                    for rxn in reactions[:5]:
+                                        reactant = rxn.get("reactant", "")
+                                        conv_r = float(rxn.get("conversion", 0))
+                                        if reactant in current_zs:
+                                            reacted = current_zs[reactant] * conv_r
+                                            current_zs[reactant] = max(0, current_zs[reactant] - reacted)
+                                            products = rxn.get("products", {})
+                                            for prod, stoich in products.items():
+                                                current_zs[prod] = current_zs.get(prod, 0) + reacted * float(stoich)
+                                    total_z = sum(current_zs.values())
+                                    if total_z > 0:
+                                        current_zs = {k: v / total_z for k, v in current_zs.items()}
+                                    outlet["composition"] = current_zs
+                                    eq_res["reactionCount"] = len(reactions)
+                                    logs.append(f"  Multi-reaction: {len(reactions)} reactions applied")
+                                except Exception as e:
+                                    logs.append(f"WARNING: Multi-reaction parse error: {e}")
+
+                            outlets["out-1"] = outlet
+                            logs.append(f"{name}: X = {conversion:.0%}")
+
+                        elif ntype in ("Absorber", "Stripper"):
+                            # Absorber: gas feed (in-1) + solvent (in-2) → lean gas (out-1) + rich solvent (out-2)
+                            # Stripper: rich solvent (in-1) + stripping gas (in-2) → overhead gas (out-1) + lean solvent (out-2)
+                            # Uses Kremser equation: N = ln[(y_in/y_out)(1 - 1/A) + 1/A] / ln(A)
+                            # where A = L / (m * G), m = K-value of key component
+
+                            # Match inlets by handle
+                            feed1 = None  # gas (absorber) or rich solvent (stripper)
+                            feed2 = None  # solvent (absorber) or stripping gas (stripper)
+                            for i, handle in enumerate(inlet_handles):
+                                if i < len(inlets):
+                                    if handle == "in-1":
+                                        feed1 = inlets[i]
+                                    elif handle == "in-2":
+                                        feed2 = inlets[i]
+                            if feed1 is None and len(inlets) >= 1:
+                                feed1 = inlets[0]
+                            if feed2 is None and len(inlets) >= 2:
+                                feed2 = inlets[1]
+                            if feed1 is None:
+                                feed1 = self._build_feed_from_params(params)
+                            if feed2 is None:
+                                feed2 = dict(_DEFAULT_FEED)
+
+                            n_stages = int(params.get("numberOfStages", 10))
+                            P_op_kpa = params.get("pressure")
+                            P_op = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else feed1["pressure"]
+
+                            mf1 = feed1["mass_flow"]
+                            mf2 = feed2["mass_flow"]
+                            comp1 = feed1.get("composition", {})
+                            comp2 = feed2.get("composition", {})
+                            T1 = feed1["temperature"]
+                            T2 = feed2["temperature"]
+
+                            # Flash both feeds for K-values
+                            all_comps = set(comp1.keys()) | set(comp2.keys())
+                            comp_names_all = sorted(all_comps)
+
+                            # Build combined composition for K-value estimation
+                            total_moles1 = mf1 / max(sum(z * _get_mw(c) for c, z in comp1.items()) / 1000.0, 1e-12)
+                            total_moles2 = mf2 / max(sum(z * _get_mw(c) for c, z in comp2.items()) / 1000.0, 1e-12)
+                            combined_zs: dict[str, float] = {}
+                            for c in comp_names_all:
+                                n1 = comp1.get(c, 0.0) * total_moles1
+                                n2 = comp2.get(c, 0.0) * total_moles2
+                                combined_zs[c] = n1 + n2
+                            total_n = sum(combined_zs.values())
+                            if total_n > 0:
+                                combined_zs = {k: v / total_n for k, v in combined_zs.items()}
+
+                            cn = list(combined_zs.keys())
+                            zs_comb = list(combined_zs.values())
+                            T_avg = (T1 + T2) / 2
+
+                            # Get K-values from flash
+                            K_vals: dict[str, float] = {}
+                            flash_abs = self._flash_tp(cn, zs_comb, T_avg, P_op, property_package)
+                            if flash_abs:
+                                gas_zs = flash_abs["gas_zs"]
+                                liq_zs = flash_abs["liquid_zs"]
+                                for i, c in enumerate(cn):
+                                    x_i = liq_zs[i] if liq_zs[i] > 1e-12 else 1e-12
+                                    y_i = gas_zs[i] if gas_zs[i] > 1e-12 else 1e-12
+                                    K_vals[c] = y_i / x_i
+                            else:
+                                # Fallback: light components K>1, heavy K<1
+                                for c in cn:
+                                    mw = _get_mw(c)
+                                    K_vals[c] = max(0.1, 5.0 - mw / 50.0)
+
+                            # Kremser equation for each component
+                            G = total_moles1  # gas molar flow (mol/s)
+                            L = total_moles2  # liquid molar flow (mol/s)
+                            out1_comp: dict[str, float] = {}  # lean gas / overhead
+                            out2_comp: dict[str, float] = {}  # rich solvent / lean solvent
+
+                            for c in comp_names_all:
+                                K = K_vals.get(c, 1.0)
+                                m = K  # equilibrium ratio
+                                if ntype == "Absorber":
+                                    # Absorption factor A = L / (m * G)
+                                    A = L / (m * G) if (m * G) > 1e-12 else 10.0
+                                    y_in = comp1.get(c, 0.0)
+                                    x_in = comp2.get(c, 0.0)
+                                    if A > 1.001 and n_stages > 0 and y_in > 1e-12:
+                                        # Kremser: fraction absorbed
+                                        frac_absorbed = (A ** (n_stages + 1) - A) / (A ** (n_stages + 1) - 1)
+                                        frac_absorbed = max(0.0, min(1.0, frac_absorbed))
+                                    elif A > 0.999:
+                                        frac_absorbed = n_stages / (n_stages + 1)
+                                    else:
+                                        frac_absorbed = 0.0
+                                    out1_comp[c] = y_in * (1 - frac_absorbed)
+                                    out2_comp[c] = x_in + y_in * frac_absorbed * (G / L if L > 0 else 0)
+                                else:  # Stripper
+                                    # Stripping factor S = m * G / L
+                                    S = (m * G) / L if L > 1e-12 else 10.0
+                                    x_in = comp1.get(c, 0.0)
+                                    y_in = comp2.get(c, 0.0)
+                                    if S > 1.001 and n_stages > 0 and x_in > 1e-12:
+                                        frac_stripped = (S ** (n_stages + 1) - S) / (S ** (n_stages + 1) - 1)
+                                        frac_stripped = max(0.0, min(1.0, frac_stripped))
+                                    elif S > 0.999:
+                                        frac_stripped = n_stages / (n_stages + 1)
+                                    else:
+                                        frac_stripped = 0.0
+                                    out1_comp[c] = y_in + x_in * frac_stripped * (L / G if G > 0 else 0)
+                                    out2_comp[c] = x_in * (1 - frac_stripped)
+
+                            # Compute mass flows from Kremser material balance
+                            # out1_comp/out2_comp are unnormalized (proportional to moles)
+                            # For absorber: out1 = lean gas (moles per mol gas feed),
+                            #               out2 = rich solvent (moles per mol solvent feed)
+                            mf_out1 = 0.0
+                            mf_out2 = 0.0
+                            for c in comp_names_all:
+                                mw_c = _get_mw(c) / 1000.0  # kg/mol
+                                # Actual moles of c in outlet 1 and 2
+                                if ntype == "Absorber":
+                                    moles_out1_c = out1_comp.get(c, 0.0) * G
+                                    moles_out2_c = out2_comp.get(c, 0.0) * L
+                                else:  # Stripper
+                                    moles_out1_c = out1_comp.get(c, 0.0) * G
+                                    moles_out2_c = out2_comp.get(c, 0.0) * L
+                                mf_out1 += moles_out1_c * mw_c
+                                mf_out2 += moles_out2_c * mw_c
+                            # Fallback: enforce overall mass balance
+                            total_in = mf1 + mf2
+                            total_out = mf_out1 + mf_out2
+                            if total_out > 1e-12:
+                                scale = total_in / total_out
+                                mf_out1 *= scale
+                                mf_out2 *= scale
+                            else:
+                                mf_out1 = mf1 * 0.8
+                                mf_out2 = total_in - mf_out1
+
+                            # Normalize compositions
+                            t1 = sum(out1_comp.values()) or 1e-12
+                            t2 = sum(out2_comp.values()) or 1e-12
+                            out1_comp = {k: v / t1 for k, v in out1_comp.items()}
+                            out2_comp = {k: v / t2 for k, v in out2_comp.items()}
+
+                            # Estimate outlet temperatures (simple: average)
+                            T_out1 = T1 if ntype == "Absorber" else T_avg
+                            T_out2 = T_avg
 
                             eq_res["numberOfStages"] = n_stages
-                            eq_res["refluxRatio"] = reflux_ratio
-                            eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
+                            eq_res["pressure"] = round(_pa_to_kpa(P_op), 3)
 
                             outlets["out-1"] = {
-                                "temperature": T_dist,
-                                "pressure": P_cond,
-                                "mass_flow": mf * 0.5,
-                                "vapor_fraction": 0.0,
-                                "enthalpy": 0.0,
-                                "composition": distillate_comp,
+                                "temperature": T_out1,
+                                "pressure": P_op,
+                                "mass_flow": max(mf_out1, 1e-10),
+                                "vapor_fraction": 1.0 if ntype == "Absorber" else 0.5,
+                                "enthalpy": feed1.get("enthalpy", 0.0),
+                                "composition": out1_comp,
                             }
                             outlets["out-2"] = {
-                                "temperature": T_bott,
-                                "pressure": P_cond + 10000,
-                                "mass_flow": mf * 0.5,
-                                "vapor_fraction": 0.0,
-                                "enthalpy": 0.0,
-                                "composition": bottoms_comp,
+                                "temperature": T_out2,
+                                "pressure": P_op,
+                                "mass_flow": max(mf_out2, 1e-10),
+                                "vapor_fraction": 0.0 if ntype == "Absorber" else 0.0,
+                                "enthalpy": feed2.get("enthalpy", 0.0),
+                                "composition": out2_comp,
                             }
-                            logs.append(f"{name}: {n_stages} stages, RR = {reflux_ratio:.1f} (boiling-point fallback)")
+                            logs.append(f"{name}: {n_stages} stages, {ntype}")
 
-                    elif ntype == "CSTRReactor":
-                        inlet = inlets[0]
-                        T_in = inlet["temperature"]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        comp = inlet.get("composition", {})
+                        elif ntype == "Cyclone":
+                            # Cyclone separator: pressure drop device, splits gas from solids
+                            # Shepherd-Lapple correlation: ΔP = K * ρ_gas * V_inlet² / 2
+                            # K typically 6-8 for standard cyclone
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
 
-                        volume = float(params.get("volume", 10.0))
-                        T_op_c = params.get("temperature")
-                        P_op_kpa = params.get("pressure")
-                        duty_kw = params.get("duty", 0)
+                            # Cyclone pressure drop
+                            K_cyclone = float(params.get("pressureDropCoeff", 8.0))
+                            inlet_diameter = float(params.get("inletDiameter", 0.3))  # m
+                            efficiency = float(params.get("efficiency", 95)) / 100.0
 
-                        T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
-                        P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+                            # Gas density
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            rho_gas = self._get_density(comp_names, zs, T_in, P_in, property_package)
 
-                        # Residence time with real density (T2-02a)
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-                        rho = self._get_density(comp_names, zs, T_out, P_out, property_package)
-                        vol_flow = mf / rho if rho > 0 else 0
-                        tau = volume / vol_flow if vol_flow > 0 else float("inf")
+                            # Inlet velocity
+                            A_inlet = math.pi * (inlet_diameter / 2) ** 2
+                            V_inlet = mf / (rho_gas * A_inlet) if (rho_gas * A_inlet) > 0 else 10.0
 
-                        eq_res["volume"] = volume
-                        eq_res["residenceTime"] = round(tau, 1) if tau < 1e6 else "∞"
-                        eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
-                        eq_res["duty"] = round(float(duty_kw), 3)
+                            # Pressure drop (Pa)
+                            dp = K_cyclone * rho_gas * V_inlet ** 2 / 2.0
+                            P_out = P_in - dp
 
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        # Thermo-based enthalpy (T3-01)
-                        flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                        if flash_out and flash_out.get("MW_mix", 0) > 0:
-                            mw_kg = flash_out["MW_mix"] / 1000.0
-                            outlet["enthalpy"] = flash_out["H"] / mw_kg
+                            # Split: gas goes to out-1, "solids" (as fraction) to out-2
+                            solid_frac = 1.0 - efficiency  # fraction that passes through (unseparated)
+                            gas_frac = efficiency
+
+                            eq_res["pressureDrop"] = round(_pa_to_kpa(dp), 3)
+                            eq_res["inletVelocity"] = round(V_inlet, 2)
+                            eq_res["efficiency"] = round(efficiency * 100, 1)
+
+                            outlets["out-1"] = {
+                                "temperature": T_in,
+                                "pressure": P_out,
+                                "mass_flow": mf * gas_frac,
+                                "vapor_fraction": 1.0,
+                                "enthalpy": inlet.get("enthalpy", 0.0),
+                                "composition": dict(comp),
+                            }
+                            outlets["out-2"] = {
+                                "temperature": T_in,
+                                "pressure": P_out,
+                                "mass_flow": mf * solid_frac,
+                                "vapor_fraction": 0.0,
+                                "enthalpy": inlet.get("enthalpy", 0.0),
+                                "composition": dict(comp),
+                            }
+                            logs.append(f"{name}: ΔP = {_pa_to_kpa(dp):.1f} kPa, V_inlet = {V_inlet:.1f} m/s")
+
+                        elif ntype == "ThreePhaseSeparator":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+
+                            # Flash at T,P — _flash_tp returns a dict
+                            VF = 0.0
+                            vapor_comp = dict(comp)
+                            liquid_comp = dict(comp)
+                            flash_result = None
+                            if len(comp_names) >= 1:
+                                flash_result = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                                if flash_result:
+                                    VF = flash_result["VF"]
+                                    vapor_comp = {comp_names[i]: flash_result["gas_zs"][i] for i in range(len(comp_names))}
+                                    liquid_comp = {comp_names[i]: flash_result["liquid_zs"][i] for i in range(len(comp_names))}
+
+                            # Mass-based vapor/liquid split
+                            if flash_result and VF > 0 and VF < 1:
+                                MWs = flash_result["MWs"]
+                                MW_vap = sum(z * mw for z, mw in zip(flash_result["gas_zs"], MWs))
+                                MW_liq = sum(z * mw for z, mw in zip(flash_result["liquid_zs"], MWs))
+                                denom = VF * MW_vap + (1 - VF) * MW_liq
+                                mass_vap_frac = (VF * MW_vap) / denom if denom > 0 else VF
+                            else:
+                                mass_vap_frac = VF  # 0 or 1
+
+                            vapor_flow = mf * mass_vap_frac
+                            liquid_flow = mf * (1 - mass_vap_frac)
+
+                            # Split liquid into light/heavy by MW
+                            light_zs = dict(liquid_comp)
+                            heavy_zs = dict(liquid_comp)
+                            light_frac = 0.5
+                            if len(comp_names) >= 2 and liquid_flow > 0:
+                                mws = [_get_mw(c) for c in comp_names]
+                                liq_zs_list = [liquid_comp.get(c, 0.0) for c in comp_names]
+                                avg_mw = sum(m * z for m, z in zip(mws, liq_zs_list))
+                                l_sum, h_sum = 0.0, 0.0
+                                lz, hz = {}, {}
+                                for c, z, mw in zip(comp_names, liq_zs_list, mws):
+                                    if mw <= avg_mw:
+                                        lz[c] = z
+                                        l_sum += z
+                                    else:
+                                        hz[c] = z
+                                        h_sum += z
+                                if l_sum > 0:
+                                    light_zs = {c: v / l_sum for c, v in lz.items()}
+                                if h_sum > 0:
+                                    heavy_zs = {c: v / h_sum for c, v in hz.items()}
+                                light_frac = l_sum / (l_sum + h_sum) if (l_sum + h_sum) > 0 else 0.5
+
+                            eq_res["vaporFraction"] = round(VF, 4)
+                            eq_res["vaporFlow"] = round(vapor_flow, 4)
+                            eq_res["lightLiquidFlow"] = round(liquid_flow * light_frac, 4)
+                            eq_res["heavyLiquidFlow"] = round(liquid_flow * (1 - light_frac), 4)
+
+                            outlets["out-1"] = {"temperature": T_in, "pressure": P_in, "mass_flow": vapor_flow, "vapor_fraction": 1.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": vapor_comp}
+                            outlets["out-2"] = {"temperature": T_in, "pressure": P_in, "mass_flow": liquid_flow * light_frac, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": light_zs}
+                            outlets["out-3"] = {"temperature": T_in, "pressure": P_in, "mass_flow": liquid_flow * (1 - light_frac), "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": heavy_zs}
+                            logs.append(f"{name}: VF={VF:.3f}, vapor={vapor_flow:.3f} kg/s, light_liq={liquid_flow * light_frac:.3f}, heavy_liq={liquid_flow * (1 - light_frac):.3f}")
+
+                        elif ntype == "Crystallizer":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+                            comp_names = list(comp.keys())
+                            zs = [float(v) for v in comp.values()]
+                            cryst_temp = float(params.get("crystallizationTemp", 5))
+                            T_cryst = _c_to_k(cryst_temp)
+
+                            crystal_frac = 0.0
+                            crystal_zs = dict(comp)
+                            mother_zs = dict(comp)
+
+                            if comp_names:
+                                mws = [_get_mw(c) for c in comp_names]
+                                key_idx = mws.index(max(mws))
+                                key_comp = comp_names[key_idx]
+                                delta_T = max(0, T_in - T_cryst)
+                                crystal_frac = min(0.9, delta_T / 200.0)
+                                crystal_flow = mf * zs[key_idx] * crystal_frac
+                                mother_flow = mf - crystal_flow
+                                crystal_zs = {key_comp: 1.0}
+                                m_zs = dict(comp)
+                                m_zs[key_comp] = zs[key_idx] * (1 - crystal_frac)
+                                mt = sum(m_zs.values()) or 1
+                                mother_zs = {c: v / mt for c, v in m_zs.items()}
+                            else:
+                                crystal_flow = 0.0
+                                mother_flow = mf
+
+                            eq_res["crystalYield"] = round(crystal_frac * 100, 1)
+                            eq_res["crystallizationTemp"] = cryst_temp
+
+                            outlets["out-1"] = {"temperature": T_cryst, "pressure": P_in, "mass_flow": crystal_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": crystal_zs}
+                            outlets["out-2"] = {"temperature": T_cryst, "pressure": P_in, "mass_flow": mother_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": mother_zs}
+                            logs.append(f"{name}: crystallization at {cryst_temp}°C, yield={crystal_frac * 100:.1f}%")
+
+                        elif ntype == "Dryer":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+                            target_moisture = float(params.get("outletMoisture", 5)) / 100.0
+
+                            water_keys = [c for c in comp if c.lower() in ("water", "h2o")]
+                            if water_keys:
+                                wk = water_keys[0]
+                                water_frac = float(comp.get(wk, 0))
+                                water_removed = max(0, water_frac - target_moisture)
+                                moisture_flow = mf * water_removed
+                                dry_flow = mf - moisture_flow
+                                dry_zs = dict(comp)
+                                dry_zs[wk] = target_moisture
+                                dt = sum(dry_zs.values()) or 1
+                                dry_zs = {c: v / dt for c, v in dry_zs.items()}
+                                vapor_zs = {wk: 1.0}
+                                hvap = 2260000.0
+                                calc_duty = moisture_flow * hvap
+                                eq_res["duty"] = round(calc_duty / 1000, 2)
+                            else:
+                                dry_flow = mf
+                                moisture_flow = 0.0
+                                dry_zs = dict(comp)
+                                vapor_zs = {"water": 1.0}
+                                eq_res["duty"] = 0
+
+                            eq_res["outletMoisture"] = float(params.get("outletMoisture", 5))
+                            eq_res["waterRemoved"] = round(moisture_flow, 4)
+
+                            outlets["out-1"] = {"temperature": T_in, "pressure": P_in, "mass_flow": dry_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": dry_zs}
+                            outlets["out-2"] = {"temperature": T_in + 20, "pressure": P_in, "mass_flow": moisture_flow, "vapor_fraction": 1.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": vapor_zs}
+                            logs.append(f"{name}: moisture {float(params.get('outletMoisture', 5))}%, removed {moisture_flow:.4f} kg/s")
+
+                        elif ntype == "Filter":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+                            efficiency = float(params.get("efficiency", 95)) / 100.0
+                            dp = _kpa_to_pa(float(params.get("pressureDrop", 50)))
+
+                            filtrate_flow = mf * (1 - efficiency * 0.1)
+                            cake_flow = mf - filtrate_flow
+                            P_out = max(P_in - dp, 1000.0)
+
+                            eq_res["efficiency"] = float(params.get("efficiency", 95))
+                            eq_res["pressureDrop"] = round(_pa_to_kpa(dp), 2)
+                            eq_res["filtrateFlow"] = round(filtrate_flow, 4)
+                            eq_res["cakeFlow"] = round(cake_flow, 4)
+
+                            outlets["out-1"] = {"temperature": T_in, "pressure": P_out, "mass_flow": filtrate_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": dict(comp)}
+                            outlets["out-2"] = {"temperature": T_in, "pressure": P_in, "mass_flow": cake_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": dict(comp)}
+                            logs.append(f"{name}: eff={efficiency * 100:.0f}%, ΔP={_pa_to_kpa(dp):.1f} kPa, filtrate={filtrate_flow:.4f}, cake={cake_flow:.4f}")
+
                         else:
-                            outlet["enthalpy"] = _estimate_cp(comp) * (T_out - _T_REF)
-                        outlet["composition"] = dict(comp)
-                        outlets["out-1"] = outlet
-                        logs.append(f"{name}: V = {volume} m³, τ = {tau:.0f} s")
+                            # Unknown equipment – pass through
+                            if inlets:
+                                outlets["out-1"] = dict(inlets[0])
+                            logs.append(f"{name}: pass-through (no model for {ntype})")
 
-                    elif ntype == "PFRReactor":
-                        inlet = inlets[0]
-                        T_in = inlet["temperature"]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        comp = inlet.get("composition", {})
+                        # Store outlet port conditions for downstream propagation
+                        # (T3-07: clean pseudo-components so downstream flash works)
+                        for port_id, cond in outlets.items():
+                            if "composition" in cond:
+                                cond["composition"] = _clean_composition(cond["composition"])
+                            port_conditions[(nid, port_id)] = cond
 
-                        length = float(params.get("length", 5.0))
-                        diameter = float(params.get("diameter", 0.5))
-                        T_op_c = params.get("temperature")
-                        P_op_kpa = params.get("pressure")
+                        # Build the public result (remove internal _outlets)
+                        equipment_results[nid] = eq_res
 
-                        T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
-                        P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+                        # Progress callback for SSE streaming
+                        if progress_callback:
+                            try:
+                                eq_idx = sorted_ids.index(nid) + 1
+                                await progress_callback(name, eq_idx, len(sorted_ids))
+                            except Exception:
+                                pass
+                    except Exception as exc:
+                        name = node.get("name", nid)
+                        logger.exception("Equipment %s (%s) failed", name, nid)
+                        logs.append(f"ERROR: {name} simulation failed: {exc}")
+                        equipment_results[nid] = {"error": str(exc)}
+                        has_errors = True
 
-                        volume = math.pi * (diameter / 2) ** 2 * length
-                        # Real density from flash (T2-02a)
-                        comp_names = list(comp.keys())
-                        zs = [float(v) for v in comp.values()]
-                        rho = self._get_density(comp_names, zs, T_out, P_out, property_package)
-                        vol_flow = mf / rho if rho > 0 else 0
-                        tau = volume / vol_flow if vol_flow > 0 else float("inf")
+                # --- end of equipment loop for this iteration ---
 
-                        eq_res["volume"] = round(volume, 3)
-                        eq_res["length"] = length
-                        eq_res["diameter"] = diameter
-                        eq_res["residenceTime"] = round(tau, 1) if tau < 1e6 else "∞"
-                        eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                # Check tear-stream convergence
+                if not tear_edges:
+                    converged_recycle = True
+                    break  # No recycle — single pass is sufficient
 
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        # Thermo-based enthalpy (T3-01)
-                        flash_pfr = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                        if flash_pfr and flash_pfr.get("MW_mix", 0) > 0:
-                            mw_kg = flash_pfr["MW_mix"] / 1000.0
-                            outlet["enthalpy"] = flash_pfr["H"] / mw_kg
+                max_error = 0.0
+                new_tear_conditions: dict[str, dict[str, Any]] = {}
+                for te in tear_edges:
+                    src = te.get("source", "")
+                    sh = te.get("sourceHandle", "out-1")
+                    te_key = f"{src}_{sh}"
+                    computed = port_conditions.get((src, sh))
+                    if not computed:
+                        continue
+                    old = tear_stream_conditions.get(te_key, dict(_DEFAULT_FEED))
+
+                    # Compare T, P, mass_flow
+                    for field in ("temperature", "pressure", "mass_flow"):
+                        old_val = old.get(field, 0.0)
+                        new_val = computed.get(field, 0.0)
+                        denom = max(abs(old_val), abs(new_val), 1e-12)
+                        err = abs(new_val - old_val) / denom
+                        max_error = max(max_error, err)
+
+                    # Damping + Wegstein acceleration
+                    blended = {}
+                    for field in ("temperature", "pressure", "mass_flow", "enthalpy", "vapor_fraction"):
+                        x_old = old.get(field, 0.0)
+                        g_new = computed.get(field, 0.0)
+                        wkey = f"{te_key}_{field}"
+                        if wkey in wegstein_prev:
+                            x_prev, g_prev = wegstein_prev[wkey]
+                            dg = g_new - g_prev
+                            dx = x_old - x_prev
+                            if abs(dx) > 1e-15:
+                                s = dg / dx
+                                q = s / (s - 1.0)
+                                q = max(-5.0, min(0.9, q))  # clamp Wegstein parameter
+                                blended[field] = (1.0 - q) * g_new + q * x_old
+                            else:
+                                blended[field] = damping * g_new + (1.0 - damping) * x_old
+                            wegstein_prev[wkey] = [x_old, g_new]
                         else:
-                            outlet["enthalpy"] = _estimate_cp(comp) * (T_out - _T_REF)
-                        outlet["composition"] = dict(comp)
-                        outlets["out-1"] = outlet
-                        logs.append(f"{name}: L = {length} m, D = {diameter} m, V = {volume:.2f} m³")
+                            # First iteration: simple damping
+                            blended[field] = damping * g_new + (1.0 - damping) * x_old
+                            wegstein_prev[wkey] = [x_old, g_new]
 
-                    elif ntype == "ConversionReactor":
-                        inlet = inlets[0]
-                        T_in = inlet["temperature"]
-                        P_in = inlet["pressure"]
-                        mf = inlet["mass_flow"]
-                        in_comp = inlet.get("composition", {})
+                    blended["composition"] = computed.get("composition", old.get("composition", {}))
+                    new_tear_conditions[te_key] = blended
 
-                        conversion = float(params.get("conversion", 80)) / 100.0
-                        conversion = max(0.0, min(1.0, conversion))
-                        T_op_c = params.get("temperature")
-                        P_op_kpa = params.get("pressure")
-                        duty_kw = params.get("duty", 0)
+                tear_stream_conditions = new_tear_conditions
 
-                        T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
-                        P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+                if max_error < tolerance:
+                    converged_recycle = True
+                    logs.append(f"Tear-stream converged in {iteration} iterations (max error: {max_error:.2e})")
+                    break
 
-                        # Apply conversion to first component (key reactant) (T2-02b)
-                        out_comp = dict(in_comp)
-                        if out_comp:
-                            key_reactant = list(out_comp.keys())[0]
-                            z_before = out_comp[key_reactant]
-                            consumed = z_before * conversion
-                            out_comp[key_reactant] = z_before - consumed
-                            # Add consumed moles to "products" pseudo-component
-                            out_comp["products"] = out_comp.get("products", 0.0) + consumed
-                            # Renormalize
-                            total_z = sum(out_comp.values())
-                            if total_z > 0:
-                                out_comp = {k: v / total_z for k, v in out_comp.items()}
-                            logs.append(f"{name}: key reactant '{key_reactant}' z={z_before:.4f} → {out_comp.get(key_reactant, 0):.4f}")
+                if iteration == max_iterations:
+                    logs.append(
+                        f"WARNING: Tear-stream did NOT converge after {max_iterations} iterations "
+                        f"(max error: {max_error:.2e}, tolerance: {tolerance:.0e})"
+                    )
 
-                        # Flash outlet for enthalpy (T3-07: filter pseudo-components)
-                        clean_comp = _clean_composition(out_comp)
-                        out_comp_names = list(clean_comp.keys())
-                        out_zs = [float(v) for v in clean_comp.values()]
-                        flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
+            # ----------------------------------------------------------
+            # T4-3: Mass/energy balance validation
+            # ----------------------------------------------------------
+            mass_balance_ok = True
+            energy_balance_ok = True
+            for node in nodes:
+                nid = node.get("id", "")
+                ntype = node.get("type", "")
+                nname = node.get("name", nid)
+                eq_r = equipment_results.get(nid, {})
+                if "error" in eq_r:
+                    continue  # skip failed equipment
 
-                        eq_res["conversion"] = round(conversion * 100, 1)
-                        eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
-                        eq_res["duty"] = round(float(duty_kw), 3)
+                # Sum inlet mass flows
+                inlet_mass = 0.0
+                inlet_enthalpy_rate = 0.0
+                for src_id, _sh, _th in upstream.get(nid, []):
+                    for tgt_id, sh2, _th2 in downstream.get(src_id, []):
+                        if tgt_id == nid:
+                            cond = port_conditions.get((src_id, sh2))
+                            if cond:
+                                inlet_mass += cond.get("mass_flow", 0.0)
+                                inlet_enthalpy_rate += cond.get("mass_flow", 0.0) * cond.get("enthalpy", 0.0)
+                            break
 
-                        outlet = dict(inlet)
-                        outlet["temperature"] = T_out
-                        outlet["pressure"] = P_out
-                        if flash_out and flash_out.get("MW_mix", 0) > 0:
-                            mw_kg = flash_out["MW_mix"] / 1000.0
-                            outlet["enthalpy"] = flash_out["H"] / mw_kg
-                        else:
-                            outlet["enthalpy"] = _estimate_cp(out_comp) * (T_out - _T_REF)
-                        outlet["composition"] = out_comp
-                        outlets["out-1"] = outlet
-                        logs.append(f"{name}: X = {conversion:.0%}")
+                # Sum outlet mass flows
+                outlet_mass = 0.0
+                outlet_enthalpy_rate = 0.0
+                for _tgt_id, sh, _th in downstream.get(nid, []):
+                    cond = port_conditions.get((nid, sh))
+                    if cond:
+                        outlet_mass += cond.get("mass_flow", 0.0)
+                        outlet_enthalpy_rate += cond.get("mass_flow", 0.0) * cond.get("enthalpy", 0.0)
 
-                    else:
-                        # Unknown equipment – pass through
-                        if inlets:
-                            outlets["out-1"] = dict(inlets[0])
-                        logs.append(f"{name}: pass-through (no model for {ntype})")
+                # Mass balance check (skip nodes with no upstream = feed nodes)
+                if inlet_mass > 0 and outlet_mass > 0:
+                    mass_err = abs(inlet_mass - outlet_mass)
+                    if mass_err > 1e-6 * max(inlet_mass, 1e-12):
+                        # Splitter/separator may have rounding differences
+                        rel_err = mass_err / max(inlet_mass, 1e-12)
+                        if rel_err > 0.01:  # >1% mass imbalance
+                            mass_balance_ok = False
+                            logs.append(
+                                f"WARNING: {nname} mass imbalance: in={inlet_mass:.4f} kg/s, "
+                                f"out={outlet_mass:.4f} kg/s ({rel_err:.1%} error)"
+                            )
 
-                    # Store outlet port conditions for downstream propagation
-                    # (T3-07: clean pseudo-components so downstream flash works)
-                    for port_id, cond in outlets.items():
-                        if "composition" in cond:
-                            cond["composition"] = _clean_composition(cond["composition"])
-                        port_conditions[(nid, port_id)] = cond
+                # Energy balance check (Q/W from equipment results)
+                if inlet_mass > 0 and outlet_mass > 0:
+                    duty_w = 0.0
+                    if "duty" in eq_r:
+                        duty_w = _kw_to_w(float(eq_r["duty"]))
+                    elif "work" in eq_r:
+                        duty_w = _kw_to_w(float(eq_r["work"]))
+                    energy_in = inlet_enthalpy_rate + abs(duty_w) if duty_w > 0 else inlet_enthalpy_rate
+                    energy_out = outlet_enthalpy_rate + abs(duty_w) if duty_w < 0 else outlet_enthalpy_rate
+                    denom = max(abs(energy_in), abs(energy_out), 1e-6)
+                    energy_err = abs(energy_in - energy_out) / denom
+                    if energy_err > 0.05:  # >5% energy imbalance
+                        energy_balance_ok = False
+                        # Only log for significant imbalances, not rounding
+                        if energy_err > 0.10:
+                            logs.append(
+                                f"WARNING: {nname} energy imbalance: {energy_err:.1%} "
+                                f"(H_in={inlet_enthalpy_rate:.0f} W, H_out={outlet_enthalpy_rate:.0f} W, Q/W={duty_w:.0f} W)"
+                            )
 
-                    # Build the public result (remove internal _outlets)
-                    equipment_results[nid] = eq_res
-                except Exception as exc:
-                    name = node.get("name", nid)
-                    logger.exception("Equipment %s (%s) failed", name, nid)
-                    logs.append(f"ERROR: {name} simulation failed: {exc}")
-                    equipment_results[nid] = {"error": str(exc)}
-                    has_errors = True
+            # ----------------------------------------------------------
+            # T5-2: Post-simulation equipment sizing correlations
+            # ----------------------------------------------------------
+            for node in nodes:
+                nid = node.get("id", "")
+                ntype = node.get("type", "")
+                eq_r = equipment_results.get(nid, {})
+                if "error" in eq_r:
+                    continue
+                sizing: dict[str, Any] = {}
+
+                if ntype == "Separator":
+                    # Souders-Brown: V_max = K_sb * sqrt((ρ_L - ρ_V) / ρ_V)
+                    # K_sb ≈ 0.05-0.1 m/s for vertical separators
+                    mf = 0.0
+                    for _src, _sh, _th in upstream.get(nid, []):
+                        for _tgt, sh2, _th2 in downstream.get(_src, []):
+                            if _tgt == nid:
+                                c = port_conditions.get((_src, sh2))
+                                if c:
+                                    mf = c.get("mass_flow", 0.0)
+                                break
+                    if mf > 0:
+                        K_sb = 0.07  # typical for gas-liquid
+                        rho_L = 800.0  # approximate
+                        rho_V = 5.0
+                        # Try to get from flash
+                        vap_port = port_conditions.get((nid, "out-1"))
+                        liq_port = port_conditions.get((nid, "out-2"))
+                        if vap_port:
+                            cn = list(vap_port.get("composition", {}).keys())
+                            zs_v = list(vap_port.get("composition", {}).values())
+                            if cn:
+                                rho_V = max(self._get_density(cn, zs_v, vap_port["temperature"], vap_port["pressure"], property_package), 0.1)
+                        if liq_port:
+                            cn = list(liq_port.get("composition", {}).keys())
+                            zs_l = list(liq_port.get("composition", {}).values())
+                            if cn:
+                                rho_L = max(self._get_density(cn, zs_l, liq_port["temperature"], liq_port["pressure"], property_package), 1.0)
+                        V_max = K_sb * math.sqrt(max((rho_L - rho_V) / max(rho_V, 0.01), 0))
+                        if V_max > 0:
+                            A_min = mf / (rho_V * V_max) if rho_V > 0 else 1.0
+                            D_min = math.sqrt(4 * A_min / math.pi)
+                            sizing["diameter_m"] = round(D_min, 3)
+                            sizing["K_sb"] = K_sb
+                            sizing["V_max_m_s"] = round(V_max, 3)
+
+                elif ntype == "HeatExchanger":
+                    duty_kw = eq_r.get("duty", 0)
+                    lmtd = eq_r.get("LMTD", 0)
+                    if duty_kw and lmtd and float(lmtd) > 0:
+                        U = 500.0  # W/(m²·K), typical liquid-liquid
+                        Q_w = abs(_kw_to_w(float(duty_kw)))
+                        A = Q_w / (U * float(lmtd))
+                        sizing["area_m2"] = round(A, 2)
+                        sizing["U_assumed"] = U
+
+                elif ntype == "DistillationColumn":
+                    # Fair's flooding correlation (simplified)
+                    mf_val = 0.0
+                    for _src, _sh, _th in upstream.get(nid, []):
+                        for _tgt, sh2, _th2 in downstream.get(_src, []):
+                            if _tgt == nid:
+                                c = port_conditions.get((_src, sh2))
+                                if c:
+                                    mf_val = c.get("mass_flow", 0.0)
+                                break
+                    if mf_val > 0:
+                        # Approximate: D = sqrt(4*V_dot / (pi * V_flood * 0.8))
+                        V_flood = 1.5  # m/s approximate
+                        rho_V_approx = 2.0  # kg/m³
+                        V_dot = mf_val / max(rho_V_approx, 0.1)
+                        A_col = V_dot / (V_flood * 0.8)
+                        D_col = math.sqrt(4 * max(A_col, 0.01) / math.pi)
+                        sizing["diameter_m"] = round(D_col, 3)
+                        sizing["flooding_velocity_m_s"] = V_flood
+
+                if sizing:
+                    eq_r["sizing"] = sizing
+
+            # ----------------------------------------------------------
+            # Equipment costing (CEPCI-adjusted correlations)
+            # ----------------------------------------------------------
+            CEPCI_BASE = 397   # 2004
+            CEPCI_CURR = 816   # 2024
+            cepci_ratio = CEPCI_CURR / CEPCI_BASE
+
+            for node in nodes:
+                nid = node.get("id", "")
+                ntype = node.get("type", "")
+                eq_r = equipment_results.get(nid, {})
+                if "error" in eq_r:
+                    continue
+                costing: dict[str, Any] = {}
+                try:
+                    if ntype == "Pump":
+                        Q = float(eq_r.get("work", 0))
+                        if Q > 0:
+                            C_base = 3540 * (Q ** 0.71)
+                            costing["purchaseCost"] = round(C_base * cepci_ratio)
+                            costing["method"] = "Seider pump correlation"
+                    elif ntype == "Compressor":
+                        W = float(eq_r.get("work", 0))
+                        if W > 0:
+                            C_base = 7090 * (W ** 0.61)
+                            costing["purchaseCost"] = round(C_base * cepci_ratio)
+                            costing["method"] = "Seider compressor correlation"
+                    elif ntype == "HeatExchanger":
+                        sizing_d = eq_r.get("sizing", {})
+                        A = float(sizing_d.get("area_m2", 0))
+                        if A > 0:
+                            C_base = 32800 * (A ** 0.65)
+                            costing["purchaseCost"] = round(C_base * cepci_ratio)
+                            costing["method"] = "A-based HX correlation"
+                    elif ntype == "DistillationColumn":
+                        sizing_d = eq_r.get("sizing", {})
+                        N = float(eq_r.get("stages", sizing_d.get("stages", 10)))
+                        D = float(sizing_d.get("diameter_m", 1.0))
+                        if N > 0 and D > 0:
+                            C_base = 17640 * ((N * D ** 2) ** 0.802)
+                            costing["purchaseCost"] = round(C_base * cepci_ratio)
+                            costing["method"] = "Column vessel correlation"
+                    elif ntype in ("Separator", "ThreePhaseSeparator"):
+                        sizing_d = eq_r.get("sizing", {})
+                        D_sep = float(sizing_d.get("diameter_m", 1.0))
+                        if D_sep > 0:
+                            V_est = math.pi * (D_sep / 2) ** 2 * D_sep * 3
+                            C_base = 10200 * (V_est ** 0.62)
+                            costing["purchaseCost"] = round(C_base * cepci_ratio)
+                            costing["method"] = "Vessel correlation"
+                    if costing:
+                        costing["cepciYear"] = 2024
+                        costing["cepciIndex"] = CEPCI_CURR
+                        eq_r["costing"] = costing
+                except Exception:
+                    pass
 
             # Build stream results from edges (convert to frontend units)
             stream_results: dict[str, Any] = {}
@@ -1851,15 +2898,18 @@ class DWSIMEngine:
             if _coolprop_available:
                 engine_name = "thermo_coolprop_fallback"
 
-            converged = not has_errors and not cycle_ids
+            converged = not has_errors and converged_recycle
             status = "partial" if has_errors else "success"
             convergence_info: dict[str, Any] = {
-                "iterations": 1,
+                "iterations": actual_iterations,
                 "converged": converged,
                 "error": 0.0,
             }
-            if cycle_ids:
+            convergence_info["mass_balance_ok"] = mass_balance_ok
+            convergence_info["energy_balance_ok"] = energy_balance_ok
+            if tear_edges:
                 convergence_info["recycle_detected"] = True
+                convergence_info["tear_streams"] = len(tear_edges)
 
             return {
                 "status": status,

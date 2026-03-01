@@ -16,7 +16,7 @@ export default function ChatMessage({ message }: Props) {
           isUser
             ? 'bg-blue-500/20 text-blue-400'
             : isSystem
-            ? 'bg-gray-700 text-gray-400'
+            ? 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400'
             : 'bg-purple-500/20 text-purple-400'
         }`}
       >
@@ -25,10 +25,10 @@ export default function ChatMessage({ message }: Props) {
       <div
         className={`flex-1 rounded-lg px-3 py-2 text-sm ${
           isUser
-            ? 'bg-blue-500/20 text-blue-100 rounded-tr-none'
+            ? 'bg-blue-500/20 text-blue-900 dark:text-blue-100 rounded-tr-none'
             : isSystem
-            ? 'bg-gray-800 text-gray-400 italic'
-            : 'bg-gray-800 text-gray-200 rounded-tl-none'
+            ? 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 italic'
+            : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-tl-none'
         }`}
       >
         <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>

@@ -481,7 +481,7 @@ test.describe('Phase 3: Engine Accuracy', () => {
     await page.waitForSelector('text=Simulation Complete', { timeout: 30_000 });
 
     // Verify the bottom panel appears with the completion status
-    await expect(page.locator('text=Simulation Complete')).toBeVisible();
+    await expect(page.locator('text=Simulation Complete').first()).toBeVisible();
 
     // Check for result badges on nodes (Q: xxx kW or W: xxx kW or VF: x.xxx)
     // Badges are rendered as spans with class text-green-400 inside .react-flow__node

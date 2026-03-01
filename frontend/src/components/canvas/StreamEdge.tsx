@@ -48,7 +48,13 @@ export default function StreamEdge({
         markerEnd={markerEnd}
         style={{
           ...style,
-          stroke: '#60a5fa',
+          stroke: streamResult?.vapor_fraction != null
+            ? streamResult.vapor_fraction > 0.9
+              ? '#EF4444'
+              : streamResult.vapor_fraction < 0.1
+                ? '#3B82F6'
+                : '#F59E0B'
+            : '#60a5fa',
           strokeWidth: 2,
         }}
         id={id}

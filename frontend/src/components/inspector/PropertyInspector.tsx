@@ -27,12 +27,12 @@ export default function PropertyInspector() {
   );
 
   return (
-    <div className="w-72 bg-gray-900 border-l border-gray-800 flex flex-col overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
-        <h2 className="text-sm font-semibold text-gray-200">Properties</h2>
+    <div className="w-72 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-800 flex flex-col overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+        <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-200">Properties</h2>
         <button
           onClick={() => setSelectedNode(null)}
-          className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
+          className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
         >
           <X size={16} />
         </button>
@@ -40,18 +40,18 @@ export default function PropertyInspector() {
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Name</label>
+          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Name</label>
           <input
             type="text"
             value={node.data.name}
             onChange={(e) => updateNodeData(node.id, { name: e.target.value })}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+            className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
           />
         </div>
 
         <div>
-          <label className="block text-xs text-gray-400 mb-1">Type</label>
-          <div className="text-sm text-gray-300 bg-gray-800 border border-gray-700 rounded px-3 py-1.5">
+          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Type</label>
+          <div className="text-sm text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5">
             {def.label}
           </div>
         </div>
@@ -65,17 +65,17 @@ export default function PropertyInspector() {
           />
         )}
 
-        <div className="border-t border-gray-800 pt-4">
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
+          <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">
             Parameters
           </h3>
           <div className="space-y-3">
             {regularParams.map(([key, paramDef]) => (
               <div key={key}>
-                <label className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                <label className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
                   <span>{paramDef.label}</span>
                   {paramDef.unit && (
-                    <span className="text-gray-500">{paramDef.unit}</span>
+                    <span className="text-gray-500 dark:text-gray-500">{paramDef.unit}</span>
                   )}
                 </label>
                 {paramDef.type === 'boolean' ? (
@@ -91,7 +91,7 @@ export default function PropertyInspector() {
                     className={`w-full text-left px-3 py-1.5 rounded text-sm border ${
                       node.data.parameters[key]
                         ? 'bg-blue-500/20 border-blue-500 text-blue-300'
-                        : 'bg-gray-800 border-gray-700 text-gray-300'
+                        : 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300'
                     }`}
                   >
                     {node.data.parameters[key] ? 'Enabled' : 'Disabled'}
@@ -123,14 +123,14 @@ export default function PropertyInspector() {
                         });
                       }
                     }}
-                    className={`w-full bg-gray-800 border rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500 placeholder-gray-600 ${
+                    className={`w-full bg-gray-100 dark:bg-gray-800 border rounded px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500 placeholder-gray-400 dark:placeholder-gray-600 ${
                       (() => {
                         const v = node.data.parameters[key];
-                        if (v === undefined || v === '') return 'border-gray-700';
+                        if (v === undefined || v === '') return 'border-gray-300 dark:border-gray-700';
                         const n = Number(v);
-                        if (isNaN(n)) return 'border-gray-700';
+                        if (isNaN(n)) return 'border-gray-300 dark:border-gray-700';
                         if ((paramDef.min !== undefined && n < paramDef.min) || (paramDef.max !== undefined && n > paramDef.max)) return 'border-red-500 ring-1 ring-red-500';
-                        return 'border-gray-700';
+                        return 'border-gray-300 dark:border-gray-700';
                       })()
                     }`}
                   />
@@ -146,7 +146,7 @@ export default function PropertyInspector() {
                         },
                       })
                     }
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
                   />
                 )}
               </div>
@@ -154,7 +154,7 @@ export default function PropertyInspector() {
           </div>
         </div>
 
-        <div className="border-t border-gray-800 pt-4">
+        <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
           <button
             onClick={() => {
               removeNode(node.id);
@@ -276,7 +276,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
   const total = Object.values(feedComposition).reduce((s, v) => s + v, 0);
 
   return (
-    <div className="border-t border-gray-800 pt-4">
+    <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
       <h3 className="text-xs font-semibold text-blue-400 uppercase tracking-wider mb-3">
         Feed Conditions
       </h3>
@@ -288,7 +288,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
           if (!paramDef) return null;
           return (
             <div key={key}>
-              <label className="flex items-center justify-between text-xs text-gray-400 mb-1">
+              <label className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
                 <span>{paramDef.label}</span>
                 {paramDef.unit && <span className="text-gray-500">{paramDef.unit}</span>}
               </label>
@@ -305,7 +305,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
                     },
                   })
                 }
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
               />
             </div>
           );
@@ -314,7 +314,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
 
       {/* Compound Search */}
       <div className="mb-3" ref={searchContainerRef}>
-        <label className="block text-xs text-gray-400 mb-1">Add Compound</label>
+        <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Add Compound</label>
         <div className="relative">
           <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
           <input
@@ -322,7 +322,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search compounds..."
-            className="w-full bg-gray-800 border border-gray-700 rounded pl-7 pr-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+            className="w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded pl-7 pr-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
           />
           {isSearching && (
             <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
@@ -332,16 +332,16 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
         </div>
 
         {showResults && searchResults.length > 0 && (
-          <div className="mt-1 bg-gray-800 border border-gray-700 rounded max-h-40 overflow-y-auto custom-scrollbar">
+          <div className="mt-1 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded max-h-40 overflow-y-auto custom-scrollbar">
             {searchResults.map((compound) => (
               <button
                 key={compound.cas || compound.name}
                 onClick={() => addCompound(compound)}
                 disabled={feedComposition[compound.name] !== undefined}
-                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-700 transition-colors flex items-center justify-between ${
+                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors flex items-center justify-between ${
                   feedComposition[compound.name] !== undefined
-                    ? 'text-gray-600 cursor-not-allowed'
-                    : 'text-gray-300'
+                    ? 'text-gray-400 dark:text-gray-600 cursor-not-allowed'
+                    : 'text-gray-700 dark:text-gray-300'
                 }`}
               >
                 <span>{compound.name}</span>
@@ -351,7 +351,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
           </div>
         )}
         {showResults && searchResults.length === 0 && searchQuery.length >= 2 && !isSearching && (
-          <div className="mt-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-xs text-gray-500">
+          <div className="mt-1 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 text-xs text-gray-500">
             No compounds found
           </div>
         )}
@@ -361,7 +361,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
       {Object.keys(feedComposition).length > 0 && (
         <div className="mb-3">
           <div className="flex items-center justify-between mb-2">
-            <label className="text-xs text-gray-400">Composition (mole fraction)</label>
+            <label className="text-xs text-gray-500 dark:text-gray-400">Composition (mole fraction)</label>
             <button
               onClick={autoNormalize}
               title="Auto-normalize to 1.0"
@@ -374,7 +374,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
           <div className="space-y-1.5">
             {Object.entries(feedComposition).map(([name, fraction]) => (
               <div key={name} className="flex items-center gap-1.5">
-                <span className="text-xs text-gray-300 flex-1 truncate" title={name}>
+                <span className="text-xs text-gray-700 dark:text-gray-300 flex-1 truncate" title={name}>
                   {name}
                 </span>
                 <input
@@ -384,7 +384,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
                   max={1}
                   step={0.01}
                   onChange={(e) => updateFraction(name, Math.max(0, parseFloat(e.target.value) || 0))}
-                  className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
+                  className="w-20 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1 text-xs text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
                 />
                 <button
                   onClick={() => removeCompound(name)}

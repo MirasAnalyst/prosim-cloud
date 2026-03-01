@@ -1,7 +1,25 @@
 import { create } from 'zustand';
+import { toast } from 'sonner';
 import { SimulationStatus, type SimulationResult } from '../types';
 import { useFlowsheetStore } from './flowsheetStore';
 import { runSimulation as apiRunSimulation } from '../lib/api-client';
+
+interface ConvergenceSettings {
+  maxIter: number;
+  tolerance: number;
+  damping: number;
+}
+
+interface ProgressInfo {
+  equipment: string;
+  index: number;
+  total: number;
+}
+
+interface BatchResults {
+  results: Record<string, unknown>[];
+  parameterMatrix: Record<string, number>[];
+}
 
 interface SimulationState {
   status: SimulationStatus;
@@ -9,12 +27,17 @@ interface SimulationState {
   error: string | null;
   propertyPackage: string;
   abortController: AbortController | null;
+  convergenceSettings: ConvergenceSettings;
+  progress: ProgressInfo | null;
+  batchResults: BatchResults | null;
 
   runSimulation: () => Promise<void>;
   cancelSimulation: () => void;
   setStatus: (status: SimulationStatus) => void;
   setResults: (results: SimulationResult | null) => void;
   setPropertyPackage: (pkg: string) => void;
+  setConvergenceSettings: (settings: Partial<ConvergenceSettings>) => void;
+  runBatchSimulation: (variations: { nodeId: string; parameterKey: string; values: number[] }[]) => Promise<void>;
 }
 
 export const useSimulationStore = create<SimulationState>((set, get) => ({
@@ -23,6 +46,9 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   error: null,
   propertyPackage: 'PengRobinson',
   abortController: null,
+  convergenceSettings: { maxIter: 50, tolerance: 0.0001, damping: 0.5 },
+  progress: null,
+  batchResults: null,
 
   runSimulation: async () => {
     // Abort any previous in-flight simulation
@@ -87,16 +113,26 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       targetHandle: e.targetHandle ?? '',
     }));
 
-    const { propertyPackage } = useSimulationStore.getState();
+    const { propertyPackage, convergenceSettings } = useSimulationStore.getState();
 
     try {
-      const data = await apiRunSimulation({ nodes: simNodes, edges: simEdges, property_package: propertyPackage }, controller.signal);
+      const data = await apiRunSimulation({
+        nodes: simNodes,
+        edges: simEdges,
+        property_package: propertyPackage,
+        convergence_settings: {
+          max_iter: convergenceSettings.maxIter,
+          tolerance: convergenceSettings.tolerance,
+          damping: convergenceSettings.damping,
+        },
+      }, controller.signal);
       clearTimeout(timeout);
       if (data.status === 'error') {
         set({
           status: SimulationStatus.Error,
           error: data.error ?? 'Simulation failed',
         });
+        toast.error(data.error ?? 'Simulation failed');
       } else {
         const result: SimulationResult = {
           streamResults: (data.results?.stream_results as Record<string, SimulationResult['streamResults'][string]>) ?? {},
@@ -109,6 +145,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
           logs: [...warnings.map((w) => `WARNING: ${w}`), ...((data.results?.logs as string[]) ?? [])],
         };
         set({ status: SimulationStatus.Completed, results: result, abortController: null });
+        toast.success('Simulation completed');
       }
     } catch (err) {
       clearTimeout(timeout);
@@ -118,12 +155,14 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
           error: 'Simulation cancelled or timed out (60s limit)',
           abortController: null,
         });
+        toast.error('Simulation cancelled or timed out (60s limit)');
       } else {
         set({
           status: SimulationStatus.Error,
           error: err instanceof Error ? err.message : 'Unknown error occurred',
           abortController: null,
         });
+        toast.error(err instanceof Error ? err.message : 'Unknown error occurred');
       }
     }
   },
@@ -139,4 +178,61 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
   setStatus: (status) => set({ status }),
   setResults: (results) => set({ results }),
   setPropertyPackage: (pkg) => set({ propertyPackage: pkg }),
+  setConvergenceSettings: (settings) =>
+    set((state) => ({
+      convergenceSettings: { ...state.convergenceSettings, ...settings },
+    })),
+
+  runBatchSimulation: async (variations) => {
+    set({ status: SimulationStatus.Running, error: null, batchResults: null });
+    const { nodes, edges } = useFlowsheetStore.getState();
+    const { propertyPackage, convergenceSettings } = get();
+    const simNodes = nodes.map((n) => ({
+      id: n.id,
+      type: n.data.equipmentType,
+      name: n.data.name,
+      parameters: { ...n.data.parameters },
+      position: n.position,
+    }));
+    const simEdges = edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      sourceHandle: e.sourceHandle ?? '',
+      target: e.target,
+      targetHandle: e.targetHandle ?? '',
+    }));
+    try {
+      const res = await fetch('/api/simulation/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          base_nodes: simNodes,
+          base_edges: simEdges,
+          property_package: propertyPackage,
+          convergence_settings: {
+            max_iter: convergenceSettings.maxIter,
+            tolerance: convergenceSettings.tolerance,
+            damping: convergenceSettings.damping,
+          },
+          variations: variations.map((v) => ({
+            node_id: v.nodeId,
+            parameter_key: v.parameterKey,
+            values: v.values,
+          })),
+        }),
+      });
+      const data = await res.json();
+      set({
+        status: SimulationStatus.Completed,
+        batchResults: { results: data.results, parameterMatrix: data.parameter_matrix },
+      });
+      toast.success(`Batch simulation complete: ${data.results?.length ?? 0} runs`);
+    } catch (err) {
+      set({
+        status: SimulationStatus.Error,
+        error: err instanceof Error ? err.message : 'Batch simulation failed',
+      });
+      toast.error('Batch simulation failed');
+    }
+  },
 }));

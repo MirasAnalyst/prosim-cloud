@@ -61,6 +61,37 @@ function getResultBadge(
       if (dp == null) return null;
       return `ΔP: ${Number(dp).toFixed(1)} kPa`;
     }
+    case EquipmentType.Absorber:
+    case EquipmentType.Stripper: {
+      const stages = eqResult.numberOfStages;
+      if (stages != null) return `${stages} stages`;
+      return null;
+    }
+    case EquipmentType.Cyclone: {
+      const dp = eqResult.pressureDrop;
+      if (dp == null) return null;
+      return `ΔP: ${Number(dp).toFixed(1)} kPa`;
+    }
+    case EquipmentType.ThreePhaseSeparator: {
+      const vf = eqResult.vaporFraction;
+      if (vf == null) return null;
+      return `VF: ${Number(vf).toFixed(3)}`;
+    }
+    case EquipmentType.Crystallizer: {
+      const cy = eqResult.crystalYield;
+      if (cy == null) return null;
+      return `Yield: ${Number(cy).toFixed(1)}%`;
+    }
+    case EquipmentType.Dryer: {
+      const moist = eqResult.outletMoisture;
+      if (moist == null) return null;
+      return `${Number(moist).toFixed(1)}% moisture`;
+    }
+    case EquipmentType.Filter: {
+      const eff = eqResult.efficiency;
+      if (eff == null) return null;
+      return `Eff: ${Number(eff).toFixed(1)}%`;
+    }
     default:
       return null;
   }
@@ -136,7 +167,7 @@ function EquipmentNode({ id, data, selected }: NodeProps) {
 
       {/* Equipment name label below the shape */}
       <span
-        className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] text-gray-400 font-medium"
+        className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] text-gray-500 dark:text-gray-400 font-medium"
         style={{ top: dims.height + 4 }}
       >
         {nodeData.name}
@@ -150,6 +181,16 @@ function EquipmentNode({ id, data, selected }: NodeProps) {
         >
           {badge}
         </span>
+      )}
+
+      {/* Skeleton badge placeholder when simulation is running */}
+      {status === SimulationStatus.Running && (
+        <div
+          className="absolute left-1/2 -translate-x-1/2"
+          style={{ top: dims.height + 18 }}
+        >
+          <div className="animate-pulse bg-gray-600 rounded-full h-4 w-12" />
+        </div>
       )}
 
       {rightPorts.map((port, i) => (

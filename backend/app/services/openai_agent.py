@@ -32,7 +32,7 @@ When the user asks you to BUILD, CREATE, SET UP, or DESIGN a flowsheet/plant/pro
 When the user asks QUESTIONS, wants ADVICE, or asks for EXPLANATIONS, respond with text only — do NOT use the tool.
 
 ### Equipment types (use exactly these strings):
-Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor
+Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor, Absorber, Stripper, Cyclone, ThreePhaseSeparator, Crystallizer, Dryer, Filter
 
 ### Port ID reference:
 - Most equipment: in-1 (inlet), out-1 (outlet)
@@ -41,6 +41,13 @@ Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchang
 - Mixer: in-1 (feed 1), in-2 (feed 2), out-1 (product)
 - HeatExchanger: in-hot, in-cold, out-hot, out-cold
 - DistillationColumn: in-1 (feed), out-1 (distillate), out-2 (bottoms)
+- Absorber: in-1 (gas feed), in-2 (solvent), out-1 (lean gas), out-2 (rich solvent)
+- Stripper: in-1 (rich solvent), in-2 (stripping gas/steam), out-1 (overhead gas), out-2 (lean solvent)
+- Cyclone: in-1 (feed), out-1 (clean gas), out-2 (solids)
+- ThreePhaseSeparator: in-1 (feed), out-1 (vapor), out-2 (light liquid), out-3 (heavy liquid)
+- Crystallizer: in-1 (feed), out-1 (crystals), out-2 (mother liquor)
+- Dryer: in-1 (wet feed), out-1 (dry product), out-2 (vapor/moisture)
+- Filter: in-1 (feed), out-1 (filtrate), out-2 (cake)
 
 ### Parameter keys (use frontend units — °C, kPa, kg/s, kW, %):
 - Feed conditions (first equipment only): feedTemperature, feedPressure, feedFlowRate, feedComposition (JSON string e.g. '{"methane":0.9,"ethane":0.1}')
@@ -55,6 +62,13 @@ Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchang
 - CSTRReactor: volume, temperature, pressure, duty
 - PFRReactor: length, diameter, temperature, pressure
 - ConversionReactor: conversion, temperature, pressure, duty
+- Absorber: numberOfStages, pressure, temperature
+- Stripper: numberOfStages, pressure, reboilerDuty
+- Cyclone: inletDiameter, pressureDropCoeff, efficiency
+- ThreePhaseSeparator: temperature, pressure
+- Crystallizer: crystallizationTemp
+- Dryer: outletMoisture, duty
+- Filter: efficiency, pressureDrop
 
 ### Supported compounds (use these exact names in feedComposition):
 water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-hexane, n-heptane, n-octane, n-decane, ethylene, propylene, benzene, toluene, o-xylene, methanol, ethanol, acetone, acetic acid, hydrogen, nitrogen, oxygen, carbon dioxide, carbon monoxide, hydrogen sulfide, sulfur dioxide, ammonia, chlorine, argon, helium, cyclohexane, styrene, 1-propanol, 2-propanol, diethyl ether, dimethyl ether, formic acid, formaldehyde, diethanolamine, monoethanolamine
@@ -117,7 +131,41 @@ equipment: [
   {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":2000,"feedFlowRate":1,"feedComposition":"{\"methane\":1.0}","outletTemperature":300}},
   {"id":"equip-2","type":"PFRReactor","name":"PFR Reactor","parameters":{"length":5,"diameter":0.3,"temperature":300,"pressure":2000}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]"""
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
+
+## Troubleshooting & Diagnostics
+
+When simulation results are provided in the flowsheet context, analyze them for issues and provide specific fixes.
+
+### Convergence failures (converged == false)
+- **Recycle loops not converging**: Look for tear-stream warnings in logs. Suggest relaxing specifications (e.g., fewer recycle constraints), adjusting initial guesses (feed temperatures/pressures closer to expected values), or simplifying the loop.
+- **Equipment errors**: If any equipment shows `error` in results, identify the root cause. Common causes: missing inlet connections, invalid parameter combinations, phase mismatch (e.g., liquid in compressor, vapor in pump).
+- **Partial results (status="partial")**: Some equipment failed while others succeeded. Focus on the failed units and their upstream dependencies.
+
+### Common equipment failure patterns
+- **Pump with vapor feed**: Pump expects liquid. If inlet VF > 0, suggest adding a cooler upstream or increasing feed pressure to keep liquid phase. Check if feed temperature is above boiling point at feed pressure.
+- **Compressor with liquid feed**: Compressor expects vapor. If inlet VF < 1, suggest adding a heater or separator upstream. Check if feed temperature is below dew point.
+- **Compressor P_out < P_in**: Outlet pressure must exceed inlet pressure for compression. If the user wants expansion, suggest using a Valve or Expander instead.
+- **Heat exchanger temperature cross**: Hot outlet temp below cold outlet temp is infeasible. Suggest adjusting outlet temperatures or flow rates.
+- **Heat exchanger energy imbalance**: Large mismatch between hot and cold side duties. Suggest adjusting flow rates or outlet temperatures to balance energy.
+- **Separator with single-phase feed**: If feed is all liquid or all vapor, separation is trivial. Suggest adjusting feed temperature/pressure to create two-phase conditions.
+- **Distillation with identical K-values**: Feed is single-phase (subcooled or superheated). Suggest preheating or adjusting feed pressure to create partial vaporization.
+- **Missing connections**: Equipment expecting multiple inlets (Mixer, HeatExchanger, Absorber, Stripper) but not all ports connected. Suggest adding feed sources for missing inlets.
+- **Division by zero / zero flow**: Mass flow rate is zero or negative. Check that upstream equipment produces output and feed flow rate is specified.
+
+### Property package guidance
+- **Peng-Robinson**: Best general-purpose EOS. Good for hydrocarbons, natural gas, refinery processes. Use as default.
+- **SRK**: Alternative to PR. Slightly better for light gases (H2, N2, CO2) at high pressures.
+- **NRTL**: Use for highly non-ideal liquid mixtures (alcohols + water, azeotropes). Falls back to PR for gas phase.
+- **UNIQUAC**: Use for complex liquid-liquid equilibria, polymer systems, or when NRTL parameters are unavailable.
+- If simulation shows unexpected phase behavior, suggest trying a different property package.
+
+### Actionable fix suggestions
+When diagnosing issues, always suggest specific parameter changes:
+- Name the exact equipment and parameter to change
+- Provide recommended values with units
+- Explain why the change should fix the issue
+- If multiple issues exist, prioritize them (fix upstream issues first since they cascade downstream)"""
 
 GENERATE_FLOWSHEET_TOOL = {
     "type": "function",
@@ -144,6 +192,9 @@ GENERATE_FLOWSHEET_TOOL = {
                                     "Separator", "Pump", "Compressor", "Valve",
                                     "HeatExchanger", "DistillationColumn",
                                     "CSTRReactor", "PFRReactor", "ConversionReactor",
+                                    "Absorber", "Stripper", "Cyclone",
+                                    "ThreePhaseSeparator", "Crystallizer",
+                                    "Dryer", "Filter",
                                 ],
                                 "description": "Equipment type",
                             },
@@ -192,6 +243,41 @@ GENERATE_FLOWSHEET_TOOL = {
 }
 
 
+SUGGEST_OPTIMIZATIONS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "suggest_optimizations",
+        "description": "Analyze simulation results and suggest process optimizations. Use when the user asks for optimization suggestions, efficiency improvements, or cost reduction ideas after a simulation has been run.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "suggestions": {
+                    "type": "array",
+                    "description": "List of optimization suggestions",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "equipment_id": {"type": "string", "description": "Target equipment ID"},
+                            "category": {
+                                "type": "string",
+                                "enum": ["energy_recovery", "efficiency", "pressure_optimization", "reflux_tuning", "cost_reduction"],
+                            },
+                            "description": {"type": "string", "description": "What to change and why"},
+                            "parameter": {"type": "string", "description": "Parameter key to adjust"},
+                            "current_value": {"type": "number", "description": "Current parameter value"},
+                            "suggested_value": {"type": "number", "description": "Recommended new value"},
+                            "expected_benefit": {"type": "string", "description": "Expected improvement"},
+                        },
+                        "required": ["equipment_id", "category", "description"],
+                    },
+                },
+            },
+            "required": ["suggestions"],
+        },
+    },
+}
+
+
 class AgentService:
     """OpenAI-powered process engineering chat agent."""
 
@@ -212,7 +298,7 @@ class AgentService:
             messages=formatted,
             temperature=0.3,
             max_tokens=2048,
-            tools=[GENERATE_FLOWSHEET_TOOL],
+            tools=[GENERATE_FLOWSHEET_TOOL, SUGGEST_OPTIMIZATIONS_TOOL],
             tool_choice="auto",
         )
 
@@ -273,6 +359,25 @@ class AgentService:
                     explanation = "Flowsheet created successfully."
 
                 return ChatMessage(role="assistant", content=explanation), usage, flowsheet_action
+
+            elif tool_call.function.name == "suggest_optimizations":
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                    suggestions = args.get("suggestions", [])
+                    # Format suggestions as readable text
+                    lines = ["## Optimization Suggestions\n"]
+                    for i, s in enumerate(suggestions, 1):
+                        lines.append(f"**{i}. {s.get('category', 'General').replace('_', ' ').title()}** — {s.get('equipment_id', 'N/A')}")
+                        lines.append(f"   {s.get('description', '')}")
+                        if s.get('parameter') and s.get('suggested_value') is not None:
+                            lines.append(f"   Change `{s['parameter']}`: {s.get('current_value', '?')} → {s['suggested_value']}")
+                        if s.get('expected_benefit'):
+                            lines.append(f"   Expected benefit: {s['expected_benefit']}")
+                        lines.append("")
+                    content = "\n".join(lines)
+                    return ChatMessage(role="assistant", content=content), usage, None
+                except Exception as exc:
+                    logger.warning("Failed to parse optimization tool call: %s", exc)
 
         # Normal text response — no tool call
         content = choice.message.content or ""
@@ -338,7 +443,8 @@ class AgentService:
         sim_results = ctx.get("simulationResults")
         if sim_results:
             converged = sim_results.get("converged", False)
-            parts.append(f"Simulation: {'converged' if converged else 'NOT converged'}")
+            iterations = sim_results.get("iterations", 1)
+            parts.append(f"Simulation: {'converged' if converged else 'NOT converged'} ({iterations} iteration{'s' if iterations != 1 else ''})")
             eq_results = sim_results.get("equipment", {})
             for eid, res in list(eq_results.items())[:10]:  # cap at 10
                 name = id_to_name.get(eid, eid) if equipment else eid
@@ -349,6 +455,13 @@ class AgentService:
                         highlights.append(f"{key}={res[key]}")
                 if highlights:
                     parts.append(f"  {name}: {', '.join(highlights)}")
+
+            # Include warning/error logs for troubleshooting context
+            logs = sim_results.get("logs", [])
+            if logs:
+                parts.append("Simulation warnings/errors:")
+                for log_entry in logs[:15]:
+                    parts.append(f"  - {log_entry}")
 
         return "\n".join(parts)
 
@@ -362,6 +475,20 @@ class AgentService:
         if flowsheet_context:
             summary = self._summarize_flowsheet(flowsheet_context)
             system_content += f"\n\nCurrent flowsheet:\n{summary}"
+
+        # RAG: inject relevant engineering context
+        try:
+            from app.services.rag_service import get_rag_service
+            rag = get_rag_service()
+            if messages:
+                last_user = next((m.content for m in reversed(messages) if m.role == "user"), None)
+                if last_user:
+                    rag_results = rag.query(last_user, k=2)
+                    if rag_results:
+                        rag_text = "\n".join(f"- {r['content'][:300]}" for r in rag_results)
+                        system_content += f"\n\nRelevant engineering reference:\n{rag_text}"
+        except Exception:
+            pass  # RAG unavailable — skip silently
 
         formatted: list[dict[str, str]] = [
             {"role": "system", "content": system_content}

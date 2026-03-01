@@ -90,6 +90,7 @@ export function runSimulation(data: {
   nodes?: Record<string, unknown>[];
   edges?: Record<string, unknown>[];
   property_package?: string;
+  convergence_settings?: { max_iter: number; tolerance: number; damping: number };
 }, signal?: AbortSignal) {
   return request<SimulationResultResponse>('/api/simulation/run', {
     method: 'POST',
@@ -112,6 +113,30 @@ export interface CompoundResult {
 
 export function searchCompounds(query: string) {
   return request<CompoundResult[]>(`/api/compounds/search?q=${encodeURIComponent(query)}`);
+}
+
+// ── Chat History ──
+
+export interface ChatHistoryMessage {
+  id: string;
+  role: string;
+  content: string;
+  created_at: string;
+}
+
+export function getChatHistory(projectId: string) {
+  return request<{ messages: ChatHistoryMessage[] }>(`/api/projects/${projectId}/chat`);
+}
+
+export function saveChatMessages(projectId: string, messages: Array<{ role: string; content: string }>) {
+  return request<{ status: string; count: number }>(`/api/projects/${projectId}/chat`, {
+    method: 'POST',
+    body: JSON.stringify({ messages }),
+  });
+}
+
+export function clearChatHistory(projectId: string) {
+  return request<void>(`/api/projects/${projectId}/chat`, { method: 'DELETE' });
 }
 
 // ── Agent Chat ──

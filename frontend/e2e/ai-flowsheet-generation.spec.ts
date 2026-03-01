@@ -107,7 +107,7 @@ test.describe('AI Flowsheet Generation', () => {
     await input.press('Enter');
 
     // Wait for the AI response with green badge (AI takes time)
-    const badge = page.locator('text=/Created \\d+ equipment/');
+    const badge = page.locator('text=/Created \\d+ equipment/').first();
     await expect(badge).toBeVisible({ timeout: 60000 });
 
     // Verify nodes appeared on the canvas

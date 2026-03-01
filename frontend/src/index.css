@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
-/* React Flow overrides for dark theme */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* React Flow overrides */
 .react-flow__attribution {
   display: none !important;
 }

@@ -1,7 +1,7 @@
 import { EquipmentType } from '../../types';
 
 // ViewBox and base sizing data for each equipment shape
-const shapeData: Record<EquipmentType, { vw: number; vh: number; baseSize: number }> = {
+const shapeData: Record<string, { vw: number; vh: number; baseSize: number }> = {
   [EquipmentType.Mixer]: { vw: 52, vh: 40, baseSize: 78 },
   [EquipmentType.Splitter]: { vw: 52, vh: 40, baseSize: 78 },
   [EquipmentType.Heater]: { vw: 44, vh: 44, baseSize: 66 },
@@ -15,6 +15,13 @@ const shapeData: Record<EquipmentType, { vw: number; vh: number; baseSize: numbe
   [EquipmentType.CSTRReactor]: { vw: 40, vh: 56, baseSize: 80 },
   [EquipmentType.PFRReactor]: { vw: 60, vh: 32, baseSize: 90 },
   [EquipmentType.ConversionReactor]: { vw: 40, vh: 56, baseSize: 80 },
+  [EquipmentType.Absorber]: { vw: 36, vh: 76, baseSize: 110 },
+  [EquipmentType.Stripper]: { vw: 36, vh: 76, baseSize: 110 },
+  [EquipmentType.Cyclone]: { vw: 40, vh: 60, baseSize: 80 },
+  [EquipmentType.ThreePhaseSeparator]: { vw: 56, vh: 40, baseSize: 84 },
+  [EquipmentType.Crystallizer]: { vw: 44, vh: 56, baseSize: 80 },
+  [EquipmentType.Dryer]: { vw: 52, vh: 40, baseSize: 78 },
+  [EquipmentType.Filter]: { vw: 40, vh: 50, baseSize: 75 },
 };
 
 /** Compute pixel dimensions for the canvas node, preserving aspect ratio. */
@@ -220,6 +227,104 @@ export function EquipmentIcon({ type, width, height, selected = false }: Equipme
             fill={fill} stroke={stroke} strokeWidth={SW} />
           <text x="20" y="33" textAnchor="middle" fill={LABEL_CLR}
             fontSize="14" fontWeight="bold" fontFamily="Arial, sans-serif">C</text>
+        </svg>
+      );
+
+    // ── Cyclone: conical body with tangential inlet ──
+    case EquipmentType.Cyclone:
+      return (
+        <svg {...svgProps}>
+          {/* Cylinder top */}
+          <rect x="8" y="4" width="24" height="22" rx="3"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          {/* Cone bottom */}
+          <polygon points="8,26 32,26 24,56 16,56"
+            fill={fill} stroke={stroke} strokeWidth={SW} strokeLinejoin="round" />
+          {/* Vortex finder (top outlet) */}
+          <line x1="20" y1="4" x2="20" y2="12" stroke={DETAIL} strokeWidth={1.5} />
+          {/* Spiral hint */}
+          <path d="M14,14 C14,10 26,10 26,14 C26,18 14,18 14,14"
+            fill="none" stroke={DETAIL} strokeWidth={0.8} />
+        </svg>
+      );
+
+    // ── Absorber: tall column with "A" label + packing lines ──
+    case EquipmentType.Absorber:
+      return (
+        <svg {...svgProps}>
+          <rect x="4" y="4" width="28" height="68" rx="6"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          {[20, 30, 40, 50].map((y) => (
+            <line key={y} x1="8" y1={y} x2="28" y2={y}
+              stroke={DETAIL} strokeWidth={0.8} strokeDasharray="2,2" />
+          ))}
+          <text x="18" y="16" textAnchor="middle" fill={LABEL_CLR}
+            fontSize="10" fontWeight="bold" fontFamily="Arial, sans-serif">A</text>
+        </svg>
+      );
+
+    // ── Stripper: tall column with "S" label + packing lines ──
+    case EquipmentType.Stripper:
+      return (
+        <svg {...svgProps}>
+          <rect x="4" y="4" width="28" height="68" rx="6"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          {[20, 30, 40, 50].map((y) => (
+            <line key={y} x1="8" y1={y} x2="28" y2={y}
+              stroke={DETAIL} strokeWidth={0.8} strokeDasharray="2,2" />
+          ))}
+          <text x="18" y="16" textAnchor="middle" fill={LABEL_CLR}
+            fontSize="10" fontWeight="bold" fontFamily="Arial, sans-serif">S</text>
+        </svg>
+      );
+
+    // ── Three-Phase Separator: horizontal drum with 3 sections ──
+    case EquipmentType.ThreePhaseSeparator:
+      return (
+        <svg {...svgProps}>
+          <rect x="4" y="8" width="48" height="24" rx="6"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <line x1="20" y1="8" x2="20" y2="32" stroke={DETAIL} strokeWidth={0.8} strokeDasharray="2,2" />
+          <line x1="36" y1="8" x2="36" y2="32" stroke={DETAIL} strokeWidth={0.8} strokeDasharray="2,2" />
+          <text x="12" y="23" textAnchor="middle" fill={LABEL_CLR} fontSize="7" fontFamily="Arial">V</text>
+          <text x="28" y="23" textAnchor="middle" fill={LABEL_CLR} fontSize="7" fontFamily="Arial">L1</text>
+          <text x="44" y="23" textAnchor="middle" fill={LABEL_CLR} fontSize="7" fontFamily="Arial">L2</text>
+        </svg>
+      );
+
+    // ── Crystallizer: vessel with crystal shapes ──
+    case EquipmentType.Crystallizer:
+      return (
+        <svg {...svgProps}>
+          <rect x="6" y="6" width="32" height="40" rx="4"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <polygon points="18,20 22,14 26,20 22,26" fill="none" stroke={DETAIL} strokeWidth={1} />
+          <polygon points="14,32 18,26 22,32 18,38" fill="none" stroke={DETAIL} strokeWidth={0.8} />
+          <text x="22" y="48" textAnchor="middle" fill={LABEL_CLR} fontSize="7" fontFamily="Arial">CR</text>
+        </svg>
+      );
+
+    // ── Dryer: rectangular box with wavy lines ──
+    case EquipmentType.Dryer:
+      return (
+        <svg {...svgProps}>
+          <rect x="6" y="6" width="40" height="28" rx="3"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <path d="M12,16 Q16,12 20,16 Q24,20 28,16 Q32,12 36,16" fill="none" stroke={DETAIL} strokeWidth={1} />
+          <path d="M12,24 Q16,20 20,24 Q24,28 28,24 Q32,20 36,24" fill="none" stroke={DETAIL} strokeWidth={1} />
+        </svg>
+      );
+
+    // ── Filter: funnel shape ──
+    case EquipmentType.Filter:
+      return (
+        <svg {...svgProps}>
+          <polygon points="4,6 36,6 28,30 12,30"
+            fill={fill} stroke={stroke} strokeWidth={SW} strokeLinejoin="round" />
+          <rect x="14" y="30" width="12" height="14" rx="2"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <line x1="10" y1="14" x2="30" y2="14" stroke={DETAIL} strokeWidth={0.8} />
+          <line x1="12" y1="20" x2="28" y2="20" stroke={DETAIL} strokeWidth={0.8} />
         </svg>
       );
 
