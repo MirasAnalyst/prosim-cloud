@@ -32,7 +32,7 @@ export interface PortDefinition {
 export interface ParameterDefinition {
   label: string;
   unit: string;
-  default: number | string | boolean;
+  default: number | string | boolean | null;
   min?: number;
   max?: number;
   type: 'number' | 'string' | 'boolean';

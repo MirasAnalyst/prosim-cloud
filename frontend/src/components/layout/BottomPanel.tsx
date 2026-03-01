@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { ChevronUp, ChevronDown, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { SimulationStatus } from '../../types';
 
 export default function BottomPanel() {
@@ -8,6 +9,43 @@ export default function BottomPanel() {
   const status = useSimulationStore((s) => s.status);
   const results = useSimulationStore((s) => s.results);
   const error = useSimulationStore((s) => s.error);
+  const nodes = useFlowsheetStore((s) => s.nodes);
+  const edges = useFlowsheetStore((s) => s.edges);
+
+  const prevStatus = useRef(status);
+  useEffect(() => {
+    if (
+      prevStatus.current === SimulationStatus.Running &&
+      (status === SimulationStatus.Completed || status === SimulationStatus.Error)
+    ) {
+      setExpanded(true);
+    }
+    prevStatus.current = status;
+  }, [status]);
+
+  const nodeNameMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const n of nodes) {
+      map[n.id] = n.data?.name || n.data?.equipmentType || n.id;
+    }
+    return map;
+  }, [nodes]);
+
+  const getStreamName = (edgeId: string): string => {
+    const edge = edges.find((e) => e.id === edgeId);
+    if (!edge) return edgeId;
+    const src = nodeNameMap[edge.source] || 'Unknown';
+    const tgt = nodeNameMap[edge.target] || 'Unknown';
+    return `${src} → ${tgt}`;
+  };
+
+  const formatComposition = (comp?: Record<string, number>): string => {
+    if (!comp || Object.keys(comp).length === 0) return '—';
+    return Object.entries(comp)
+      .filter(([, v]) => v > 0.001)
+      .map(([k, v]) => `${k}: ${v.toFixed(3)}`)
+      .join(', ');
+  };
 
   if (status === SimulationStatus.Idle) return null;
 
@@ -61,9 +99,20 @@ export default function BottomPanel() {
               <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
                 Simulation Log
               </h3>
-              <div className="bg-gray-950 rounded-lg p-3 font-mono text-xs text-gray-400 space-y-0.5">
+              <div className="bg-gray-950 rounded-lg p-3 font-mono text-xs space-y-0.5">
                 {results.logs.map((log, i) => (
-                  <div key={i}>{log}</div>
+                  <div
+                    key={i}
+                    className={
+                      log.startsWith('ERROR:') || log.includes('ERROR:')
+                        ? 'text-red-400'
+                        : log.startsWith('WARNING:') || log.includes('WARNING:')
+                          ? 'text-yellow-400'
+                          : 'text-gray-400'
+                    }
+                  >
+                    {log}
+                  </div>
                 ))}
               </div>
             </div>
@@ -78,20 +127,32 @@ export default function BottomPanel() {
                 <thead>
                   <tr className="text-gray-500 border-b border-gray-800">
                     <th className="text-left py-1 pr-4">Stream</th>
-                    <th className="text-right py-1 pr-4">Temp (C)</th>
+                    <th className="text-right py-1 pr-4">Temp (°C)</th>
                     <th className="text-right py-1 pr-4">Pressure (kPa)</th>
-                    <th className="text-right py-1">Flow (kg/s)</th>
+                    <th className="text-right py-1 pr-4">Flow (kg/s)</th>
+                    <th className="text-right py-1 pr-4">VF</th>
+                    <th className="text-left py-1">Composition</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.entries(results.streamResults).map(([id, cond]) => (
-                    <tr key={id} className="text-gray-300 border-b border-gray-800/50">
-                      <td className="py-1 pr-4">{id}</td>
-                      <td className="text-right py-1 pr-4">{cond.temperature.toFixed(1)}</td>
-                      <td className="text-right py-1 pr-4">{cond.pressure.toFixed(1)}</td>
-                      <td className="text-right py-1">{cond.flowRate.toFixed(1)}</td>
-                    </tr>
-                  ))}
+                  {Object.entries(results.streamResults).map(([id, cond]) => {
+                    const streamName = getStreamName(id);
+                    const compStr = formatComposition(cond.composition);
+                    return (
+                      <tr key={id} className="text-gray-300 border-b border-gray-800/50">
+                        <td className="py-1 pr-4 max-w-[200px] truncate" title={streamName}>
+                          {streamName}
+                        </td>
+                        <td className="text-right py-1 pr-4">{cond.temperature.toFixed(1)}</td>
+                        <td className="text-right py-1 pr-4">{cond.pressure.toFixed(1)}</td>
+                        <td className="text-right py-1 pr-4">{cond.flowRate.toFixed(3)}</td>
+                        <td className="text-right py-1 pr-4">{cond.vapor_fraction?.toFixed(3) ?? '—'}</td>
+                        <td className="py-1 max-w-[300px] truncate text-gray-400" title={compStr}>
+                          {compStr}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

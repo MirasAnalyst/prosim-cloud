@@ -56,6 +56,9 @@ Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchang
 - PFRReactor: length, diameter, temperature, pressure
 - ConversionReactor: conversion, temperature, pressure, duty
 
+### Supported compounds (use these exact names in feedComposition):
+water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-hexane, n-heptane, n-octane, n-decane, ethylene, propylene, benzene, toluene, o-xylene, methanol, ethanol, acetone, acetic acid, hydrogen, nitrogen, oxygen, carbon dioxide, carbon monoxide, hydrogen sulfide, sulfur dioxide, ammonia, chlorine, argon, helium, cyclohexane, styrene, 1-propanol, 2-propanol, diethyl ether, dimethyl ether, formic acid, formaldehyde, diethanolamine, monoethanolamine
+
 ### Rules:
 1. Only set feedTemperature, feedPressure, feedFlowRate, feedComposition on the FIRST equipment in each independent chain.
 2. feedComposition must be a JSON string, not an object.
@@ -63,6 +66,8 @@ Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchang
 4. Connect equipment in process order using correct port IDs.
 5. Populate parameters that the user explicitly specified. For downstream equipment with no user-specified values, leave parameters empty ({}).
 6. For MULTI-INLET equipment (Mixer, HeatExchanger): each inlet needs its own upstream feed source. Use a Heater with outletTemperature equal to feedTemperature as a pass-through feed source. Each feed source carries its own feedTemperature, feedPressure, feedFlowRate, feedComposition. Connect each feed source to the correct inlet port.
+7. ONLY use compound names from the supported compounds list above. Use exact lowercase names (e.g. "carbon dioxide" not "CO2", "hydrogen sulfide" not "H2S", "n-butane" not "butane").
+8. Set mode="replace" when the user says "create", "build", "design", "set up", or "make" a new flowsheet. Set mode="add" when the user says "add", "connect", "append", "insert", or "put" equipment to/into their existing flowsheet. Default to "replace" if unclear.
 
 ### Example 1 — Linear chain: "Heat methane to 200C then separate":
 equipment: [
@@ -175,6 +180,11 @@ GENERATE_FLOWSHEET_TOOL = {
                         "required": ["source_id", "source_port", "target_id", "target_port"],
                     },
                 },
+                "mode": {
+                    "type": "string",
+                    "enum": ["replace", "add"],
+                    "description": "Use 'replace' to create a new flowsheet from scratch. Use 'add' to add equipment to the existing flowsheet without removing what's already there.",
+                },
             },
             "required": ["equipment", "connections"],
         },
@@ -200,7 +210,7 @@ class AgentService:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=formatted,
-            temperature=0.7,
+            temperature=0.3,
             max_tokens=2048,
             tools=[GENERATE_FLOWSHEET_TOOL],
             tool_choice="auto",
@@ -224,6 +234,7 @@ class AgentService:
                     flowsheet_action = FlowsheetAction(
                         equipment=[FlowsheetEquipment(**eq) for eq in args.get("equipment", [])],
                         connections=[FlowsheetConnection(**conn) for conn in args.get("connections", [])],
+                        mode=args.get("mode", "replace"),
                     )
                 except Exception as exc:
                     logger.warning("Failed to parse flowsheet tool call: %s", exc)
@@ -248,7 +259,7 @@ class AgentService:
                     follow_up = await self.client.chat.completions.create(
                         model=self.model,
                         messages=follow_up_messages,
-                        temperature=0.7,
+                        temperature=0.3,
                         max_tokens=512,
                         tool_choice="none",
                     )
@@ -290,6 +301,57 @@ class AgentService:
 
         yield "data: [DONE]\n\n"
 
+    @staticmethod
+    def _summarize_flowsheet(ctx: dict[str, Any]) -> str:
+        """Summarize flowsheet context to ~500 tokens instead of full JSON dump."""
+        parts: list[str] = []
+
+        equipment = ctx.get("equipment", [])
+        if equipment:
+            # Count by type
+            type_counts: dict[str, int] = {}
+            names: list[str] = []
+            for eq in equipment:
+                t = eq.get("type", "Unknown")
+                type_counts[t] = type_counts.get(t, 0) + 1
+                names.append(eq.get("name", eq.get("id", "?")))
+            parts.append(f"Equipment ({len(equipment)} total): " + ", ".join(f"{v}x {k}" for k, v in type_counts.items()))
+            parts.append(f"Names: {', '.join(names)}")
+
+        connections = ctx.get("connections", [])
+        if connections:
+            # Build adjacency for topology string
+            id_to_name: dict[str, str] = {}
+            for eq in equipment:
+                id_to_name[eq.get("id", "")] = eq.get("name", eq.get("id", "?"))
+            topo_parts: list[str] = []
+            for conn in connections:
+                src = id_to_name.get(conn.get("source", ""), conn.get("source", "?"))
+                tgt = id_to_name.get(conn.get("target", ""), conn.get("target", "?"))
+                topo_parts.append(f"{src} -> {tgt}")
+            parts.append(f"Topology: {'; '.join(topo_parts)}")
+
+        pkg = ctx.get("propertyPackage")
+        if pkg:
+            parts.append(f"Property package: {pkg}")
+
+        sim_results = ctx.get("simulationResults")
+        if sim_results:
+            converged = sim_results.get("converged", False)
+            parts.append(f"Simulation: {'converged' if converged else 'NOT converged'}")
+            eq_results = sim_results.get("equipment", {})
+            for eid, res in list(eq_results.items())[:10]:  # cap at 10
+                name = id_to_name.get(eid, eid) if equipment else eid
+                # Extract key results
+                highlights = []
+                for key in ("duty", "work", "vaporFraction", "conversion", "outletTemperature", "error"):
+                    if key in res:
+                        highlights.append(f"{key}={res[key]}")
+                if highlights:
+                    parts.append(f"  {name}: {', '.join(highlights)}")
+
+        return "\n".join(parts)
+
     def _build_messages(
         self,
         messages: list[ChatMessage],
@@ -298,8 +360,8 @@ class AgentService:
         """Build the message list for the OpenAI API."""
         system_content = SYSTEM_PROMPT
         if flowsheet_context:
-            ctx_str = json.dumps(flowsheet_context, indent=2, default=str)
-            system_content += f"\n\nCurrent flowsheet context:\n```json\n{ctx_str}\n```"
+            summary = self._summarize_flowsheet(flowsheet_context)
+            system_content += f"\n\nCurrent flowsheet:\n{summary}"
 
         formatted: list[dict[str, str]] = [
             {"role": "system", "content": system_content}

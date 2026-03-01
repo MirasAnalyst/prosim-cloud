@@ -90,10 +90,11 @@ export function runSimulation(data: {
   nodes?: Record<string, unknown>[];
   edges?: Record<string, unknown>[];
   property_package?: string;
-}) {
+}, signal?: AbortSignal) {
   return request<SimulationResultResponse>('/api/simulation/run', {
     method: 'POST',
     body: JSON.stringify(data),
+    signal,
   });
 }
 
@@ -137,6 +138,7 @@ export interface FlowsheetConnection {
 export interface FlowsheetActionData {
   equipment: FlowsheetEquipment[];
   connections: FlowsheetConnection[];
+  mode?: 'replace' | 'add';
 }
 
 export interface ChatResponseData {

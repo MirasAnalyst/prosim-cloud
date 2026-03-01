@@ -1,5 +1,5 @@
 import { useRef, useEffect } from 'react';
-import { X, Loader2 } from 'lucide-react';
+import { X, Loader2, Trash2 } from 'lucide-react';
 import { useAgentStore } from '../../stores/agentStore';
 import ChatMessage from './ChatMessage';
 import AgentInput from './AgentInput';
@@ -18,6 +18,7 @@ export default function AgentPanel() {
   const isLoading = useAgentStore((s) => s.isLoading);
   const togglePanel = useAgentStore((s) => s.togglePanel);
   const sendMessage = useAgentStore((s) => s.sendMessage);
+  const clearMessages = useAgentStore((s) => s.clearMessages);
 
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -34,12 +35,21 @@ export default function AgentPanel() {
           <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
           <h2 className="text-sm font-semibold text-gray-200">AI Assistant</h2>
         </div>
-        <button
-          onClick={togglePanel}
-          className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
-        >
-          <X size={16} />
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={clearMessages}
+            className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
+            title="Clear chat"
+          >
+            <Trash2 size={14} />
+          </button>
+          <button
+            onClick={togglePanel}
+            className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-200"
+          >
+            <X size={16} />
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">

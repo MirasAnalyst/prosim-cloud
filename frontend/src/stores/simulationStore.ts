@@ -8,31 +8,76 @@ interface SimulationState {
   results: SimulationResult | null;
   error: string | null;
   propertyPackage: string;
+  abortController: AbortController | null;
 
   runSimulation: () => Promise<void>;
+  cancelSimulation: () => void;
   setStatus: (status: SimulationStatus) => void;
   setResults: (results: SimulationResult | null) => void;
   setPropertyPackage: (pkg: string) => void;
 }
 
-export const useSimulationStore = create<SimulationState>((set) => ({
+export const useSimulationStore = create<SimulationState>((set, get) => ({
   status: SimulationStatus.Idle,
   results: null,
   error: null,
   propertyPackage: 'PengRobinson',
+  abortController: null,
 
   runSimulation: async () => {
-    set({ status: SimulationStatus.Running, error: null });
+    // Abort any previous in-flight simulation
+    get().abortController?.abort();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    set({ status: SimulationStatus.Running, error: null, abortController: controller });
 
     const { nodes, edges } = useFlowsheetStore.getState();
 
-    const simNodes = nodes.map((n) => ({
-      id: n.id,
-      type: n.data.equipmentType,
-      name: n.data.name,
-      parameters: n.data.parameters,
-      position: n.position,
-    }));
+    if (nodes.length === 0) {
+      set({
+        status: SimulationStatus.Error,
+        error: 'No equipment on the flowsheet. Add at least one equipment node before running the simulation.',
+      });
+      return;
+    }
+
+    // Validate feed compositions (B4)
+    const feedNodeIds = new Set(nodes.map((n) => n.id));
+    for (const e of edges) {
+      feedNodeIds.delete(e.target);
+    }
+    const warnings: string[] = [];
+    const simNodes = nodes.map((n) => {
+      const params = { ...n.data.parameters };
+      if (feedNodeIds.has(n.id) && params.feedComposition) {
+        try {
+          const comp: Record<string, number> =
+            typeof params.feedComposition === 'string'
+              ? JSON.parse(params.feedComposition as string)
+              : (params.feedComposition as unknown as Record<string, number>);
+          const entries = Object.entries(comp).filter(([, v]) => typeof v === 'number');
+          if (entries.length === 0) {
+            warnings.push(`${n.data.name}: empty feed composition — using defaults`);
+          } else {
+            const total = entries.reduce((s, [, v]) => s + v, 0);
+            if (total > 0 && (total < 0.95 || total > 1.05)) {
+              const normalized = Object.fromEntries(entries.map(([k, v]) => [k, v / total]));
+              params.feedComposition = JSON.stringify(normalized);
+              warnings.push(`${n.data.name}: feed composition auto-normalized (was ${total.toFixed(3)})`);
+            }
+          }
+        } catch {
+          // Not valid JSON — leave as-is
+        }
+      }
+      return {
+        id: n.id,
+        type: n.data.equipmentType,
+        name: n.data.name,
+        parameters: params,
+        position: n.position,
+      };
+    });
 
     const simEdges = edges.map((e) => ({
       id: e.id,
@@ -45,7 +90,8 @@ export const useSimulationStore = create<SimulationState>((set) => ({
     const { propertyPackage } = useSimulationStore.getState();
 
     try {
-      const data = await apiRunSimulation({ nodes: simNodes, edges: simEdges, property_package: propertyPackage });
+      const data = await apiRunSimulation({ nodes: simNodes, edges: simEdges, property_package: propertyPackage }, controller.signal);
+      clearTimeout(timeout);
       if (data.status === 'error') {
         set({
           status: SimulationStatus.Error,
@@ -60,15 +106,33 @@ export const useSimulationStore = create<SimulationState>((set) => ({
             converged: (data.results?.convergence_info as Record<string, boolean>)?.converged ?? false,
             error: (data.results?.convergence_info as Record<string, number>)?.error ?? 0,
           },
-          logs: (data.results?.logs as string[]) ?? [],
+          logs: [...warnings.map((w) => `WARNING: ${w}`), ...((data.results?.logs as string[]) ?? [])],
         };
-        set({ status: SimulationStatus.Completed, results: result });
+        set({ status: SimulationStatus.Completed, results: result, abortController: null });
       }
     } catch (err) {
-      set({
-        status: SimulationStatus.Error,
-        error: err instanceof Error ? err.message : 'Unknown error occurred',
-      });
+      clearTimeout(timeout);
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        set({
+          status: SimulationStatus.Error,
+          error: 'Simulation cancelled or timed out (60s limit)',
+          abortController: null,
+        });
+      } else {
+        set({
+          status: SimulationStatus.Error,
+          error: err instanceof Error ? err.message : 'Unknown error occurred',
+          abortController: null,
+        });
+      }
+    }
+  },
+
+  cancelSimulation: () => {
+    const { abortController } = get();
+    if (abortController) {
+      abortController.abort();
+      set({ abortController: null });
     }
   },
 

@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import math
@@ -144,8 +145,6 @@ _CP_AIR = 1005.0
 # ---------------------------------------------------------------------------
 # Molecular weight cache and helpers
 # ---------------------------------------------------------------------------
-_MW_CACHE: dict[str, float] = {}
-
 # Built-in MW fallback for common compounds (g/mol)
 _MW_BUILTIN: dict[str, float] = {
     "water": 18.015, "methane": 16.043, "ethane": 30.069, "propane": 44.096,
@@ -183,25 +182,62 @@ _GAMMA_TABLE: dict[str, float] = {
 }
 
 
+@functools.lru_cache(maxsize=256)
 def _get_mw(comp_name: str) -> float:
     """Get molecular weight (g/mol) for a compound, with caching."""
-    if comp_name in _MW_CACHE:
-        return _MW_CACHE[comp_name]
-
     # Try thermo library first
     if _thermo_available:
         try:
             c, _ = ChemicalConstantsPackage.from_IDs([comp_name])
-            mw = c.MWs[0]
-            _MW_CACHE[comp_name] = mw
-            return mw
+            return c.MWs[0]
         except Exception:
             pass
 
     # Fallback to builtin table
-    mw = _MW_BUILTIN.get(comp_name.lower(), _MW_BUILTIN.get(comp_name, 18.015))
-    _MW_CACHE[comp_name] = mw
-    return mw
+    return _MW_BUILTIN.get(comp_name.lower(), _MW_BUILTIN.get(comp_name, 18.015))
+
+
+# Heat of vaporization (J/kg) for separator fallback
+_HVAP_TABLE: dict[str, float] = {
+    "water": 2260e3, "methane": 510e3, "ethane": 489e3, "propane": 426e3,
+    "n-butane": 386e3, "isobutane": 366e3, "n-pentane": 358e3,
+    "isopentane": 342e3, "n-hexane": 335e3, "n-heptane": 318e3,
+    "n-octane": 302e3, "n-decane": 276e3,
+    "hydrogen": 449e3, "nitrogen": 199e3, "oxygen": 213e3,
+    "carbon dioxide": 234e3, "carbon monoxide": 216e3,
+    "hydrogen sulfide": 548e3, "ammonia": 1371e3,
+    "ethylene": 482e3, "propylene": 439e3,
+    "benzene": 394e3, "toluene": 363e3, "methanol": 1100e3,
+    "ethanol": 841e3, "acetone": 518e3,
+}
+
+
+def _estimate_hvap(composition: dict[str, float]) -> float:
+    """Estimate composition-weighted heat of vaporization (J/kg) for fallback."""
+    if not composition:
+        return 2260e3  # water default
+    total_mass_basis = sum(z * _get_mw(name) for name, z in composition.items())
+    if total_mass_basis <= 0:
+        return 2260e3
+    total_hvap = 0.0
+    for name, z in composition.items():
+        mw = _get_mw(name)
+        w_i = (z * mw) / total_mass_basis
+        hvap_c = _HVAP_TABLE.get(name.lower(), _HVAP_TABLE.get(name, 300e3))
+        total_hvap += w_i * hvap_c
+    return total_hvap if total_hvap > 0 else 2260e3
+
+
+def _clean_composition(comp: dict[str, float]) -> dict[str, float]:
+    """Remove pseudo-components (like 'products') and renormalize."""
+    _PSEUDO = {"products"}
+    cleaned = {k: v for k, v in comp.items() if k not in _PSEUDO and v > 0}
+    if not cleaned:
+        return comp  # don't lose everything
+    total = sum(cleaned.values())
+    if total > 0 and abs(total - 1.0) > 1e-9:
+        cleaned = {k: v / total for k, v in cleaned.items()}
+    return cleaned
 
 
 def _estimate_cp(composition: dict[str, float]) -> float:
@@ -863,7 +899,12 @@ class DWSIMEngine:
                         outlet = dict(inlet)
                         outlet["temperature"] = T_out
                         outlet["pressure"] = P_out
-                        outlet["enthalpy"] = inlet["enthalpy"] + (w_actual / mf if mf > 0 else 0)
+                        # Thermo-based outlet enthalpy for reference state consistency
+                        flash_pump_out = self._flash_tp(list(comp.keys()), [float(v) for v in comp.values()], T_out, P_out, property_package)
+                        if flash_pump_out and flash_pump_out.get("MW_mix", 0) > 0:
+                            outlet["enthalpy"] = flash_pump_out["H"] / (flash_pump_out["MW_mix"] / 1000.0)
+                        else:
+                            outlet["enthalpy"] = inlet["enthalpy"] + (w_actual / mf if mf > 0 else 0)
                         outlet["composition"] = dict(comp)
                         outlets["out-1"] = outlet
                         logs.append(f"{name}: work = {eq_res['work']:.1f} kW, ΔT = {dT_friction:.2f} K")
@@ -973,7 +1014,12 @@ class DWSIMEngine:
                         outlet = dict(inlet)
                         outlet["temperature"] = T_out
                         outlet["pressure"] = P_out
-                        outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
+                        # Thermo-based outlet enthalpy for reference state consistency
+                        flash_comp_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                        if flash_comp_out and flash_comp_out.get("MW_mix", 0) > 0:
+                            outlet["enthalpy"] = flash_comp_out["H"] / (flash_comp_out["MW_mix"] / 1000.0)
+                        else:
+                            outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
                         outlet["composition"] = dict(comp)
                         outlets["out-1"] = outlet
                         engine_note = " (entropy)" if used_entropy else (" (γ)" if used_thermo else "")
@@ -1022,7 +1068,12 @@ class DWSIMEngine:
                         outlet = dict(inlet)
                         outlet["temperature"] = T_out
                         outlet["pressure"] = P_out
-                        outlet["enthalpy"] = inlet["enthalpy"]  # isenthalpic
+                        # Thermo-based outlet enthalpy for reference state consistency
+                        flash_valve_out = self._flash_tp(comp_names, zs_v, T_out, P_out, property_package)
+                        if flash_valve_out and flash_valve_out.get("MW_mix", 0) > 0:
+                            outlet["enthalpy"] = flash_valve_out["H"] / (flash_valve_out["MW_mix"] / 1000.0)
+                        else:
+                            outlet["enthalpy"] = inlet["enthalpy"]  # isenthalpic fallback
                         outlet["vapor_fraction"] = vf_out
                         outlet["composition"] = dict(comp)
                         outlets["out-1"] = outlet
@@ -1137,8 +1188,8 @@ class DWSIMEngine:
 
                     elif ntype == "HeatExchanger":
                         # Two-stream heat exchanger — match inlets by port handle
-                        hot = dict(_DEFAULT_FEED)
-                        cold = dict(_DEFAULT_FEED)
+                        hot = None
+                        cold = None
 
                         for i, handle in enumerate(inlet_handles):
                             if i < len(inlets):
@@ -1148,10 +1199,14 @@ class DWSIMEngine:
                                     cold = inlets[i]
 
                         # If no handles matched (old-style position-based), use index
-                        if hot is _DEFAULT_FEED and len(inlets) >= 1:
+                        if hot is None and len(inlets) >= 1:
                             hot = inlets[0]
-                        if cold is _DEFAULT_FEED and len(inlets) >= 2:
+                        if cold is None and len(inlets) >= 2:
                             cold = inlets[1]
+                        if hot is None:
+                            hot = dict(_DEFAULT_FEED)
+                        if cold is None:
+                            cold = dict(_DEFAULT_FEED)
 
                         # Ensure hot is actually hotter (T2-08: track swap for correct outlet mapping)
                         swapped = False
@@ -1225,11 +1280,6 @@ class DWSIMEngine:
                         if T_hot_out < T_cold_in or T_cold_out > T_hot_in:
                             logs.append(f"WARNING: {name} has a temperature cross – results may be infeasible")
 
-                        eq_res["duty"] = round(_w_to_kw(duty), 3)
-                        eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out), 2)
-                        eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out), 2)
-                        eq_res["LMTD"] = round(self._calc_lmtd(T_hot_in, T_hot_out, T_cold_in, T_cold_out), 2)
-
                         hot_out = dict(hot)
                         hot_out["temperature"] = T_hot_out
                         hot_out["pressure"] = P_hot_in - dp_hot
@@ -1249,6 +1299,17 @@ class DWSIMEngine:
                             cold_out["enthalpy"] = flash_cold_out["H"] / (flash_cold_out["MW_mix"] / 1000.0)
                         else:
                             cold_out["enthalpy"] = cp_cold * (T_cold_out - _T_REF)
+
+                        # Recompute duty from enthalpy difference (correct for phase change)
+                        if flash_hot and flash_hot_out and flash_hot["MW_mix"] > 0 and flash_hot_out["MW_mix"] > 0:
+                            h_hot_in = flash_hot["H"] / (flash_hot["MW_mix"] / 1000.0)
+                            h_hot_out_j = hot_out["enthalpy"]
+                            duty = mf_hot * (h_hot_in - h_hot_out_j)
+
+                        eq_res["duty"] = round(_w_to_kw(duty), 3)
+                        eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out), 2)
+                        eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out), 2)
+                        eq_res["LMTD"] = round(self._calc_lmtd(T_hot_in, T_hot_out, T_cold_in, T_cold_out), 2)
                         cold_out["composition"] = dict(cold_comp)
 
                         # T2-08: If streams were swapped, reverse outlet assignment
@@ -1330,16 +1391,17 @@ class DWSIMEngine:
                                 logs.append(f"{name}: VF = {vf:.3f} (molar), mass VF = {mass_vap_frac:.3f}")
 
                         if not outlets:
-                            # Simple fallback: assume 10% vapor
+                            # Simple fallback: assume 10% vapor (T3-05: differentiate V/L enthalpy)
                             vf_est = 0.1
                             cp_est = _estimate_cp(comp)
-                            h_est = cp_est * (T_op - _T_REF)
+                            h_liq_est = cp_est * (T_op - _T_REF)
+                            h_vap_est = h_liq_est + _estimate_hvap(comp)
                             outlets["out-1"] = {
                                 "temperature": T_op,
                                 "pressure": P_op,
                                 "mass_flow": mf * vf_est,
                                 "vapor_fraction": 1.0,
-                                "enthalpy": h_est,
+                                "enthalpy": h_vap_est,
                                 "composition": comp,
                             }
                             outlets["out-2"] = {
@@ -1347,11 +1409,11 @@ class DWSIMEngine:
                                 "pressure": P_op,
                                 "mass_flow": mf * (1 - vf_est),
                                 "vapor_fraction": 0.0,
-                                "enthalpy": h_est,
+                                "enthalpy": h_liq_est,
                                 "composition": comp,
                             }
                             eq_res["vaporFraction"] = vf_est
-                            logs.append(f"{name}: estimated VF = {vf_est:.1%}")
+                            logs.append(f"WARNING: {name}: flash failed, estimated VF = {vf_est:.1%}")
 
                     elif ntype == "DistillationColumn":
                         inlet = inlets[0]
@@ -1497,10 +1559,16 @@ class DWSIMEngine:
                                         if flash_b_out and flash_b_out.get("MW_mix", 0) > 0:
                                             h_bott = flash_b_out["H"] / (flash_b_out["MW_mix"] / 1000.0)
 
-                                        # Condenser/reboiler duties
+                                        # Condenser/reboiler duties (with reflux ratio)
                                         h_feed = inlet.get("enthalpy", 0.0)
-                                        Q_cond = mf * frac_dist * (h_feed - h_dist) if h_dist != 0 else 0.0
-                                        Q_reb = mf * frac_bott * (h_bott - h_feed) if h_bott != 0 else 0.0
+                                        D = mf * frac_dist  # distillate mass flow
+                                        B = mf * frac_bott  # bottoms mass flow
+                                        # Estimate vapor enthalpy at condenser from heat of vaporization
+                                        h_vap_dist = h_dist + _estimate_hvap(distillate_comp)
+                                        # Q_cond = V_top * (h_vap - h_dist), V_top = D * (R + 1)
+                                        Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
+                                        # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
+                                        Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
 
                                         # LK purity in distillate
                                         lk_purity = distillate_comp.get(comp_names[lk_idx], 0.0)
@@ -1632,8 +1700,14 @@ class DWSIMEngine:
                         outlet = dict(inlet)
                         outlet["temperature"] = T_out
                         outlet["pressure"] = P_out
-                        outlet["enthalpy"] = _estimate_cp(inlet.get("composition", {})) * (T_out - _T_REF)
-                        outlet["composition"] = dict(inlet.get("composition", {}))
+                        # Thermo-based enthalpy (T3-01)
+                        flash_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                        if flash_out and flash_out.get("MW_mix", 0) > 0:
+                            mw_kg = flash_out["MW_mix"] / 1000.0
+                            outlet["enthalpy"] = flash_out["H"] / mw_kg
+                        else:
+                            outlet["enthalpy"] = _estimate_cp(comp) * (T_out - _T_REF)
+                        outlet["composition"] = dict(comp)
                         outlets["out-1"] = outlet
                         logs.append(f"{name}: V = {volume} m³, τ = {tau:.0f} s")
 
@@ -1669,8 +1743,14 @@ class DWSIMEngine:
                         outlet = dict(inlet)
                         outlet["temperature"] = T_out
                         outlet["pressure"] = P_out
-                        outlet["enthalpy"] = _estimate_cp(inlet.get("composition", {})) * (T_out - _T_REF)
-                        outlet["composition"] = dict(inlet.get("composition", {}))
+                        # Thermo-based enthalpy (T3-01)
+                        flash_pfr = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                        if flash_pfr and flash_pfr.get("MW_mix", 0) > 0:
+                            mw_kg = flash_pfr["MW_mix"] / 1000.0
+                            outlet["enthalpy"] = flash_pfr["H"] / mw_kg
+                        else:
+                            outlet["enthalpy"] = _estimate_cp(comp) * (T_out - _T_REF)
+                        outlet["composition"] = dict(comp)
                         outlets["out-1"] = outlet
                         logs.append(f"{name}: L = {length} m, D = {diameter} m, V = {volume:.2f} m³")
 
@@ -1705,9 +1785,10 @@ class DWSIMEngine:
                                 out_comp = {k: v / total_z for k, v in out_comp.items()}
                             logs.append(f"{name}: key reactant '{key_reactant}' z={z_before:.4f} → {out_comp.get(key_reactant, 0):.4f}")
 
-                        # Flash outlet for enthalpy
-                        out_comp_names = list(out_comp.keys())
-                        out_zs = [float(v) for v in out_comp.values()]
+                        # Flash outlet for enthalpy (T3-07: filter pseudo-components)
+                        clean_comp = _clean_composition(out_comp)
+                        out_comp_names = list(clean_comp.keys())
+                        out_zs = [float(v) for v in clean_comp.values()]
                         flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
 
                         eq_res["conversion"] = round(conversion * 100, 1)
@@ -1733,7 +1814,10 @@ class DWSIMEngine:
                         logs.append(f"{name}: pass-through (no model for {ntype})")
 
                     # Store outlet port conditions for downstream propagation
+                    # (T3-07: clean pseudo-components so downstream flash works)
                     for port_id, cond in outlets.items():
+                        if "composition" in cond:
+                            cond["composition"] = _clean_composition(cond["composition"])
                         port_conditions[(nid, port_id)] = cond
 
                     # Build the public result (remove internal _outlets)

@@ -99,18 +99,40 @@ export default function PropertyInspector() {
                 ) : paramDef.type === 'number' ? (
                   <input
                     type="number"
-                    value={node.data.parameters[key] as number}
+                    value={node.data.parameters[key] !== undefined ? (node.data.parameters[key] as number) : ''}
+                    placeholder="Not set"
                     min={paramDef.min}
                     max={paramDef.max}
                     onChange={(e) =>
                       updateNodeData(node.id, {
                         parameters: {
                           ...node.data.parameters,
-                          [key]: parseFloat(e.target.value) || 0,
+                          [key]: e.target.value === '' ? undefined as unknown as number : parseFloat(e.target.value) || 0,
                         },
                       })
                     }
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
+                    onBlur={(e) => {
+                      const val = parseFloat(e.target.value);
+                      if (isNaN(val)) return;
+                      let clamped = val;
+                      if (paramDef.min !== undefined) clamped = Math.max(paramDef.min, clamped);
+                      if (paramDef.max !== undefined) clamped = Math.min(paramDef.max, clamped);
+                      if (clamped !== val) {
+                        updateNodeData(node.id, {
+                          parameters: { ...node.data.parameters, [key]: clamped },
+                        });
+                      }
+                    }}
+                    className={`w-full bg-gray-800 border rounded px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500 placeholder-gray-600 ${
+                      (() => {
+                        const v = node.data.parameters[key];
+                        if (v === undefined || v === '') return 'border-gray-700';
+                        const n = Number(v);
+                        if (isNaN(n)) return 'border-gray-700';
+                        if ((paramDef.min !== undefined && n < paramDef.min) || (paramDef.max !== undefined && n > paramDef.max)) return 'border-red-500 ring-1 ring-red-500';
+                        return 'border-gray-700';
+                      })()
+                    }`}
                   />
                 ) : (
                   <input
@@ -153,7 +175,7 @@ export default function PropertyInspector() {
 interface FeedConditionsSectionProps {
   nodeId: string;
   parameters: Record<string, number | string | boolean>;
-  paramDefs: Record<string, { label: string; unit: string; default: number | string | boolean; min?: number; max?: number; type: string }>;
+  paramDefs: Record<string, { label: string; unit: string; default: number | string | boolean | null; min?: number; max?: number; type: string }>;
   updateNodeData: (id: string, data: { parameters: Record<string, number | string | boolean> }) => void;
 }
 
@@ -361,7 +383,7 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
                   min={0}
                   max={1}
                   step={0.01}
-                  onChange={(e) => updateFraction(name, parseFloat(e.target.value) || 0)}
+                  onChange={(e) => updateFraction(name, Math.max(0, parseFloat(e.target.value) || 0))}
                   className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
                 />
                 <button

@@ -81,8 +81,8 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     icon: 'SplitSquareVertical',
     parameters: {
       ...feedConditionParams,
-      temperature: { label: 'Temperature', unit: '°C', default: 25, min: -273.15, max: 2000, type: 'number' },
-      pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 50000, type: 'number' },
+      temperature: { label: 'Temperature', unit: '°C', default: null, min: -273.15, max: 2000, type: 'number' },
+      pressure: { label: 'Pressure', unit: 'kPa', default: null, min: 0, max: 50000, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -145,8 +145,8 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     icon: 'ArrowLeftRight',
     parameters: {
       ...feedConditionParams,
-      hotOutletTemp: { label: 'Hot Outlet Temp', unit: '°C', default: 60, min: -273.15, max: 2000, type: 'number' },
-      coldOutletTemp: { label: 'Cold Outlet Temp', unit: '°C', default: 80, min: -273.15, max: 2000, type: 'number' },
+      hotOutletTemp: { label: 'Hot Outlet Temp', unit: '°C', default: null, min: -273.15, max: 2000, type: 'number' },
+      coldOutletTemp: { label: 'Cold Outlet Temp', unit: '°C', default: null, min: -273.15, max: 2000, type: 'number' },
       pressureDropHot: { label: 'ΔP Hot Side', unit: 'kPa', default: 10, min: 0, max: 1000, type: 'number' },
       pressureDropCold: { label: 'ΔP Cold Side', unit: 'kPa', default: 10, min: 0, max: 1000, type: 'number' },
     },
@@ -263,7 +263,9 @@ export function getDefaultParameters(type: EquipmentType): Record<string, number
   const def = equipmentLibrary[type];
   const params: Record<string, number | string | boolean> = {};
   for (const [key, paramDef] of Object.entries(def.parameters)) {
-    params[key] = paramDef.default;
+    if (paramDef.default !== null) {
+      params[key] = paramDef.default;
+    }
   }
   return params;
 }

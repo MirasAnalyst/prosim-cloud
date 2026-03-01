@@ -30,6 +30,7 @@ class FlowsheetConnection(BaseModel):
 class FlowsheetAction(BaseModel):
     equipment: list[FlowsheetEquipment]
     connections: list[FlowsheetConnection]
+    mode: str = "replace"  # "replace" or "add"
 
 
 class ChatResponse(BaseModel):

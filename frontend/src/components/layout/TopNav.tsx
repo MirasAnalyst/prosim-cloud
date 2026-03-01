@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Play, Loader2, Bot, Beaker } from 'lucide-react';
+import { Play, Loader2, Bot, Beaker, XCircle } from 'lucide-react';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useAgentStore } from '../../stores/agentStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
@@ -8,12 +8,14 @@ import { SimulationStatus } from '../../types';
 export default function TopNav() {
   const simulationStatus = useSimulationStore((s) => s.status);
   const runSimulation = useSimulationStore((s) => s.runSimulation);
+  const cancelSimulation = useSimulationStore((s) => s.cancelSimulation);
   const propertyPackage = useSimulationStore((s) => s.propertyPackage);
   const setPropertyPackage = useSimulationStore((s) => s.setPropertyPackage);
   const toggleAgent = useAgentStore((s) => s.togglePanel);
   const agentOpen = useAgentStore((s) => s.isOpen);
   const projectName = useFlowsheetStore((s) => s.projectName);
   const setProjectName = useFlowsheetStore((s) => s.setProjectName);
+  const saveStatus = useFlowsheetStore((s) => s.saveStatus);
 
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(projectName);
@@ -70,6 +72,16 @@ export default function TopNav() {
             {projectName}
           </span>
         )}
+        <span
+          className={`w-2 h-2 rounded-full hidden sm:inline-block ${
+            saveStatus === 'saving'
+              ? 'bg-yellow-400'
+              : saveStatus === 'error'
+                ? 'bg-red-400'
+                : 'bg-green-400'
+          }`}
+          title={saveStatus === 'saving' ? 'Saving...' : saveStatus === 'error' ? 'Save failed' : 'Saved'}
+        />
       </div>
 
       <div className="flex items-center gap-2">
@@ -99,6 +111,16 @@ export default function TopNav() {
           )}
           {isRunning ? 'Running...' : 'Simulate'}
         </button>
+
+        {isRunning && (
+          <button
+            onClick={cancelSimulation}
+            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 transition-colors"
+          >
+            <XCircle size={14} />
+            Cancel
+          </button>
+        )}
 
         <button
           onClick={toggleAgent}

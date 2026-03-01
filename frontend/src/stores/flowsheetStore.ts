@@ -32,6 +32,7 @@ interface FlowsheetState {
   selectedNodeId: string | null;
   currentProjectId: string | null;
   projectName: string;
+  saveStatus: 'saved' | 'saving' | 'error';
 
   addNode: (type: EquipmentType, position: { x: number; y: number }) => void;
   removeNode: (id: string) => void;
@@ -48,12 +49,15 @@ interface FlowsheetState {
 }
 
 let saveTimeout: ReturnType<typeof setTimeout> | null = null;
-function debounceSave(get: () => FlowsheetState) {
+function debounceSave(get: () => FlowsheetState, set?: (partial: Partial<FlowsheetState>) => void) {
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
     const { currentProjectId, nodes, edges } = get();
     if (currentProjectId) {
-      saveFlowsheet(currentProjectId, nodes as any, edges as any).catch(() => {});
+      set?.({ saveStatus: 'saving' });
+      saveFlowsheet(currentProjectId, nodes as any, edges as any)
+        .then(() => set?.({ saveStatus: 'saved' }))
+        .catch(() => set?.({ saveStatus: 'error' }));
     }
   }, 1000);
 }
@@ -64,6 +68,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   selectedNodeId: null,
   currentProjectId: null,
   projectName: 'Untitled Project',
+  saveStatus: 'saved' as const,
 
   addNode: (type, position) => {
     const def = equipmentLibrary[type];
@@ -79,7 +84,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       },
     };
     set((state) => ({ nodes: [...state.nodes, newNode] }));
-    debounceSave(get);
+    debounceSave(get, set);
   },
 
   removeNode: (id) => {
@@ -88,7 +93,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       edges: state.edges.filter((e) => e.source !== id && e.target !== id),
       selectedNodeId: state.selectedNodeId === id ? null : state.selectedNodeId,
     }));
-    debounceSave(get);
+    debounceSave(get, set);
   },
 
   updateNodeData: (id, data) => {
@@ -99,7 +104,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
           : node
       ),
     }));
-    debounceSave(get);
+    debounceSave(get, set);
   },
 
   onNodesChange: (changes) => {
@@ -110,12 +115,19 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
     if (selectChange && selectChange.type === 'select') {
       set({ selectedNodeId: selectChange.selected ? selectChange.id : null });
     }
+    // Save position/dimension changes (not just selection)
+    if (changes.some((c) => c.type === 'position' || c.type === 'dimensions' || c.type === 'remove')) {
+      debounceSave(get, set);
+    }
   },
 
   onEdgesChange: (changes) => {
     set((state) => ({
       edges: applyEdgeChanges(changes, state.edges),
     }));
+    if (changes.some((c) => c.type === 'remove')) {
+      debounceSave(get, set);
+    }
   },
 
   onConnect: (connection) => {
@@ -129,7 +141,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
         state.edges
       ),
     }));
-    debounceSave(get);
+    debounceSave(get, set);
   },
 
   setSelectedNode: (id) => {
@@ -157,7 +169,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       animated: true,
     }));
     set({ nodes, edges, selectedNodeId: null });
-    debounceSave(get);
+    debounceSave(get, set);
   },
 
   getUpstreamNodes: (nodeId: string) => {

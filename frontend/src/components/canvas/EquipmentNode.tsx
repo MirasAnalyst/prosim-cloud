@@ -17,8 +17,8 @@ function getResultBadge(
       const duty = eqResult.duty;
       if (duty == null) return null;
       const label = `Q: ${Number(duty).toFixed(1)} kW`;
-      if (equipmentType === EquipmentType.HeatExchanger && eqResult.lmtd != null) {
-        return `${label} | LMTD: ${Number(eqResult.lmtd).toFixed(1)}°C`;
+      if (equipmentType === EquipmentType.HeatExchanger && eqResult.LMTD != null) {
+        return `${label} | LMTD: ${Number(eqResult.LMTD).toFixed(1)}°C`;
       }
       return label;
     }
@@ -32,6 +32,34 @@ function getResultBadge(
       const vf = eqResult.vaporFraction ?? eqResult.vapor_fraction;
       if (vf == null) return null;
       return `VF: ${Number(vf).toFixed(3)}`;
+    }
+    case EquipmentType.DistillationColumn: {
+      const lkPurity = eqResult.lightKeyPurity;
+      if (lkPurity != null) return `LK: ${Number(lkPurity).toFixed(1)}%`;
+      const stages = eqResult.numberOfStages;
+      if (stages != null) return `${stages} stages`;
+      return null;
+    }
+    case EquipmentType.ConversionReactor: {
+      const conv = eqResult.conversion;
+      if (conv == null) return null;
+      return `X: ${Number(conv).toFixed(1)}%`;
+    }
+    case EquipmentType.Splitter: {
+      const ratio = eqResult.splitRatio;
+      if (ratio == null) return null;
+      const r = Number(ratio);
+      return `${(r * 100).toFixed(0)}/${((1 - r) * 100).toFixed(0)}`;
+    }
+    case EquipmentType.Mixer: {
+      const flow = eqResult.totalMassFlow;
+      if (flow == null) return null;
+      return `${Number(flow).toFixed(2)} kg/s`;
+    }
+    case EquipmentType.Valve: {
+      const dp = eqResult.pressureDrop;
+      if (dp == null) return null;
+      return `ΔP: ${Number(dp).toFixed(1)} kPa`;
     }
     default:
       return null;

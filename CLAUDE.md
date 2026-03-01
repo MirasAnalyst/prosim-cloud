@@ -110,6 +110,16 @@ Built full stack in parallel, then chem-soft review caught 14 critical mismatche
 
 3. **Re-indenting 1025 lines for try/except**: Per-equipment try/except required adding 4 spaces to every line inside the equipment processing loop. Manual Edit calls impractical. Fix: wrote a Python transformation script via Bash that identifies the range, re-indents, and inserts try/except blocks.
 
+### Tier 3: Mistakes and Resolutions
+
+1. **Enthalpy reference state mismatch across equipment**: Pump, Compressor, Valve computed outlet enthalpy as `inlet_h + work/mf`, mixing Cp-fallback and thermo reference frames. Downstream energy balances silently diverged. Fix: compute outlet enthalpy via TP flash at `(T_out, P_out)` for all equipment — same pattern as Heater/Cooler (lines 839-843).
+
+2. **Distillation duty ignored reflux ratio**: `Q_cond = mf * frac_dist * (h_feed - h_dist)` missed the `(R+1)` multiplier and returned 0 when `h_dist == 0` (reference state). Fix: `Q_cond = D*(R+1)*(h_vap_dist - h_dist)` using `_estimate_hvap()`, reboiler from overall energy balance.
+
+3. **HX inlet fallback broken by Python `is` identity check**: `hot = dict(_DEFAULT_FEED)` creates a new object, so `hot is _DEFAULT_FEED` is always `False` — position-based inlet assignment never triggered. Fix: use `None` sentinel instead of `dict()` copy, check `hot is None`.
+
+4. **Compressor flash used wrong variable name after refactor**: Changed `zs_v` (valve's variable) instead of `zs` (compressor's variable) in outlet flash call, causing compressor to crash silently and return no `work` result. Fix: use correct local variable `zs` for each equipment section.
+
 ### Phase 5 Fix: AI Compound Name Mismatch
 GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") which the engine didn't recognize. Fix: added `### Supported compounds` list (42 exact names from curated list) and rule #7 ("ONLY use compound names from the list") to `SYSTEM_PROMPT` in `openai_agent.py`. AI now outputs "carbon dioxide", "hydrogen sulfide", "n-butane" etc.
 

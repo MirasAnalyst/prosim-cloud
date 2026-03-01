@@ -5,6 +5,7 @@ import { agentChat, type FlowsheetActionData } from '../lib/api-client';
 import { getDefaultParameters } from '../lib/equipment-library';
 import { autoLayout } from '../lib/auto-layout';
 import { useFlowsheetStore } from './flowsheetStore';
+import { useSimulationStore } from './simulationStore';
 
 interface AgentState {
   messages: AgentMessage[];
@@ -15,6 +16,7 @@ interface AgentState {
   togglePanel: () => void;
   addMessage: (role: AgentMessage['role'], content: string) => void;
   setLoading: (loading: boolean) => void;
+  clearMessages: () => void;
 }
 
 const VALID_TYPES = new Set<string>(Object.values(EquipmentType));
@@ -84,8 +86,47 @@ function applyFlowsheetAction(action: FlowsheetActionData): void {
     targetPort: conn.target_port,
   }));
 
-  // Atomic replace via loadFlowsheet
-  useFlowsheetStore.getState().loadFlowsheet(equipment, streams);
+  if (action.mode === 'add') {
+    // Merge: append new nodes/edges to existing state
+    const store = useFlowsheetStore.getState();
+    const existingNodes = store.nodes;
+    const existingEdges = store.edges;
+
+    // Offset new nodes to avoid overlap with existing ones
+    const maxX = existingNodes.reduce((m, n) => Math.max(m, n.position.x), 0);
+    const offsetX = maxX > 0 ? maxX + 250 : 0;
+
+    const offsetEquipment = equipment.map((eq) => ({
+      ...eq,
+      position: { x: eq.position.x + offsetX, y: eq.position.y },
+    }));
+
+    store.loadFlowsheet(
+      [
+        ...existingNodes.map((n) => ({
+          id: n.id,
+          type: n.data.equipmentType,
+          name: n.data.name,
+          parameters: n.data.parameters,
+          position: n.position,
+        })),
+        ...offsetEquipment,
+      ],
+      [
+        ...existingEdges.map((e) => ({
+          id: e.id,
+          sourceId: e.source,
+          sourcePort: e.sourceHandle ?? '',
+          targetId: e.target,
+          targetPort: e.targetHandle ?? '',
+        })),
+        ...streams,
+      ],
+    );
+  } else {
+    // Replace: atomic swap via loadFlowsheet
+    useFlowsheetStore.getState().loadFlowsheet(equipment, streams);
+  }
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -119,7 +160,38 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           role: m.role,
           content: m.content,
         }));
-      const data = await agentChat(chatMessages);
+
+      // Build compact flowsheet context for the AI
+      const { nodes: fsNodes, edges: fsEdges } = useFlowsheetStore.getState();
+      const { results: simResults, propertyPackage } = useSimulationStore.getState();
+      const flowsheetContext: Record<string, unknown> = {};
+      if (fsNodes.length > 0) {
+        flowsheetContext.equipment = fsNodes.map((n) => ({
+          id: n.id,
+          type: n.data?.equipmentType,
+          name: n.data?.name,
+          parameters: n.data?.parameters,
+        }));
+        flowsheetContext.connections = fsEdges.map((e) => ({
+          source: e.source,
+          sourceHandle: e.sourceHandle,
+          target: e.target,
+          targetHandle: e.targetHandle,
+        }));
+        flowsheetContext.propertyPackage = propertyPackage;
+        if (simResults) {
+          flowsheetContext.simulationResults = {
+            streams: simResults.streamResults,
+            equipment: simResults.equipmentResults,
+            converged: simResults.convergenceInfo?.converged,
+          };
+        }
+      }
+
+      const data = await agentChat(
+        chatMessages,
+        Object.keys(flowsheetContext).length > 0 ? flowsheetContext : undefined,
+      );
 
       // Apply flowsheet action if present
       let flowsheetAction: AgentMessage['flowsheetAction'] | undefined;
@@ -130,6 +202,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             equipmentCount: data.flowsheet_action.equipment.length,
             connectionCount: data.flowsheet_action.connections.length,
           };
+          // Auto-simulate after AI generates a flowsheet
+          setTimeout(() => {
+            useSimulationStore.getState().runSimulation().catch((err) => {
+              console.error('Auto-simulation after AI flowsheet failed:', err);
+            });
+          }, 100);
         } catch (e) {
           console.error('Failed to apply flowsheet action:', e);
         }
@@ -176,5 +254,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setLoading: (loading) => {
     set({ isLoading: loading });
+  },
+
+  clearMessages: () => {
+    set({
+      messages: [
+        {
+          id: uuidv4(),
+          role: 'system',
+          content: 'Welcome to ProSim Cloud AI Assistant. I can help you build and optimize your process flowsheet. Try asking me to build a flowsheet or configure your simulation.',
+          timestamp: new Date(),
+        },
+      ],
+    });
   },
 }));
