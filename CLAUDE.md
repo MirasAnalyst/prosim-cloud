@@ -171,6 +171,8 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 2. **Zustand store not accessible from Playwright `page.evaluate`**: Test 7 tried `window.__ZUSTAND_FLOWSHEET_STORE__` which was never exposed, so injected nodes were silently ignored and the test ran against stale persisted data. Fix: added `window.__ZUSTAND_FLOWSHEET_STORE__ = useFlowsheetStore` in `flowsheetStore.ts`. **E2E tests that inject store state need the store explicitly exposed on `window`.**
 
+3. **Stale background processes accumulate across sessions**: Each `run_in_background` server start (uvicorn/vite) spawns a process that persists after the session ends. Over days, 5+ orphaned Vite instances held ports 5173-5177, causing port conflicts and wasting ~300MB RAM. Fix: always check `ps aux | grep -E "uvicorn|vite"` before starting servers; kill stale ones first. **Before starting dev servers, verify no orphaned instances exist from previous sessions.**
+
 ## Dev Commands
 ```bash
 # Backend
