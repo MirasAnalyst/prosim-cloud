@@ -485,7 +485,7 @@ class AgentService:
                 if last_user:
                     rag_results = rag.query(last_user, k=2)
                     if rag_results:
-                        rag_text = "\n".join(f"- {r['content'][:300]}" for r in rag_results)
+                        rag_text = "\n".join(f"- {r[:300]}" for r in rag_results)
                         system_content += f"\n\nRelevant engineering reference:\n{rag_text}"
         except Exception:
             pass  # RAG unavailable — skip silently

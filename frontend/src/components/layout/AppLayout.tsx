@@ -87,6 +87,9 @@ export default function AppLayout() {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  const selectedNodeId = useFlowsheetStore((s) => s.selectedNodeId);
+  const setSelectedNode = useFlowsheetStore((s) => s.setSelectedNode);
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
       <Toaster richColors position="bottom-right" theme={theme} />
@@ -96,7 +99,18 @@ export default function AppLayout() {
           <EquipmentPalette />
         </div>
         <FlowsheetCanvas />
-        <PropertyInspector />
+        <div className="hidden lg:block">
+          <PropertyInspector />
+        </div>
+        {/* Mobile property inspector overlay */}
+        {selectedNodeId && (
+          <div className="lg:hidden fixed inset-0 z-40">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedNode(null)} />
+            <div className="absolute right-0 top-0 bottom-0 w-72 max-w-[85vw] z-50">
+              <PropertyInspector />
+            </div>
+          </div>
+        )}
       </div>
       <BottomPanel />
       <AgentPanel />

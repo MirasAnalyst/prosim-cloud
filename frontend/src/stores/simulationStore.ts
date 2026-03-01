@@ -2,7 +2,6 @@ import { create } from 'zustand';
 import { toast } from 'sonner';
 import { SimulationStatus, type SimulationResult } from '../types';
 import { useFlowsheetStore } from './flowsheetStore';
-import { runSimulation as apiRunSimulation } from '../lib/api-client';
 
 interface ConvergenceSettings {
   maxIter: number;
@@ -116,39 +115,100 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     const { propertyPackage, convergenceSettings } = useSimulationStore.getState();
 
     try {
-      const data = await apiRunSimulation({
-        nodes: simNodes,
-        edges: simEdges,
-        property_package: propertyPackage,
-        convergence_settings: {
-          max_iter: convergenceSettings.maxIter,
-          tolerance: convergenceSettings.tolerance,
-          damping: convergenceSettings.damping,
-        },
-      }, controller.signal);
+      const response = await fetch('/api/simulation/run/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nodes: simNodes,
+          edges: simEdges,
+          property_package: propertyPackage,
+          convergence_settings: {
+            max_iter: convergenceSettings.maxIter,
+            tolerance: convergenceSettings.tolerance,
+            damping: convergenceSettings.damping,
+          },
+        }),
+        signal: controller.signal,
+      });
       clearTimeout(timeout);
-      if (data.status === 'error') {
+
+      if (!response.ok || !response.body) {
+        const text = await response.text();
+        set({ status: SimulationStatus.Error, error: text || 'Simulation request failed', abortController: null });
+        toast.error('Simulation request failed');
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let data: Record<string, unknown> | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() ?? '';
+
+        for (const part of parts) {
+          let eventType = '';
+          let eventData = '';
+          for (const line of part.split('\n')) {
+            if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+            else if (line.startsWith('data: ')) eventData = line.slice(6);
+          }
+          if (!eventType || !eventData) continue;
+
+          if (eventType === 'progress') {
+            try {
+              const prog = JSON.parse(eventData);
+              set({ progress: { equipment: prog.equipment, index: prog.index, total: prog.total } });
+            } catch { /* skip malformed progress */ }
+          } else if (eventType === 'complete') {
+            try {
+              data = JSON.parse(eventData);
+            } catch { /* skip malformed complete */ }
+          }
+        }
+      }
+
+      set({ progress: null });
+
+      if (!data) {
+        set({ status: SimulationStatus.Error, error: 'No simulation result received', abortController: null });
+        toast.error('No simulation result received');
+        return;
+      }
+
+      // SSE complete event sends the raw engine result (flat structure),
+      // unlike the POST endpoint which wraps it in {results: ...}
+      const res = (data.results as Record<string, unknown>) ?? data;
+
+      if ((data.status ?? res.status) === 'error') {
         set({
           status: SimulationStatus.Error,
-          error: data.error ?? 'Simulation failed',
+          error: (data.error as string) ?? (res.error as string) ?? 'Simulation failed',
         });
-        toast.error(data.error ?? 'Simulation failed');
+        toast.error((data.error as string) ?? (res.error as string) ?? 'Simulation failed');
       } else {
         const result: SimulationResult = {
-          streamResults: (data.results?.stream_results as Record<string, SimulationResult['streamResults'][string]>) ?? {},
-          equipmentResults: (data.results?.equipment_results as Record<string, Record<string, number | string>>) ?? {},
+          streamResults: (res.stream_results as Record<string, SimulationResult['streamResults'][string]>) ?? {},
+          equipmentResults: (res.equipment_results as Record<string, Record<string, number | string>>) ?? {},
           convergenceInfo: {
-            iterations: (data.results?.convergence_info as Record<string, number>)?.iterations ?? 0,
-            converged: (data.results?.convergence_info as Record<string, boolean>)?.converged ?? false,
-            error: (data.results?.convergence_info as Record<string, number>)?.error ?? 0,
+            iterations: (res.convergence_info as Record<string, number>)?.iterations ?? 0,
+            converged: (res.convergence_info as Record<string, boolean>)?.converged ?? false,
+            error: (res.convergence_info as Record<string, number>)?.error ?? 0,
           },
-          logs: [...warnings.map((w) => `WARNING: ${w}`), ...((data.results?.logs as string[]) ?? [])],
+          logs: [...warnings.map((w) => `WARNING: ${w}`), ...((res.logs as string[]) ?? [])],
         };
         set({ status: SimulationStatus.Completed, results: result, abortController: null });
         toast.success('Simulation completed');
       }
     } catch (err) {
       clearTimeout(timeout);
+      set({ progress: null });
       if (err instanceof DOMException && err.name === 'AbortError') {
         set({
           status: SimulationStatus.Error,

@@ -165,6 +165,12 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 4. **ThreePhaseSeparator unpacked `_flash_tp()` dict as tuple**: Code used `_H, _S, _Cp, VF_f, ... = flash_result` but `_flash_tp()` returns a dict. `ValueError` silently caught by `except Exception: pass`, defaulting VF=0.0 — methane at 80°C showed as all-liquid. Fix: use `flash_result["VF"]` dict access. **Never blindly catch exceptions around flash calls — at minimum log them.**
 
+### Fix 3 Partial Items: Mistakes and Resolutions
+
+1. **SSE endpoint returns flat result, POST wraps in `{results: ...}`**: Frontend SSE parser used `data.results.equipment_results` but SSE `complete` event sends raw engine output (no `results` wrapper). Simulation showed "0 iterations, not converged" with empty badges. Fix: `const res = data.results ?? data` to handle both formats. **When switching API transport (POST→SSE), always compare the raw response shapes.**
+
+2. **Zustand store not accessible from Playwright `page.evaluate`**: Test 7 tried `window.__ZUSTAND_FLOWSHEET_STORE__` which was never exposed, so injected nodes were silently ignored and the test ran against stale persisted data. Fix: added `window.__ZUSTAND_FLOWSHEET_STORE__ = useFlowsheetStore` in `flowsheetStore.ts`. **E2E tests that inject store state need the store explicitly exposed on `window`.**
+
 ## Dev Commands
 ```bash
 # Backend

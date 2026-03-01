@@ -400,3 +400,8 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
     }
   },
 }));
+
+// Expose store on window for E2E testing
+if (typeof window !== 'undefined') {
+  (window as any).__ZUSTAND_FLOWSHEET_STORE__ = useFlowsheetStore;
+}

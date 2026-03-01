@@ -451,26 +451,43 @@ test.describe('Phase 3: Engine Accuracy', () => {
   });
 
   test('Test 7: UI renders simulation badges and stream labels', async ({ page }) => {
-    // If there are already nodes on the canvas (from persistence), use them.
-    // Otherwise, add a heater via drag-and-drop.
+    // Inject a known flowsheet so badges/labels are deterministic
+    const nodes = [
+      makeNode('heater-ui', 'Heater', 'Heater-UI', {
+        feedTemperature: 25,
+        feedPressure: 101.325,
+        feedFlowRate: 1.0,
+        feedComposition: JSON.stringify({ water: 1.0 }),
+        outletTemperature: 80,
+        duty: 0,
+        pressureDrop: 0,
+      }, { x: 100, y: 200 }),
+      makeNode('cooler-ui', 'Cooler', 'Cooler-UI', {
+        outletTemperature: 30,
+        duty: 0,
+        pressureDrop: 0,
+      }, { x: 400, y: 200 }),
+    ];
+    const edges = [
+      makeEdge('e-ui', 'heater-ui', 'out-1', 'cooler-ui', 'in-1'),
+    ];
+
+    // Inject nodes/edges into the Zustand flowsheet store
+    await page.evaluate(
+      ({ n, e }) => {
+        const store = (window as any).__ZUSTAND_FLOWSHEET_STORE__;
+        if (store) store.setState({ nodes: n, edges: e });
+      },
+      { n: nodes, e: edges },
+    );
+    await page.waitForTimeout(500);
+
     const canvas = page.locator('.react-flow');
     await expect(canvas).toBeVisible();
 
-    // Check if there are already nodes on the canvas
-    const existingNodes = page.locator('.react-flow__node');
-    const nodeCount = await existingNodes.count();
-
-    if (nodeCount === 0) {
-      // Drag a heater from palette to canvas
-      const heaterPaletteItem = page.locator('[draggable="true"]').filter({ hasText: 'Heater' }).first();
-      const canvasBox = await canvas.boundingBox();
-      if (!canvasBox) throw new Error('Canvas not found');
-
-      await heaterPaletteItem.dragTo(canvas, {
-        targetPosition: { x: canvasBox.width / 2, y: canvasBox.height / 2 },
-      });
-      await page.waitForTimeout(500);
-    }
+    // Verify nodes were injected
+    const nodeCount = await page.locator('.react-flow__node').count();
+    expect(nodeCount).toBeGreaterThanOrEqual(2);
 
     // Click Simulate button
     const simButton = page.locator('button:has-text("Simulate")');
