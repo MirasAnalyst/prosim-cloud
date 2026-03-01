@@ -296,8 +296,7 @@ class AgentService:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=formatted,
-            temperature=0.3,
-            max_tokens=2048,
+            max_completion_tokens=2048,
             tools=[GENERATE_FLOWSHEET_TOOL, SUGGEST_OPTIMIZATIONS_TOOL],
             tool_choice="auto",
         )
@@ -345,8 +344,7 @@ class AgentService:
                     follow_up = await self.client.chat.completions.create(
                         model=self.model,
                         messages=follow_up_messages,
-                        temperature=0.3,
-                        max_tokens=512,
+                        max_completion_tokens=512,
                         tool_choice="none",
                     )
                     explanation = follow_up.choices[0].message.content or "Flowsheet created successfully."
@@ -394,8 +392,7 @@ class AgentService:
         stream = await self.client.chat.completions.create(
             model=self.model,
             messages=formatted,
-            temperature=0.7,
-            max_tokens=2048,
+            max_completion_tokens=2048,
             stream=True,
         )
 
