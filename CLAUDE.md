@@ -155,6 +155,16 @@ Built full stack in parallel, then chem-soft review caught 14 critical mismatche
 ### Phase 5 Fix: AI Compound Name Mismatch
 GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") which the engine didn't recognize. Fix: added `### Supported compounds` list (42 exact names from curated list) and rule #7 ("ONLY use compound names from the list") to `SYSTEM_PROMPT` in `openai_agent.py`. AI now outputs "carbon dioxide", "hydrogen sulfide", "n-butane" etc.
 
+### Phases 2-5 Completion: Mistakes and Resolutions
+
+1. **`flowsheet_data` not defined in `_simulate_basic()`**: Convergence settings and progress callback referenced `flowsheet_data.get(...)` inside `_simulate_basic()`, but that variable only exists in `simulate()`. Silent `NameError` crashed all simulations. Fix: added `convergence_settings` and `progress_callback` as explicit method parameters, passed through from `simulate()`.
+
+2. **Missing `await` on async `engine.simulate()`**: Batch and report routes called `engine.simulate()` without `await`, returning coroutine objects instead of dicts — all batch/report requests returned 500 errors. Fix: added `await` to all call sites. **When refactoring sync→async, grep every call site.**
+
+3. **`asyncio.to_thread()` with async coroutine**: SSE endpoint used `asyncio.to_thread(engine.simulate, ...)` which only works with sync functions — async coroutines just return unawaited objects. Fix: changed to `asyncio.create_task(engine.simulate({...}))`. **`to_thread` = sync functions only; `create_task` = async coroutines.**
+
+4. **ThreePhaseSeparator unpacked `_flash_tp()` dict as tuple**: Code used `_H, _S, _Cp, VF_f, ... = flash_result` but `_flash_tp()` returns a dict. `ValueError` silently caught by `except Exception: pass`, defaulting VF=0.0 — methane at 80°C showed as all-liquid. Fix: use `flash_result["VF"]` dict access. **Never blindly catch exceptions around flash calls — at minimum log them.**
+
 ## Dev Commands
 ```bash
 # Backend
