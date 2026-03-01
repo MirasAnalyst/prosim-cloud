@@ -139,6 +139,10 @@
 
 ## Phase 8: Advanced Simulation Features
 
+- [ ] Material Stream nodes (first-class draggable Feed/Product stream objects on canvas with own property panel for T, P, flow, composition — like HYSYS Material Stream)
+- [ ] Global Component List / Simulation Basis Manager (define compounds once per project instead of per-feed-node, linked to selected property package)
+- [ ] Energy Stream connections (separate stream type for duty/power connections between equipment, e.g., heater duty → column reboiler)
+- [ ] Product stream specifications (output stream nodes with target specs like purity or flow rate that the solver can back-calculate)
 - [ ] Dynamic simulation (time-dependent transient modeling)
 - [ ] Sensitivity analysis (automatic parameter variation + plotting)
 - [ ] Optimization (objective function + constraints, SQP/genetic algorithms)
