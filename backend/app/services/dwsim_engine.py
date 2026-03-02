@@ -1735,6 +1735,8 @@ class DWSIMEngine:
                                 # Final safety clamp on cold side
                                 if T_cold_out > T_hot_in - dT_min_hx:
                                     T_cold_out = T_hot_in - dT_min_hx
+                                    # Recompute duty to stay consistent with clamped temps
+                                    duty = mf_cold * cp_cold * (T_cold_out - T_cold_in)
 
                             hot_out = dict(hot)
                             hot_out["temperature"] = T_hot_out
@@ -1801,13 +1803,20 @@ class DWSIMEngine:
                                 T_cold_out = T_cold_in + Q_ntu / C_cold if C_cold > 0 else T_cold_in
                                 hot_out["temperature"] = T_hot_out
                                 cold_out["temperature"] = T_cold_out
-                                # Re-flash outlets at NTU temperatures to update enthalpies
+                                # Re-flash outlets at NTU temperatures to update enthalpies and VF
                                 flash_hot_ntu = self._flash_tp(hot_comp_names, hot_zs, T_hot_out, P_hot_in - dp_hot, property_package)
                                 if flash_hot_ntu and flash_hot_ntu.get("MW_mix", 0) > 0:
                                     hot_out["enthalpy"] = flash_hot_ntu["H"] / (flash_hot_ntu["MW_mix"] / 1000.0)
+                                    hot_out["vapor_fraction"] = flash_hot_ntu.get("VF", hot_out.get("vapor_fraction", 0))
                                 flash_cold_ntu = self._flash_tp(cold_comp_names, cold_zs, T_cold_out, P_cold_in - dp_cold, property_package)
                                 if flash_cold_ntu and flash_cold_ntu.get("MW_mix", 0) > 0:
                                     cold_out["enthalpy"] = flash_cold_ntu["H"] / (flash_cold_ntu["MW_mix"] / 1000.0)
+                                    cold_out["vapor_fraction"] = flash_cold_ntu.get("VF", cold_out.get("vapor_fraction", 0))
+                                # Recalculate duty from flash enthalpies (more accurate near phase transitions)
+                                if flash_hot and flash_hot_ntu and flash_hot.get("MW_mix", 0) > 0 and flash_hot_ntu.get("MW_mix", 0) > 0:
+                                    h_hot_in_ntu = flash_hot["H"] / (flash_hot["MW_mix"] / 1000.0)
+                                    h_hot_out_ntu = hot_out["enthalpy"]
+                                    Q_ntu = mf_hot * (h_hot_in_ntu - h_hot_out_ntu)
                                 eq_res["method"] = "NTU"
                                 eq_res["ntu"] = round(NTU, 3)
                                 eq_res["effectiveness"] = round(epsilon, 4)
