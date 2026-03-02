@@ -207,6 +207,24 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 1. **E2E test used exact equipment count for LLM-generated flowsheet**: Test expected exactly 4 equipment items but AI added ProductStream nodes (6 total) — LLM output is non-deterministic. Fix: changed `toHaveLength(4)` to `toBeGreaterThanOrEqual(4)` and verified core types with `toContain()`. **Never assert exact counts on LLM-generated output; use minimum bounds and check for required elements.**
 
+### Production Engine Bugs: Mistakes and Resolutions
+
+1. **HX allowed cold outlet > hot inlet (2nd law violation)**: Energy-balanced cold outlet adjustment could produce T_cold_out > T_hot_in when hot-side duty far exceeded cold-side capacity (e.g., 10 kg/s hot, 1 kg/s cold → cold outlet 1288°C). Fix: clamp T_cold_out ≤ T_hot_in - 1K and T_hot_out ≥ T_cold_in + 1K, recompute duty from clamped side. **Always enforce thermodynamic feasibility constraints after energy balance calculations.**
+
+2. **HX NTU method updated temperatures but left stale enthalpies**: NTU recalculated T_hot_out and T_cold_out but didn't re-flash outlets — downstream equipment got enthalpies computed from the LMTD temperatures. Fix: re-flash both outlets at NTU temperatures to update enthalpies. **When overriding temperatures in a secondary calculation path, always recompute dependent properties (enthalpy, VF).**
+
+3. **Distillation LK/HK picked extreme components for wide-boiling feeds**: `lk_idx = max(K), hk_idx = min(K)` selected methane (bp -161°C) and n-decane (bp 174°C) for mixed feeds, giving alpha ~10⁶ and meaningless FUG results (N_min ≈ 0.8, LK purity 13%). Fix: adjacent key selection — sort by K-value and pick the closest pair with alpha > 1.01 (finds the hardest split). Added `lightKey`/`heavyKey` params for user override. **For multicomponent distillation, the key components should be the adjacent pair straddling the split, not the volatility extremes.**
+
+4. **Distillation reboiler duty went negative from enthalpy reference state mismatch**: `Q_reb = D*h_dist + B*h_bott + Q_cond - mf*h_feed` produced negative values when flash enthalpies had inconsistent reference states across different compositions. Fix: enforce `Q_reb = max(Q_reb, 0)` with `B * hvap(bottoms)` fallback. **Reboilers must add heat — enforce physical constraints on energy balance outputs.**
+
+5. **Compressor entropy-based outlet had 39% energy imbalance**: Entropy method computed work from `dH_actual = (H_isen - H_in)/eff`, but outlet enthalpy came from a separate TP flash at (T_out, P_out) — numerical differences between HP flash (gives T_out) and TP flash (gives H_out) broke `H_out - H_in = W/mf`. Fix: set outlet enthalpy directly as `H_in + W/mf` for entropy method. **When computing thermodynamically consistent results, derive all outputs from a single calculation path — redundant flashes introduce numerical inconsistency.**
+
+6. **Pump silently accepted P_out < P_in**: Pump with outlet pressure below inlet produced negative work and temperature drop with no warning. Fix: added WARNING log "pump cannot reduce pressure. Consider using a Valve instead." **Always validate physical feasibility of user parameters and suggest the correct equipment type.**
+
+7. **DesignSpec mutated shared node parameters via shallow copy**: `[dict(n) for n in nodes]` shallow-copies node dicts but nested `parameters` dict shares the same reference — DesignSpec's `n_params[manip_param] = x1_ds` modified the original nodes list. Fix: `copy.deepcopy(nodes)` before DesignSpec iterations. **Nested dicts require deep copy — shallow copy only duplicates the top-level container.**
+
+8. **DesignSpec `'f1' in dir()` is unreliable for variable existence**: `dir()` returns module-level names, not local variables — `f1` was always absent from `dir()` even when assigned. Fix: initialize `f1 = None` before loop, check `f1 is not None`. **Never use `dir()` to check local variable existence — use sentinel values (`None`) with explicit initialization.**
+
 ## Dev Commands
 ```bash
 # Backend

@@ -1,3 +1,4 @@
+import copy
 import functools
 import json
 import logging
@@ -1152,6 +1153,12 @@ class DWSIMEngine:
                                 rho = 1000.0
 
                             P_out = _kpa_to_pa(float(params.get("outletPressure", _pa_to_kpa(P_in * 2))))
+                            if P_out < P_in:
+                                logs.append(
+                                    f"WARNING: {name} outlet pressure ({_pa_to_kpa(P_out):.0f} kPa) < inlet "
+                                    f"({_pa_to_kpa(P_in):.0f} kPa) — pump cannot reduce pressure. "
+                                    f"Consider using a Valve instead."
+                                )
                             eff = float(params.get("efficiency", 75)) / 100.0
                             if eff <= 0:
                                 eff = 0.75
@@ -1376,12 +1383,18 @@ class DWSIMEngine:
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out
-                            # Thermo-based outlet enthalpy for reference state consistency
-                            flash_comp_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                            if flash_comp_out and flash_comp_out.get("MW_mix", 0) > 0:
-                                outlet["enthalpy"] = flash_comp_out["H"] / (flash_comp_out["MW_mix"] / 1000.0)
+                            # Outlet enthalpy: use work-consistent value when entropy method was used
+                            if used_entropy and flash_in and flash_in.get("MW_mix", 0) > 0:
+                                mw_kg = flash_in["MW_mix"] / 1000.0
+                                h_in_kg = flash_in["H"] / mw_kg  # J/kg
+                                outlet["enthalpy"] = h_in_kg + (work_w / mf if mf > 0 else 0)
                             else:
-                                outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
+                                # TP flash fallback for gamma method
+                                flash_comp_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
+                                if flash_comp_out and flash_comp_out.get("MW_mix", 0) > 0:
+                                    outlet["enthalpy"] = flash_comp_out["H"] / (flash_comp_out["MW_mix"] / 1000.0)
+                                else:
+                                    outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
                             outlet["composition"] = dict(comp)
                             outlets["out-1"] = outlet
                             engine_note = " (entropy)" if used_entropy else (" (γ)" if used_thermo else "")
@@ -1695,9 +1708,33 @@ class DWSIMEngine:
                                 duty = mf_hot * cp_hot * (T_hot_in - T_hot_out)
                                 T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
 
-                            # Temperature cross check
-                            if T_hot_out < T_cold_in or T_cold_out > T_hot_in:
-                                logs.append(f"WARNING: {name} has a temperature cross – results may be infeasible")
+                            # Clamp to prevent 2nd-law violations (temperature cross)
+                            dT_min_hx = 1.0  # K minimum approach temperature
+                            if T_cold_out > T_hot_in - dT_min_hx:
+                                T_cold_out_old = T_cold_out
+                                T_cold_out = T_hot_in - dT_min_hx
+                                logs.append(
+                                    f"WARNING: {name} cold outlet {_k_to_c(T_cold_out_old):.1f}°C > hot inlet {_k_to_c(T_hot_in):.1f}°C "
+                                    f"— clamped to {_k_to_c(T_cold_out):.1f}°C (2nd law)"
+                                )
+                                # Recompute duty from clamped cold side
+                                duty = mf_cold * cp_cold * (T_cold_out - T_cold_in)
+                                # Recompute hot outlet from energy balance
+                                T_hot_out = T_hot_in - duty / (mf_hot * cp_hot) if mf_hot * cp_hot > 0 else T_hot_in
+                            if T_hot_out < T_cold_in + dT_min_hx:
+                                T_hot_out_old = T_hot_out
+                                T_hot_out = T_cold_in + dT_min_hx
+                                logs.append(
+                                    f"WARNING: {name} hot outlet {_k_to_c(T_hot_out_old):.1f}°C < cold inlet {_k_to_c(T_cold_in):.1f}°C "
+                                    f"— clamped to {_k_to_c(T_hot_out):.1f}°C (2nd law)"
+                                )
+                                # Recompute duty from clamped hot side
+                                duty = mf_hot * cp_hot * (T_hot_in - T_hot_out)
+                                # Recompute cold outlet from energy balance
+                                T_cold_out = T_cold_in + duty / (mf_cold * cp_cold) if mf_cold * cp_cold > 0 else T_cold_in
+                                # Final safety clamp on cold side
+                                if T_cold_out > T_hot_in - dT_min_hx:
+                                    T_cold_out = T_hot_in - dT_min_hx
 
                             hot_out = dict(hot)
                             hot_out["temperature"] = T_hot_out
@@ -1764,6 +1801,13 @@ class DWSIMEngine:
                                 T_cold_out = T_cold_in + Q_ntu / C_cold if C_cold > 0 else T_cold_in
                                 hot_out["temperature"] = T_hot_out
                                 cold_out["temperature"] = T_cold_out
+                                # Re-flash outlets at NTU temperatures to update enthalpies
+                                flash_hot_ntu = self._flash_tp(hot_comp_names, hot_zs, T_hot_out, P_hot_in - dp_hot, property_package)
+                                if flash_hot_ntu and flash_hot_ntu.get("MW_mix", 0) > 0:
+                                    hot_out["enthalpy"] = flash_hot_ntu["H"] / (flash_hot_ntu["MW_mix"] / 1000.0)
+                                flash_cold_ntu = self._flash_tp(cold_comp_names, cold_zs, T_cold_out, P_cold_in - dp_cold, property_package)
+                                if flash_cold_ntu and flash_cold_ntu.get("MW_mix", 0) > 0:
+                                    cold_out["enthalpy"] = flash_cold_ntu["H"] / (flash_cold_ntu["MW_mix"] / 1000.0)
                                 eq_res["method"] = "NTU"
                                 eq_res["ntu"] = round(NTU, 3)
                                 eq_res["effectiveness"] = round(epsilon, 4)
@@ -1848,6 +1892,13 @@ class DWSIMEngine:
                                         "enthalpy": h_liq,
                                         "composition": liquid_comp,
                                     }
+                                    # Log zero-flow outlets
+                                    mass_flow_liq = mf * (1 - mass_vap_frac)
+                                    mass_flow_vap = mf * mass_vap_frac
+                                    if mass_flow_liq <= 1e-12:
+                                        logs.append(f"{name}: liquid outlet has zero flow (all vapor) — liquid composition is equilibrium estimate")
+                                    if mass_flow_vap <= 1e-12:
+                                        logs.append(f"{name}: vapor outlet has zero flow (all liquid) — vapor composition is equilibrium estimate")
                                     eq_res["vaporFraction"] = round(vf, 4)
                                     eq_res["massVaporFraction"] = round(mass_vap_frac, 4)
                                     logs.append(f"{name}: VF = {vf:.3f} (molar), mass VF = {mass_vap_frac:.3f}")
@@ -1923,9 +1974,44 @@ class DWSIMEngine:
                                             y_i = gas_zs[i] if gas_zs[i] > 1e-12 else 1e-12
                                             K_vals.append(y_i / x_i)
 
-                                        # Identify light key (highest K) and heavy key (lowest K)
-                                        lk_idx = K_vals.index(max(K_vals))
-                                        hk_idx = K_vals.index(min(K_vals))
+                                        # Identify light key and heavy key
+                                        # User-specified override takes priority
+                                        user_lk = params.get("lightKey")
+                                        user_hk = params.get("heavyKey")
+                                        lk_idx = -1
+                                        hk_idx = -1
+
+                                        if user_lk and user_lk in comp_names:
+                                            lk_idx = comp_names.index(user_lk)
+                                        if user_hk and user_hk in comp_names:
+                                            hk_idx = comp_names.index(user_hk)
+
+                                        if lk_idx < 0 or hk_idx < 0:
+                                            # Adjacent key selection: sort by K-value, find closest pair
+                                            sorted_indices = sorted(range(len(K_vals)), key=lambda i: K_vals[i], reverse=True)
+                                            if len(sorted_indices) >= 2:
+                                                best_pair = None
+                                                best_alpha = float('inf')
+                                                for j in range(len(sorted_indices) - 1):
+                                                    i1, i2 = sorted_indices[j], sorted_indices[j + 1]
+                                                    alpha_pair = K_vals[i1] / K_vals[i2] if K_vals[i2] > 1e-12 else 1e6
+                                                    if 1.01 < alpha_pair < best_alpha:
+                                                        best_alpha = alpha_pair
+                                                        best_pair = (i1, i2)
+                                                if best_pair:
+                                                    if lk_idx < 0:
+                                                        lk_idx = best_pair[0]
+                                                    if hk_idx < 0:
+                                                        hk_idx = best_pair[1]
+                                                else:
+                                                    # Fallback to extremes if no valid pair
+                                                    if lk_idx < 0:
+                                                        lk_idx = sorted_indices[0]
+                                                    if hk_idx < 0:
+                                                        hk_idx = sorted_indices[-1]
+                                            else:
+                                                lk_idx = 0
+                                                hk_idx = 1 if len(comp_names) > 1 else 0
 
                                         K_lk = K_vals[lk_idx]
                                         K_hk = K_vals[hk_idx]
@@ -2075,6 +2161,13 @@ class DWSIMEngine:
                                             Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
                                             # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
                                             Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
+                                            # Reboiler must add heat — enforce Q_reb >= 0
+                                            if Q_reb < 0:
+                                                logs.append(
+                                                    f"WARNING: {name} computed Q_reb={_w_to_kw(Q_reb):.1f} kW (negative) "
+                                                    f"— using hvap-based estimate"
+                                                )
+                                                Q_reb = B * _estimate_hvap(bottoms_comp)
 
                                             # LK purity in distillate
                                             lk_purity = distillate_comp.get(comp_names[lk_idx], 0.0)
@@ -3261,13 +3354,16 @@ class DWSIMEngine:
                     a, b = lower_bound, upper_bound
                     x0_ds, x1_ds = a, a + (b - a) * 0.1
                     f0 = None
+                    f1 = None
                     ds_converged = False
                     ds_iterations = 0
+                    # Deep copy nodes to avoid mutating shared parameters
+                    ds_nodes = copy.deepcopy(nodes)
 
                     for ds_iter in range(30):
                         ds_iterations = ds_iter + 1
-                        # Set manipulated param
-                        for n in nodes:
+                        # Set manipulated param on the deep copy
+                        for n in ds_nodes:
                             if n.get("id") == manip_node_id:
                                 n_params = n.get("parameters", n.get("data", {}).get("parameters", {}))
                                 n_params[manip_param] = x1_ds
@@ -3276,7 +3372,7 @@ class DWSIMEngine:
                         # Re-run simulation (simplified: just re-execute _simulate_basic)
                         # We re-use the current method but this is a simplified inner call
                         inner_result = await self.simulate({
-                            "nodes": [dict(n) for n in nodes],
+                            "nodes": [dict(n) for n in ds_nodes],
                             "edges": [dict(e) for e in edges],
                             "property_package": property_package,
                             "simulation_basis": simulation_basis,
@@ -3318,7 +3414,7 @@ class DWSIMEngine:
                         "targetValue": target_value,
                         "achievedValue": round(current_val, 4) if current_val is not None else None,
                         "manipulatedValue": round(x1_ds, 4),
-                        "error": round(abs(f1), 6) if 'f1' in dir() else None,
+                        "error": round(abs(f1), 6) if f1 is not None else None,
                     }
                     if ds_converged:
                         logs.append(f"DesignSpec '{ds_name}': converged in {ds_iterations} iter, {manip_param}={x1_ds:.4f}")
