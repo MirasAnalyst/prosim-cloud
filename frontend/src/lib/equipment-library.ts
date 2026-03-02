@@ -109,6 +109,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       ...feedConditionParams,
       temperature: { label: 'Temperature', unit: '°C', default: null, min: -273.15, max: 2000, type: 'number' },
       pressure: { label: 'Pressure', unit: 'kPa', default: null, min: 0, max: 50000, type: 'number' },
+      pressureDrop: { label: 'Pressure Drop', unit: 'kPa', default: 0, min: 0, max: 1000, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -191,6 +192,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       method: { label: 'Method', unit: '', default: 'LMTD', type: 'string' },
       geometry: { label: 'Geometry', unit: '', default: 'shell-tube', type: 'string' },
       foulingFactor: { label: 'Fouling Factor', unit: 'm²K/W', default: 0.0002, min: 0, max: 0.01, type: 'number' },
+      area: { label: 'Area (NTU)', unit: 'm²', default: 0, min: 0, max: 100000, type: 'number' },
     },
     ports: [
       { id: 'in-hot', name: 'Hot Inlet', position: 'left', type: 'inlet' },
@@ -215,6 +217,9 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       reboilerDuty: { label: 'Reboiler Duty', unit: 'kW', default: 1000, min: 0, max: 1e8, type: 'number' },
       distillateToFeedRatio: { label: 'D/F Ratio', unit: '', default: 0.5, min: 0.01, max: 0.99, type: 'number' },
       method: { label: 'Method', unit: '', default: 'FUG', type: 'string' },
+      lightKey: { label: 'Light Key', unit: '', default: '', type: 'string' },
+      heavyKey: { label: 'Heavy Key', unit: '', default: '', type: 'string' },
+      condenserType: { label: 'Condenser Type', unit: '', default: 'total', type: 'string' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -336,6 +341,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       inletDiameter: { label: 'Inlet Diameter', unit: 'm', default: 0.3, min: 0.01, max: 10, type: 'number' },
       pressureDropCoeff: { label: 'ΔP Coefficient K', unit: '', default: 8, min: 1, max: 20, type: 'number' },
       efficiency: { label: 'Separation Efficiency', unit: '%', default: 95, min: 50, max: 99.9, type: 'number' },
+      solidsFraction: { label: 'Solids Fraction', unit: '', default: 0.05, min: 0, max: 1, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -351,6 +357,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     icon: 'Layers',
     parameters: {
       ...feedConditionParams,
+      lightLiquidFraction: { label: 'Light Liquid Fraction', unit: '', default: 0.5, min: 0, max: 1, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -402,6 +409,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       ...feedConditionParams,
       efficiency: { label: 'Efficiency', unit: '%', default: 95, min: 0, max: 100, type: 'number' },
       pressureDrop: { label: 'Pressure Drop', unit: 'kPa', default: 50, min: 0, max: 1000, type: 'number' },
+      solidsFraction: { label: 'Solids Fraction', unit: '', default: 0.05, min: 0, max: 1, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -441,6 +449,8 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       elbows90: { label: '90° Elbows', unit: '', default: 0, min: 0, max: 100, type: 'number' },
       tees: { label: 'Tees', unit: '', default: 0, min: 0, max: 100, type: 'number' },
       gateValves: { label: 'Gate Valves', unit: '', default: 0, min: 0, max: 100, type: 'number' },
+      ambientTemp: { label: 'Ambient Temp', unit: '°C', default: null, min: -50, max: 60, type: 'number' },
+      overallU: { label: 'Overall U', unit: 'W/m²K', default: 0, min: 0, max: 1000, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Inlet', position: 'left', type: 'inlet' },

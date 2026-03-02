@@ -229,6 +229,10 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 10. **HX NTU path had 3 thermodynamic gaps found by chem-sim review**: (a) Final safety clamp didn't recompute `duty`, leaving it inconsistent with clamped temps; (b) NTU re-flash updated enthalpy but not `vapor_fraction`, so phase boundary crossings were invisible to downstream; (c) NTU duty used Cp-based `Q_ntu` instead of flash enthalpies, diverging near phase transitions. Fix: recompute duty after final clamp, propagate VF from re-flash, recalculate NTU duty from `mf*(h_in - h_out)`. **After any temperature override path (NTU, clamping), recompute ALL dependent properties — enthalpy, VF, and duty.**
 
+### Phase 9: Mistakes and Resolutions
+
+1. **Chem-sim review caught 5 bugs in 23 "correct" fixes — never skip domain review**: Phase 9 implemented 23 thermodynamic fixes across 3 waves, all passing syntax checks and basic curl tests. But chem-sim subagent review found: (a) pump `w_ideal` undefined in enthalpy path → crash; (b) Stripper G/L molar flows swapped → all stripper results wrong; (c) absorber heat-of-absorption used `fraction × wrong_total` instead of actual mole difference; (d) dryer outlet mixed mass-fraction target into mole-fraction composition dict; (e) crystallizer `mf * z_mole` instead of `mf * z_mass` for crystal flow. Fix: all 5 bugs fixed and verified with curl tests. **After implementing thermodynamic fixes, always run chem-sim domain review before declaring complete — unit consistency bugs (mole vs mass, G vs L, defined vs undefined variables) are invisible to syntax checks and basic tests.**
+
 ## Dev Commands
 ```bash
 # Backend
