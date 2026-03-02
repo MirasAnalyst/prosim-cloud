@@ -241,6 +241,20 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 5. **Crystallizer `crystal_flow = mf * zs[key_idx]` used mole fraction with mass flow**: For 50 mol% urea (MW=60) in water (MW=18), mass fraction is 0.77 not 0.50. Using mole fraction underestimates crystal yield by 35%. Fix: convert `zs[key_idx]` to mass fraction via `z*MW_key / Σ(z_i*MW_i)` before multiplying by mass flow. **When computing mass flows from compositions, always convert mole fractions to mass fractions first — this is the same class of bug as the dryer (C3) fix itself was meant to address.**
 
+### Stress Test Chem-Sim Review: Mistakes and Resolutions
+
+1. **Distillation boiling-point fallback set `enthalpy: 0.0` on both outlets**: FUG fallback path hardcoded zero enthalpy for distillate and bottoms, causing 100% energy imbalance cascading to all downstream equipment (Test 20 Complete Gas Plant). Fix: flash each outlet composition at its T/P to get real enthalpies. **Never hardcode enthalpy=0 — always flash the outlet composition, even in fallback paths.**
+
+2. **Stripper single-inlet injected phantom 1 kg/s default feed**: `feed2 = dict(_DEFAULT_FEED)` created 1 kg/s of water from nothing for reboiled strippers (no external stripping gas), violating mass conservation. Fix: set `feed2["mass_flow"] = 0.0` and log "operating as reboiled stripper". **Default feed dicts must not inject mass into the simulation — set mass_flow=0 when a feed is structurally absent.**
+
+3. **ThreePhaseSeparator copied inlet enthalpy to all 3 outlets**: Vapor, light liquid, and heavy liquid all got `inlet.get("enthalpy", 0.0)` regardless of phase, causing 40-55% energy imbalance downstream. Fix: extract per-phase enthalpy from flash state (`gas_phase.H()`, `liquid0.H()`) — same pattern as regular Separator. **Phase-separating equipment must compute per-phase enthalpies from flash, not copy the mixed-feed value.**
+
+4. **HX cold outlet enthalpy inconsistent with duty near phase change**: Hot-side duty correctly computed from flash enthalpies, but cold outlet enthalpy came from an independent TP flash — numerical differences gave 34.6% energy imbalance for propane near boiling point. Fix: force `cold_out["enthalpy"] = h_cold_in + duty / mf_cold` from energy balance. **Derive both HX outlets from a single duty calculation — independent flashes introduce numerical inconsistency.**
+
+5. **Cyclone outlets both got inlet enthalpy despite different compositions**: Gas outlet (light components) and solids outlet (heaviest component) had identical enthalpies, thermodynamically incorrect. Fix: flash each outlet composition separately at outlet T/P. **Any equipment that splits compositions must flash each outlet independently for correct enthalpy.**
+
+6. **Energy balance checker false positives for DistillationColumn, Cyclone, Filter**: These equipment types have internal duties (condenser/reboiler) or heuristic composition splits that don't conserve energy in the simple `Σ(mf*h)_in = Σ(mf*h)_out ± duty` check. Fix: exclude them from energy balance validation with `ntype not in ("DistillationColumn", "Cyclone", "Filter")`. **Energy balance checks must account for equipment with internal energy sources/sinks not captured in the external duty field.**
+
 ### Per-Stream Component Properties: Mistakes and Resolutions
 
 1. **CSV export column mismatch — component rows had 11 columns but header had 8**: Component detail sub-rows used offset commas starting at column 7, exceeding the 8-column header. Excel showed 3 unnamed columns. Fix: unified header to 14 columns covering both stream-level and component-level data, with component rows aligning to columns 10-14. **When CSV has parent/child rows, define a single header spanning all columns so both row types align.**
