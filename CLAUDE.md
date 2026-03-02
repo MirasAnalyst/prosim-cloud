@@ -225,6 +225,10 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 8. **DesignSpec `'f1' in dir()` is unreliable for variable existence**: `dir()` returns module-level names, not local variables — `f1` was always absent from `dir()` even when assigned. Fix: initialize `f1 = None` before loop, check `f1 is not None`. **Never use `dir()` to check local variable existence — use sentinel values (`None`) with explicit initialization.**
 
+9. **Unstaged frontend routing changes caused 39 false test failures**: `App.tsx` had uncommitted changes moving the simulator from `/` to `/app/*`. Vite dev server serves the working tree, so all Playwright tests navigating to `/` hit a landing page instead of the simulator. Misdiagnosed as engine regressions until stashing the unrelated changes. Fix: stash unrelated frontend changes before running E2E tests. **Always check `git status` for unstaged changes that could affect test behavior — Vite serves working tree, not HEAD.**
+
+10. **HX NTU path had 3 thermodynamic gaps found by chem-sim review**: (a) Final safety clamp didn't recompute `duty`, leaving it inconsistent with clamped temps; (b) NTU re-flash updated enthalpy but not `vapor_fraction`, so phase boundary crossings were invisible to downstream; (c) NTU duty used Cp-based `Q_ntu` instead of flash enthalpies, diverging near phase transitions. Fix: recompute duty after final clamp, propagate VF from re-flash, recalculate NTU duty from `mf*(h_in - h_out)`. **After any temperature override path (NTU, clamping), recompute ALL dependent properties — enthalpy, VF, and duty.**
+
 ## Dev Commands
 ```bash
 # Backend
