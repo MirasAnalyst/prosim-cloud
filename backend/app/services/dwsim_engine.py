@@ -292,6 +292,34 @@ def _clean_composition(comp: dict[str, float]) -> dict[str, float]:
     return cleaned
 
 
+def _compute_component_properties(composition: dict[str, float], mass_flow: float) -> dict:
+    """Compute per-component properties (HYSYS/DWSIM convention).
+
+    Args:
+        composition: mole fractions {name: z_i}
+        mass_flow: total mass flow in kg/s
+
+    Returns dict with molecular_weight, molar_flow, mass_fractions,
+    component_molar_flows, component_mass_flows. Empty dict if invalid input.
+    """
+    if not composition or mass_flow <= 0:
+        return {}
+    mw_mix = sum(z * _get_mw(name) for name, z in composition.items())
+    if mw_mix <= 0:
+        return {}
+    molar_flow = mass_flow / (mw_mix / 1000.0)  # mol/s
+    mass_fracs = {name: z * _get_mw(name) / mw_mix for name, z in composition.items()}
+    comp_molar = {name: z * molar_flow for name, z in composition.items()}
+    comp_mass = {name: w * mass_flow for name, w in mass_fracs.items()}
+    return {
+        "molecular_weight": round(mw_mix, 4),
+        "molar_flow": round(molar_flow, 6),
+        "mass_fractions": {k: round(v, 6) for k, v in mass_fracs.items()},
+        "component_molar_flows": {k: round(v, 6) for k, v in comp_molar.items()},
+        "component_mass_flows": {k: round(v, 6) for k, v in comp_mass.items()},
+    }
+
+
 def _estimate_cp(composition: dict[str, float]) -> float:
     """Estimate mass-weighted Cp (J/kg/K) from composition for fallback.
 
@@ -999,6 +1027,8 @@ class DWSIMEngine:
                             # Propagate flash VF back to port_conditions for downstream
                             port_conditions[(fs_id, "out-1")]["vapor_fraction"] = vf
 
+                        _comp_props = _compute_component_properties(comp, mf)
+                        _h_kj = round(feed_cond.get("enthalpy", 0.0) / 1000.0, 4)  # J/kg → kJ/kg
                         equipment_results[fs_id] = {
                             "equipment_id": fs_id,
                             "equipment_type": "FeedStream",
@@ -1008,6 +1038,7 @@ class DWSIMEngine:
                             "massFlow": mf,
                             "vaporFraction": vf,
                             "composition": comp,
+                            **_comp_props,
                             "outlet_streams": {
                                 "out-1": {
                                     "temperature": T_c,
@@ -1015,6 +1046,8 @@ class DWSIMEngine:
                                     "flowRate": mf,
                                     "vapor_fraction": vf,
                                     "composition": comp,
+                                    "enthalpy": _h_kj,
+                                    **_comp_props,
                                 },
                             },
                         }
@@ -1028,6 +1061,8 @@ class DWSIMEngine:
                                 "flowRate": mf,
                                 "vapor_fraction": vf,
                                 "composition": comp,
+                                "enthalpy": _h_kj,
+                                **_comp_props,
                             }
 
                         logs.append(f"Feed stream '{fs_name}': T={T_c:.1f}°C, P={P_kpa:.1f} kPa, flow={mf:.3f} kg/s")
@@ -3657,6 +3692,8 @@ class DWSIMEngine:
                             mf = cond.get("mass_flow", 0.0)
                             vf = cond.get("vapor_fraction", 0.0)
                             comp = cond.get("composition", {})
+                            _ps_comp_props = _compute_component_properties(comp, mf)
+                            _ps_h_kj = round(cond.get("enthalpy", 0.0) / 1000.0, 4)  # J/kg → kJ/kg
                             equipment_results[ps_id] = {
                                 "equipment_id": ps_id,
                                 "equipment_type": "ProductStream",
@@ -3666,6 +3703,7 @@ class DWSIMEngine:
                                 "massFlow": mf,
                                 "vaporFraction": vf,
                                 "composition": comp,
+                                **_ps_comp_props,
                                 "inlet_streams": {
                                     "in-1": {
                                         "temperature": T_c,
@@ -3673,6 +3711,8 @@ class DWSIMEngine:
                                         "flowRate": mf,
                                         "vapor_fraction": vf,
                                         "composition": comp,
+                                        "enthalpy": _ps_h_kj,
+                                        **_ps_comp_props,
                                     },
                                 },
                             }
@@ -3852,12 +3892,18 @@ class DWSIMEngine:
                 edge_id = edge.get("id", f"{src}_{sh}")
                 cond = port_conditions.get((src, sh))
                 if cond:
+                    _edge_comp = cond.get("composition", {})
+                    _edge_mf = cond["mass_flow"]
+                    _edge_cp = _compute_component_properties(_edge_comp, _edge_mf)
+                    _edge_h_kj = round(cond.get("enthalpy", 0.0) / 1000.0, 4)  # J/kg → kJ/kg
                     stream_results[edge_id] = {
                         "temperature": round(_k_to_c(cond["temperature"]), 2),
                         "pressure": round(_pa_to_kpa(cond["pressure"]), 3),
-                        "flowRate": round(cond["mass_flow"], 4),
+                        "flowRate": round(_edge_mf, 4),
                         "vapor_fraction": round(cond.get("vapor_fraction", 0.0), 4),
-                        "composition": cond.get("composition", {}),
+                        "composition": _edge_comp,
+                        "enthalpy": _edge_h_kj,
+                        **_edge_cp,
                     }
 
             engine_name = "basic"

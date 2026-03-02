@@ -75,6 +75,12 @@ export interface StreamConditions {
   flowRate: number;
   vapor_fraction: number;
   composition: Record<string, number>;
+  enthalpy?: number;
+  molecular_weight?: number;
+  molar_flow?: number;
+  mass_fractions?: Record<string, number>;
+  component_molar_flows?: Record<string, number>;
+  component_mass_flows?: Record<string, number>;
 }
 
 export interface StreamData {

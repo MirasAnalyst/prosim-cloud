@@ -1,5 +1,5 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { ChevronUp, ChevronDown, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, Download, ChevronDown as ChevronDownSmall } from 'lucide-react';
+import { Fragment, useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { ChevronUp, ChevronDown, ChevronRight, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, Download, ChevronDown as ChevronDownSmall } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
@@ -14,6 +14,7 @@ export default function BottomPanel() {
   const [expanded, setExpanded] = useState(false);
   const [sortCol, setSortCol] = useState<SortCol>('stream');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [expandedStreams, setExpandedStreams] = useState<Set<string>>(new Set());
   const status = useSimulationStore((s) => s.status);
   const results = useSimulationStore((s) => s.results);
   const progress = useSimulationStore((s) => s.progress);
@@ -97,12 +98,34 @@ export default function BottomPanel() {
     return () => document.removeEventListener('mousedown', handler);
   }, [exportDropdownOpen]);
 
+  const toggleStreamExpand = useCallback((id: string) => {
+    setExpandedStreams((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
   const exportCsv = useCallback(() => {
     if (sortedStreamEntries.length === 0) return;
-    const header = 'Stream,Temperature (C),Pressure (kPa),Flow (kg/s),VF,Composition';
-    const rows = sortedStreamEntries.map((e) =>
-      `"${e.streamName}",${e.temperature.toFixed(1)},${e.pressure.toFixed(1)},${e.flowRate.toFixed(3)},${e.vapor_fraction?.toFixed(3) ?? ''},"${formatComposition(e.composition)}"`
-    );
+    const header = 'Stream,Temperature (C),Pressure (kPa),Flow (kg/s),VF,Enthalpy (kJ/kg),MW (g/mol),Molar Flow (mol/s),Composition,Component,Mole Frac,Mass Frac,Comp Molar Flow (mol/s),Comp Mass Flow (kg/s)';
+    const rows: string[] = [];
+    for (const e of sortedStreamEntries) {
+      rows.push(
+        `"${e.streamName}",${e.temperature.toFixed(1)},${e.pressure.toFixed(1)},${e.flowRate.toFixed(3)},${e.vapor_fraction?.toFixed(3) ?? ''},${e.enthalpy?.toFixed(2) ?? ''},${e.molecular_weight?.toFixed(2) ?? ''},${e.molar_flow?.toFixed(4) ?? ''},"${formatComposition(e.composition)}",,,,, `
+      );
+      if (e.component_molar_flows && Object.keys(e.component_molar_flows).length > 0) {
+        const comps = Object.keys(e.component_molar_flows);
+        for (const c of comps) {
+          const zz = e.composition?.[c] ?? 0;
+          const ww = e.mass_fractions?.[c] ?? 0;
+          const mf = e.component_molar_flows?.[c] ?? 0;
+          const msf = e.component_mass_flows?.[c] ?? 0;
+          rows.push(`,,,,,,,,,${c},${zz.toFixed(6)},${ww.toFixed(6)},${mf.toFixed(6)},${msf.toFixed(6)}`);
+        }
+      }
+    }
     const csv = [header, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -279,19 +302,64 @@ export default function BottomPanel() {
                 <tbody>
                   {sortedStreamEntries.map((entry) => {
                     const compStr = formatComposition(entry.composition);
+                    const hasComponents = entry.component_molar_flows && Object.keys(entry.component_molar_flows).length > 0;
+                    const isExpanded = expandedStreams.has(entry.id);
                     return (
-                      <tr key={entry.id} className="text-gray-700 dark:text-gray-300 border-b border-gray-200/50 dark:border-gray-800/50">
-                        <td className="py-1 pr-4 max-w-[200px] truncate" title={entry.streamName}>
-                          {entry.streamName}
-                        </td>
-                        <td className="text-right py-1 pr-4">{entry.temperature.toFixed(1)}</td>
-                        <td className="text-right py-1 pr-4">{entry.pressure.toFixed(1)}</td>
-                        <td className="text-right py-1 pr-4">{entry.flowRate.toFixed(3)}</td>
-                        <td className="text-right py-1 pr-4">{entry.vapor_fraction?.toFixed(3) ?? '\u2014'}</td>
-                        <td className="py-1 max-w-[300px] truncate text-gray-500 dark:text-gray-400" title={compStr}>
-                          {compStr}
-                        </td>
-                      </tr>
+                      <Fragment key={entry.id}>
+                        <tr
+                          className={`text-gray-700 dark:text-gray-300 border-b border-gray-200/50 dark:border-gray-800/50 ${hasComponents ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/50' : ''}`}
+                          onClick={() => hasComponents && toggleStreamExpand(entry.id)}
+                        >
+                          <td className="py-1 pr-4 max-w-[200px] truncate" title={entry.streamName}>
+                            <span className="inline-flex items-center gap-1">
+                              {hasComponents && (
+                                isExpanded
+                                  ? <ChevronDown size={10} className="text-gray-400 flex-shrink-0" />
+                                  : <ChevronRight size={10} className="text-gray-400 flex-shrink-0" />
+                              )}
+                              {entry.streamName}
+                            </span>
+                          </td>
+                          <td className="text-right py-1 pr-4">{entry.temperature.toFixed(1)}</td>
+                          <td className="text-right py-1 pr-4">{entry.pressure.toFixed(1)}</td>
+                          <td className="text-right py-1 pr-4">{entry.flowRate.toFixed(3)}</td>
+                          <td className="text-right py-1 pr-4">{entry.vapor_fraction?.toFixed(3) ?? '\u2014'}</td>
+                          <td className="py-1 max-w-[300px] truncate text-gray-500 dark:text-gray-400" title={compStr}>
+                            {compStr}
+                          </td>
+                        </tr>
+                        {isExpanded && hasComponents && (
+                          <tr key={`${entry.id}-details`} className="bg-gray-50/50 dark:bg-gray-800/30">
+                            <td colSpan={6} className="px-4 py-2">
+                              <div className="text-[11px] text-gray-500 dark:text-gray-400 mb-1.5">
+                                MW: {entry.molecular_weight?.toFixed(2) ?? '—'} g/mol | Molar Flow: {entry.molar_flow?.toFixed(4) ?? '—'} mol/s | Enthalpy: {entry.enthalpy?.toFixed(2) ?? '—'} kJ/kg
+                              </div>
+                              <table className="w-full text-[11px]">
+                                <thead>
+                                  <tr className="text-gray-400 dark:text-gray-500">
+                                    <th className="text-left py-0.5 pr-4 font-medium">Component</th>
+                                    <th className="text-right py-0.5 pr-4 font-medium">Mole Frac</th>
+                                    <th className="text-right py-0.5 pr-4 font-medium">Mass Frac</th>
+                                    <th className="text-right py-0.5 pr-4 font-medium">Molar Flow (mol/s)</th>
+                                    <th className="text-right py-0.5 font-medium">Mass Flow (kg/s)</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {Object.keys(entry.component_molar_flows!).map((comp) => (
+                                    <tr key={comp} className="text-gray-600 dark:text-gray-400">
+                                      <td className="py-0.5 pr-4">{comp}</td>
+                                      <td className="text-right py-0.5 pr-4">{(entry.composition?.[comp] ?? 0).toFixed(4)}</td>
+                                      <td className="text-right py-0.5 pr-4">{(entry.mass_fractions?.[comp] ?? 0).toFixed(4)}</td>
+                                      <td className="text-right py-0.5 pr-4">{(entry.component_molar_flows![comp]).toFixed(4)}</td>
+                                      <td className="text-right py-0.5">{(entry.component_mass_flows?.[comp] ?? 0).toFixed(4)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     );
                   })}
                 </tbody>

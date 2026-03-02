@@ -241,6 +241,10 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 5. **Crystallizer `crystal_flow = mf * zs[key_idx]` used mole fraction with mass flow**: For 50 mol% urea (MW=60) in water (MW=18), mass fraction is 0.77 not 0.50. Using mole fraction underestimates crystal yield by 35%. Fix: convert `zs[key_idx]` to mass fraction via `z*MW_key / Σ(z_i*MW_i)` before multiplying by mass flow. **When computing mass flows from compositions, always convert mole fractions to mass fractions first — this is the same class of bug as the dryer (C3) fix itself was meant to address.**
 
+### Per-Stream Component Properties: Mistakes and Resolutions
+
+1. **CSV export column mismatch — component rows had 11 columns but header had 8**: Component detail sub-rows used offset commas starting at column 7, exceeding the 8-column header. Excel showed 3 unnamed columns. Fix: unified header to 14 columns covering both stream-level and component-level data, with component rows aligning to columns 10-14. **When CSV has parent/child rows, define a single header spanning all columns so both row types align.**
+
 ## Dev Commands
 ```bash
 # Backend

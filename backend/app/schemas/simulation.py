@@ -11,6 +11,12 @@ class StreamConditions(BaseModel):
     flowRate: float | None = None  # kg/s
     composition: dict[str, float] = {}  # component_name -> mole fraction
     vapor_fraction: float | None = None
+    enthalpy: float | None = None  # kJ/kg
+    molecular_weight: float | None = None  # g/mol (mixture MW)
+    molar_flow: float | None = None  # mol/s
+    mass_fractions: dict[str, float] = {}  # component_name -> mass fraction
+    component_molar_flows: dict[str, float] = {}  # component_name -> mol/s
+    component_mass_flows: dict[str, float] = {}  # component_name -> kg/s
 
 
 class EquipmentResults(BaseModel):
