@@ -35,15 +35,16 @@ test.describe('AI Flowsheet Generation', () => {
     expect(result.flowsheet_action).toBeTruthy();
     const action = result.flowsheet_action;
 
-    // Verify 3 equipment items
-    expect(action.equipment).toHaveLength(3);
+    // Verify at least 4 equipment items (FeedStream + Heater + Separator + Compressor; AI may also add ProductStreams)
+    expect(action.equipment.length).toBeGreaterThanOrEqual(4);
     const types = action.equipment.map((eq: any) => eq.type);
+    expect(types).toContain('FeedStream');
     expect(types).toContain('Heater');
     expect(types).toContain('Separator');
     expect(types).toContain('Compressor');
 
-    // Verify 2 connections
-    expect(action.connections).toHaveLength(2);
+    // Verify at least 3 connections (FeedStream→Heater, Heater→Separator, Separator→Compressor; more if ProductStreams added)
+    expect(action.connections.length).toBeGreaterThanOrEqual(3);
 
     // Verify correct port IDs: separator out-1 is vapor
     const sepToComp = action.connections.find(
@@ -55,11 +56,15 @@ test.describe('AI Flowsheet Generation', () => {
     expect(sepToComp).toBeTruthy();
     expect(sepToComp.source_port).toBe('out-1'); // vapor port
 
-    // Verify heater has feed parameters
+    // Verify FeedStream has feed parameters
+    const feedStream = action.equipment.find((eq: any) => eq.type === 'FeedStream');
+    expect(feedStream.parameters.feedFlowRate).toBe(5);
+    expect(feedStream.parameters.feedPressure).toBe(3000);
+
+    // Verify Heater only has operation params (outletTemperature), NOT feed params
     const heater = action.equipment.find((eq: any) => eq.type === 'Heater');
     expect(heater.parameters.outletTemperature).toBe(200);
-    expect(heater.parameters.feedFlowRate).toBe(5);
-    expect(heater.parameters.feedPressure).toBe(3000);
+    expect(heater.parameters.feedFlowRate).toBeUndefined();
 
     // Verify compressor has outlet pressure and efficiency
     const compressor = action.equipment.find((eq: any) => eq.type === 'Compressor');
@@ -114,6 +119,6 @@ test.describe('AI Flowsheet Generation', () => {
     const nodes = page.locator('.react-flow__node');
     await expect(nodes.first()).toBeVisible({ timeout: 5000 });
     const nodeCount = await nodes.count();
-    expect(nodeCount).toBeGreaterThanOrEqual(2); // At least heater + separator
+    expect(nodeCount).toBeGreaterThanOrEqual(3); // At least FeedStream + heater + separator
   });
 });

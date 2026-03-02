@@ -203,6 +203,10 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 4. **Absorber outlet used simple average temperature, ignoring exothermic absorption**: `T_out2 = T_avg` missed the heat released by CO₂/H₂S absorption into amine (84/60 kJ/mol). Rich solvent exits 20-40°C hotter than the average in real plants. Fix: added `_HEAT_OF_ABSORPTION` table, computed `ΔT = Q_abs/(mf·Cp)` capped at 60K, and flashed outlets for real enthalpies. **Absorber/stripper models must account for heat of reaction — it dominates the column temperature profile.**
 
+### AI FeedStream Fix: Mistakes and Resolutions
+
+1. **E2E test used exact equipment count for LLM-generated flowsheet**: Test expected exactly 4 equipment items but AI added ProductStream nodes (6 total) — LLM output is non-deterministic. Fix: changed `toHaveLength(4)` to `toBeGreaterThanOrEqual(4)` and verified core types with `toContain()`. **Never assert exact counts on LLM-generated output; use minimum bounds and check for required elements.**
+
 ## Dev Commands
 ```bash
 # Backend

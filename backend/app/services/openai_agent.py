@@ -54,7 +54,7 @@ FeedStream, ProductStream, Heater, Cooler, Mixer, Splitter, Separator, Pump, Com
 ### Parameter keys (use frontend units — °C, kPa, kg/s, kW, %):
 - FeedStream: feedTemperature, feedPressure, feedFlowRate, feedComposition (JSON string)
 - ProductStream: (no parameters needed — receives upstream conditions)
-- Feed conditions (first equipment only): feedTemperature, feedPressure, feedFlowRate, feedComposition (JSON string e.g. '{"methane":0.9,"ethane":0.1}')
+- Feed conditions (FeedStream only): feedTemperature, feedPressure, feedFlowRate, feedComposition (JSON string e.g. '{"methane":0.9,"ethane":0.1}')
 - Heater/Cooler: outletTemperature, duty, pressureDrop
 - Separator: temperature, pressure
 - Compressor/Pump: outletPressure, efficiency (0-100 scale, e.g. 75 means 75%)
@@ -78,29 +78,31 @@ FeedStream, ProductStream, Heater, Cooler, Mixer, Splitter, Separator, Pump, Com
 water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-hexane, n-heptane, n-octane, n-decane, ethylene, propylene, benzene, toluene, o-xylene, methanol, ethanol, acetone, acetic acid, hydrogen, nitrogen, oxygen, carbon dioxide, carbon monoxide, hydrogen sulfide, sulfur dioxide, ammonia, chlorine, argon, helium, cyclohexane, styrene, 1-propanol, 2-propanol, diethyl ether, dimethyl ether, formic acid, formaldehyde, diethanolamine, monoethanolamine
 
 ### Rules:
-1. Use FeedStream for defining feed conditions. When FeedStream is not practical (e.g., multi-inlet equipment needing Heater pass-through), set feed params on the first Heater.
+1. ALWAYS use FeedStream nodes for feed conditions (temperature, pressure, flow rate, composition). Never put feedTemperature/feedPressure/feedFlowRate/feedComposition on a Heater, Cooler, or any other equipment. Heaters are only for heating — use outletTemperature, duty, pressureDrop.
 2. feedComposition must be a JSON string, not an object.
 3. Use sequential IDs: equip-1, equip-2, etc.
 4. Connect equipment in process order using correct port IDs.
 5. Populate parameters that the user explicitly specified. For downstream equipment with no user-specified values, leave parameters empty ({}).
-6. For MULTI-INLET equipment (Mixer, HeatExchanger, Absorber, Stripper): each inlet needs its own upstream feed source. Use a Heater with outletTemperature equal to feedTemperature as a pass-through feed source. Each feed source carries its own feedTemperature, feedPressure, feedFlowRate, feedComposition. Connect each feed source to the correct inlet port.
+6. For MULTI-INLET equipment (Mixer, HeatExchanger, Absorber, Stripper): create a separate FeedStream for each inlet. Connect each FeedStream to the correct inlet port (in-1, in-2, in-hot, in-cold). Do NOT use Heaters as feed pass-throughs.
 7. ONLY use compound names from the supported compounds list above. Use exact lowercase names (e.g. "carbon dioxide" not "CO2", "hydrogen sulfide" not "H2S", "n-butane" not "butane").
 8. Set mode="replace" when the user says "create", "build", "design", "set up", or "make" a new flowsheet. Set mode="add" when the user says "add", "connect", "append", "insert", or "put" equipment to/into their existing flowsheet. Default to "replace" if unclear.
 9. Always set key operating parameters on downstream equipment: outletPressure for Compressor/Pump/Valve, outletTemperature for Cooler, numberOfStages and refluxRatio for DistillationColumn, conversion for ConversionReactor. Use reasonable engineering defaults if user doesn't specify.
 10. Keep equipment names SHORT (1-2 words). Keep JSON compact — omit optional fields. This ensures the tool call fits within the token budget.
 11. feedComposition uses MOLE fractions, NOT mass fractions. When the user specifies weight percentages (common for amine solutions, glycol systems), convert to mole fractions. Example: 30 wt% MEA in water = 11.2 mol% MEA → {"monoethanolamine":0.112,"water":0.888}.
+12. When a feed needs preheating before entering equipment, use FeedStream → Heater → Equipment. The FeedStream defines the feed conditions; the Heater only sets outletTemperature. When no preheating is needed, connect FeedStream directly to the equipment.
 
-### Example 1 — Linear chain: "Heat methane to 200C then separate":
+### Example 1 — Linear chain with preheating: "Heat methane to 200C then separate":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":1.0,"feedComposition":"{\"methane\":1.0}","outletTemperature":200}},
-  {"id":"equip-2","type":"Separator","name":"Separator","parameters":{}}
+  {"id":"equip-1","type":"FeedStream","name":"Methane","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":1.0,"feedComposition":"{\"methane\":1.0}"}},
+  {"id":"equip-2","type":"Heater","name":"Feed Heater","parameters":{"outletTemperature":200}},
+  {"id":"equip-3","type":"Separator","name":"Separator","parameters":{}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"}]
 
 ### Example 2 — Mixer with two feeds: "Mix methane 1kg/s with ethane 2kg/s at 500 kPa":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Methane Feed","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":1,"feedComposition":"{\"methane\":1.0}","outletTemperature":25}},
-  {"id":"equip-2","type":"Heater","name":"Ethane Feed","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":2,"feedComposition":"{\"ethane\":1.0}","outletTemperature":25}},
+  {"id":"equip-1","type":"FeedStream","name":"Methane","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":1,"feedComposition":"{\"methane\":1.0}"}},
+  {"id":"equip-2","type":"FeedStream","name":"Ethane","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":2,"feedComposition":"{\"ethane\":1.0}"}},
   {"id":"equip-3","type":"Mixer","name":"Feed Mixer","parameters":{}}
 ]
 connections: [
@@ -110,8 +112,8 @@ connections: [
 
 ### Example 3 — Heat exchanger: "HX with hot water 90C and cold water 20C, hot out 50C, cold out 60C":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Hot Feed","parameters":{"feedTemperature":90,"feedPressure":200,"feedFlowRate":5,"feedComposition":"{\"water\":1.0}","outletTemperature":90}},
-  {"id":"equip-2","type":"Heater","name":"Cold Feed","parameters":{"feedTemperature":20,"feedPressure":200,"feedFlowRate":5,"feedComposition":"{\"water\":1.0}","outletTemperature":20}},
+  {"id":"equip-1","type":"FeedStream","name":"Hot Water","parameters":{"feedTemperature":90,"feedPressure":200,"feedFlowRate":5,"feedComposition":"{\"water\":1.0}"}},
+  {"id":"equip-2","type":"FeedStream","name":"Cold Water","parameters":{"feedTemperature":20,"feedPressure":200,"feedFlowRate":5,"feedComposition":"{\"water\":1.0}"}},
   {"id":"equip-3","type":"HeatExchanger","name":"Heat Exchanger","parameters":{"hotOutletTemp":50,"coldOutletTemp":60}}
 ]
 connections: [
@@ -119,31 +121,34 @@ connections: [
   {"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-cold"}
 ]
 
-### Example 4 — Conversion reactor: "Ethanol esterification at 80C, 500 kPa, 85% conversion":
+### Example 4 — Conversion reactor with preheating: "Ethanol esterification at 80C, 500 kPa, 85% conversion":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":2,"feedComposition":"{\"ethanol\":0.4,\"acetic acid\":0.4,\"water\":0.2}","outletTemperature":80}},
-  {"id":"equip-2","type":"ConversionReactor","name":"Reactor","parameters":{"conversion":85,"temperature":80,"pressure":500,"keyReactant":"ethanol"}}
+  {"id":"equip-1","type":"FeedStream","name":"Reactor Feed","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":2,"feedComposition":"{\"ethanol\":0.4,\"acetic acid\":0.4,\"water\":0.2}"}},
+  {"id":"equip-2","type":"Heater","name":"Preheater","parameters":{"outletTemperature":80}},
+  {"id":"equip-3","type":"ConversionReactor","name":"Reactor","parameters":{"conversion":85,"temperature":80,"pressure":500,"keyReactant":"ethanol"}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"}]
 
-### Example 5 — Distillation column: "Distill benzene/toluene, 15 stages, feed stage 7, RR=2":
+### Example 5 — Distillation column with preheating: "Distill benzene/toluene, 15 stages, feed stage 7, RR=2":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":5,"feedComposition":"{\"benzene\":0.5,\"toluene\":0.5}","outletTemperature":85}},
-  {"id":"equip-2","type":"DistillationColumn","name":"Distillation Column","parameters":{"numberOfStages":15,"feedStage":7,"refluxRatio":2,"condenserPressure":101.325,"reboilerDuty":1000}}
+  {"id":"equip-1","type":"FeedStream","name":"Column Feed","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":5,"feedComposition":"{\"benzene\":0.5,\"toluene\":0.5}"}},
+  {"id":"equip-2","type":"Heater","name":"Preheater","parameters":{"outletTemperature":85}},
+  {"id":"equip-3","type":"DistillationColumn","name":"Column","parameters":{"numberOfStages":15,"feedStage":7,"refluxRatio":2,"condenserPressure":101.325,"reboilerDuty":1000}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"}]
 
-### Example 6 — CSTR reactor: "CSTR for syngas at 250C, 5000 kPa":
+### Example 6 — CSTR reactor with preheating: "CSTR for syngas at 250C, 5000 kPa":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":5000,"feedFlowRate":3,"feedComposition":"{\"carbon monoxide\":0.33,\"hydrogen\":0.67}","outletTemperature":250}},
-  {"id":"equip-2","type":"CSTRReactor","name":"CSTR","parameters":{"volume":10,"temperature":250,"pressure":5000}}
+  {"id":"equip-1","type":"FeedStream","name":"Syngas","parameters":{"feedTemperature":25,"feedPressure":5000,"feedFlowRate":3,"feedComposition":"{\"carbon monoxide\":0.33,\"hydrogen\":0.67}"}},
+  {"id":"equip-2","type":"Heater","name":"Preheater","parameters":{"outletTemperature":250}},
+  {"id":"equip-3","type":"CSTRReactor","name":"CSTR","parameters":{"volume":10,"temperature":250,"pressure":5000}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"}]
 
 ### Example 7 — Absorber (amine treating): "Absorber for sour gas with MEA solvent":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Gas Feed","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":10,"feedComposition":"{\"methane\":0.92,\"hydrogen sulfide\":0.05,\"carbon dioxide\":0.03}","outletTemperature":40}},
-  {"id":"equip-2","type":"Heater","name":"MEA Feed","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":15,"feedComposition":"{\"monoethanolamine\":0.112,\"water\":0.888}","outletTemperature":40}},
+  {"id":"equip-1","type":"FeedStream","name":"Sour Gas","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":10,"feedComposition":"{\"methane\":0.92,\"hydrogen sulfide\":0.05,\"carbon dioxide\":0.03}"}},
+  {"id":"equip-2","type":"FeedStream","name":"MEA Solvent","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":15,"feedComposition":"{\"monoethanolamine\":0.112,\"water\":0.888}"}},
   {"id":"equip-3","type":"Absorber","name":"Absorber","parameters":{"numberOfStages":10,"pressure":4000}}
 ]
 connections: [
@@ -236,7 +241,7 @@ GENERATE_FLOWSHEET_TOOL = {
                             },
                             "parameters": {
                                 "type": "object",
-                                "description": "Equipment parameters using frontend keys and units (°C, kPa, kg/s, kW, %). ALWAYS populate relevant parameters from the user's request. For the first equipment: include feedTemperature, feedPressure, feedFlowRate, and feedComposition (as JSON string). For downstream equipment: include operation-specific params like outletTemperature, outletPressure, efficiency, etc.",
+                                "description": "Equipment parameters using frontend keys and units (°C, kPa, kg/s, kW, %). ALWAYS populate relevant parameters from the user's request. For FeedStream nodes: include feedTemperature, feedPressure, feedFlowRate, and feedComposition (as JSON string). For all other equipment: include only operation-specific params like outletTemperature, outletPressure, efficiency, etc.",
                                 "additionalProperties": True,
                             },
                         },
