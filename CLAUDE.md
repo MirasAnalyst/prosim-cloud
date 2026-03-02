@@ -183,6 +183,26 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 4. **Supabase pgbouncer double-pooling caused connection exhaustion under test concurrency**: SQLAlchemy's default connection pool (pool_size=5) layered on top of Supabase's pgbouncer pooler (port 6543) created pool-on-pool conflicts. Under Playwright's parallel test load, connections exhausted and `POST /api/projects` returned 500. Fix: detect Supabase pooler URL and use `NullPool` (let pgbouncer handle pooling). **When using an external connection pooler (pgbouncer, PgBouncer, RDS Proxy), always use `NullPool` in SQLAlchemy to avoid double-pooling.**
 
+### Phase 8: Mistakes and Resolutions
+
+1. **psycopg3 `prepare_threshold=0` means "prepare immediately", not "disable"**: Set `prepare_threshold=0` in `connect_args` thinking it would disable prepared statements for pgbouncer compatibility, but in psycopg3 `0` means "always prepare" (worse than default). All DB queries hit `DuplicatePreparedStatement` errors. Fix: use `prepare_threshold=None` to disable prepared statements entirely. **Always check library-specific semantics for sentinel values — `0` and `None` often mean very different things.**
+
+2. **AI `max_completion_tokens=2048` silently truncated multi-equipment flowsheets**: 7/20 AI flowsheet prompts returned `flowsheet_action: null` with no error — the GPT tool call JSON was truncated mid-generation at exactly 2048 tokens. Multi-feed equipment (Absorber, HX) and multi-stage trains (3-stage compressor) were most affected. Fix: increased to `4096` in `openai_agent.py`. **When AI tool calls return null/empty, check `completion_tokens` against the ceiling before debugging prompt logic.**
+
+3. **AI set compressor efficiency as fraction (0.75) but engine expects percent (75)**: The engine divides efficiency by 100 (`efficiency / 100.0`), so `0.75` became `0.0075` — compressor discharge temperatures showed 3300°C instead of ~137°C, work was 100× too high. Fix: added "(0-100 scale, e.g. 75 means 75%)" to all efficiency/conversion parameter docs in the AI system prompt. **When AI generates numeric parameters, always document the expected scale/units in the tool definition — LLMs default to mathematical conventions (fractions) not engineering conventions (percentages).**
+
+4. **Pydantic `response_model` validation silently returned 500 for mixed-type dicts**: `EmissionsResult.breakdown: list[dict[str, float]]` failed validation because the engine returns `{"source": "Combustion CO2", "tonnes_per_year": 44880.0}` — the `"source"` value is a string, not a float. FastAPI returned a bare `Internal Server Error` with no detail, making it hard to diagnose. Fix: changed to `list[dict[str, Any]]`. **When a Pydantic `response_model` causes 500, check that all dict value types match the actual engine output — mixed-type dicts need `Any` not a specific type.**
+
+### Chem-Sim Domain Review: Mistakes and Resolutions
+
+1. **AI Example 7 used mass fractions (30/70) for MEA instead of mole fractions**: 30 wt% MEA = 0.3/61.08 ÷ (0.3/61.08 + 0.7/18.015) = 0.112 mol fraction, not 0.3. AI would generate thermodynamically incorrect amine compositions. Fix: corrected to `"monoethanolamine":0.112,"water":0.888` and added Rule 11 (mole vs mass fraction guidance). **Always convert wt% to mol% for feedComposition — LLMs default to mass fractions for familiar solutions like "30% MEA".**
+
+2. **ConversionReactor always consumed the first component regardless of chemistry**: `key_reactant = list(out_comp.keys())[0]` picked whichever compound appeared first in the dict, which depends on insertion order not chemistry. Fix: added `keyReactant` parameter (engine, frontend, AI prompt) so users specify which compound reacts. **Reactant selection should be explicit, not positional — dict key order is arbitrary.**
+
+3. **Binary Underwood R_min formula used for multicomponent distillation**: `R_min = 1.0 / (alpha_lk_hk - 1.0)` is only valid for binary mixtures — for 3+ components it underestimates R_min, leading to insufficient reflux and poor separation. Fix: implemented full Underwood theta bisection with preliminary Fenske splits for `R_min+1 = Σ(α_i·d_i/(α_i-θ))`. **Always use the multicomponent form of Underwood for ≥3 components.**
+
+4. **Absorber outlet used simple average temperature, ignoring exothermic absorption**: `T_out2 = T_avg` missed the heat released by CO₂/H₂S absorption into amine (84/60 kJ/mol). Rich solvent exits 20-40°C hotter than the average in real plants. Fix: added `_HEAT_OF_ABSORPTION` table, computed `ΔT = Q_abs/(mf·Cp)` capped at 60K, and flashed outlets for real enthalpies. **Absorber/stripper models must account for heat of reaction — it dominates the column temperature profile.**
+
 ## Dev Commands
 ```bash
 # Backend

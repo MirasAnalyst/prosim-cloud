@@ -5,11 +5,14 @@ import { EquipmentCategory, type EquipmentType } from '../../types';
 import { EquipmentIcon, getPaletteIconDimensions } from '../canvas/EquipmentIcons';
 
 const categoryOrder: EquipmentCategory[] = [
+  EquipmentCategory.Streams,
   EquipmentCategory.Mixing,
   EquipmentCategory.HeatTransfer,
   EquipmentCategory.Separation,
   EquipmentCategory.PressureChange,
   EquipmentCategory.Reaction,
+  EquipmentCategory.Logical,
+  EquipmentCategory.Piping,
 ];
 
 export default function EquipmentPalette() {

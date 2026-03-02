@@ -6,9 +6,10 @@
 > - Phase 3: Complete (20 equipment types, HX NTU, reactor kinetics, pump curves, multi-stage compressor, valve Cv, equipment costing)
 > - Phase 4: Complete (AI flowsheet generation, optimization suggestions, PDF reports, multi-model AI, RAG, troubleshooting assistant)
 > - Phase 5: Complete (undo/redo, copy/paste, dark/light theme, equipment grouping, PFD annotations, responsive design, loading skeletons)
-> - Phase 6: ~30% (auto-save/load done, export/import/versioning pending)
-> - Phase 7–11: Not started
-> - **47 E2E tests passing** (7 Phase 3 + 3 AI + 5 Tier 2 + 4 Tier 3 + 6 Tier 4 + 4 Tier 5 + 18 new wave tests)
+> - Phase 6: Complete (versioning, export JSON/XML/DWSIM, import, results CSV/Excel, PFD SVG/PNG/PDF, validation, backup/restore)
+> - Phase 8: ~36% (5 of 14 items: global component list, material streams, energy streams, sensitivity analysis, case studies)
+> - Phase 7, 9–11: Not started
+> - **62 E2E tests passing** (7 Phase 3 + 3 AI + 5 Tier 2 + 4 Tier 3 + 6 Tier 4 + 4 Tier 5 + 18 wave + 7 Phase 6 + 8 Phase 8)
 
 ## Phase 1: Foundation (Complete)
 
@@ -113,17 +114,17 @@
 - [x] Loading skeletons *(animated pulse bars during simulation in BottomPanel + EquipmentNode)*
 - [x] Toast notifications *(sonner library, toasts on sim complete/error and AI flowsheet apply)*
 
-## Phase 6: Data & Persistence
+## Phase 6: Data & Persistence (Complete)
 
 - [x] Project save/load (auto-save with debounce) *(1s debounce, save status indicator in TopNav)*
-- [ ] Project versioning (save snapshots, diff between versions)
-- [ ] Export flowsheet as JSON, XML, or DWSIM native format
-- [ ] Import DWSIM .dwxmz files
-- [ ] Export simulation results to CSV/Excel
-- [ ] Export PFD as SVG/PNG/PDF
+- [x] Project versioning (save snapshots, diff between versions) *(FlowsheetVersion model, 6 API endpoints, VersionPanel slide-out, versionStore)*
+- [x] Export flowsheet as JSON, XML, or DWSIM native format *(GET /export?format=, flowsheet_exporter.py)*
+- [x] Import DWSIM .dwxmz files *(POST /import multipart, dwsim_importer.py: ZIP/XML/JSON parsers)*
+- [x] Export simulation results to CSV/Excel *(CSV client-side, Excel via openpyxl POST /simulation/export)*
+- [x] Export PFD as SVG/PNG/PDF *(html-to-image + jsPDF, canvas-export.ts)*
 - [x] Database migrations for schema evolution *(Alembic)*
-- [ ] Data validation and integrity checks
-- [ ] Backup and restore functionality
+- [x] Data validation and integrity checks *(flowsheet_validator.py + flowsheet-validator.ts, POST /flowsheet/validate)*
+- [x] Backup and restore functionality *(GET /backup, POST /restore, backup_service.py)*
 
 ## Phase 7: Authentication & Multi-Tenancy
 
@@ -137,16 +138,16 @@
 - [ ] Audit logging (who changed what, when)
 - [ ] API rate limiting per user/tier
 
-## Phase 8: Advanced Simulation Features
+## Phase 8: Advanced Simulation Features (~36%)
 
-- [ ] Material Stream nodes (first-class draggable Feed/Product stream objects on canvas with own property panel for T, P, flow, composition — like HYSYS Material Stream)
-- [ ] Global Component List / Simulation Basis Manager (define compounds once per project instead of per-feed-node, linked to selected property package)
-- [ ] Energy Stream connections (separate stream type for duty/power connections between equipment, e.g., heater duty → column reboiler)
+- [x] Material Stream nodes (first-class draggable Feed/Product stream objects on canvas with own property panel for T, P, flow, composition — like HYSYS Material Stream) *(FeedStream/ProductStream types, SVG icons, processed before/after equipment loop)*
+- [x] Global Component List / Simulation Basis Manager (define compounds once per project instead of per-feed-node, linked to selected property package) *(simulation_basis JSONB column, SimulationBasisPanel, compound search, property package selector)*
+- [x] Energy Stream connections (separate stream type for duty/power connections between equipment, e.g., heater duty → column reboiler) *(EnergyStreamEdge dashed orange, energy ports on Heater/Cooler/Pump/Compressor/HX/Column)*
 - [ ] Product stream specifications (output stream nodes with target specs like purity or flow rate that the solver can back-calculate)
 - [ ] Dynamic simulation (time-dependent transient modeling)
-- [ ] Sensitivity analysis (automatic parameter variation + plotting)
+- [x] Sensitivity analysis (automatic parameter variation + plotting) *(POST /simulation/sensitivity, sensitivity_engine.py numpy linspace, SensitivityPanel with recharts LineChart)*
 - [ ] Optimization (objective function + constraints, SQP/genetic algorithms)
-- [ ] Case studies (compare multiple scenarios side by side)
+- [x] Case studies (compare multiple scenarios side by side) *(SimulationCase model, CRUD + compare API, CaseManagerPanel save/load/compare)*
 - [ ] Pinch analysis / heat integration tools
 - [ ] Utility system modeling (steam, cooling water, electricity)
 - [ ] Environmental calculations (emissions, flaring)
@@ -170,10 +171,10 @@
 ## Phase 10: Deployment & DevOps
 
 - [ ] CI/CD pipeline (GitHub Actions)
-- [~] Automated testing (unit, integration, e2e with Playwright) *(47 E2E tests, unit tests not yet)*
+- [~] Automated testing (unit, integration, e2e with Playwright) *(62 E2E tests, unit tests not yet)*
 - [ ] Backend unit tests (pytest + httpx)
 - [ ] Frontend unit tests (Vitest + React Testing Library)
-- [x] End-to-end tests for simulation workflows *(47 Playwright tests)*
+- [x] End-to-end tests for simulation workflows *(62 Playwright tests)*
 - [ ] Production Docker images (multi-stage builds, optimized)
 - [ ] Kubernetes deployment manifests
 - [ ] SSL/TLS configuration

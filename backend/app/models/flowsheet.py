@@ -22,6 +22,7 @@ class Flowsheet(Base):
     )
     nodes: Mapped[dict] = mapped_column(JSONB, default=list)
     edges: Mapped[dict] = mapped_column(JSONB, default=list)
+    simulation_basis: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

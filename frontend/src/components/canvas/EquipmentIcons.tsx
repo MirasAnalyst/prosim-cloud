@@ -2,6 +2,8 @@ import { EquipmentType } from '../../types';
 
 // ViewBox and base sizing data for each equipment shape
 const shapeData: Record<string, { vw: number; vh: number; baseSize: number }> = {
+  [EquipmentType.FeedStream]: { vw: 44, vh: 32, baseSize: 66 },
+  [EquipmentType.ProductStream]: { vw: 44, vh: 32, baseSize: 66 },
   [EquipmentType.Mixer]: { vw: 52, vh: 40, baseSize: 78 },
   [EquipmentType.Splitter]: { vw: 52, vh: 40, baseSize: 78 },
   [EquipmentType.Heater]: { vw: 44, vh: 44, baseSize: 66 },
@@ -22,6 +24,8 @@ const shapeData: Record<string, { vw: number; vh: number; baseSize: number }> = 
   [EquipmentType.Crystallizer]: { vw: 44, vh: 56, baseSize: 80 },
   [EquipmentType.Dryer]: { vw: 52, vh: 40, baseSize: 78 },
   [EquipmentType.Filter]: { vw: 40, vh: 50, baseSize: 75 },
+  [EquipmentType.DesignSpec]: { vw: 40, vh: 40, baseSize: 60 },
+  [EquipmentType.PipeSegment]: { vw: 60, vh: 24, baseSize: 90 },
 };
 
 /** Compute pixel dimensions for the canvas node, preserving aspect ratio. */
@@ -70,6 +74,32 @@ export function EquipmentIcon({ type, width, height, selected = false }: Equipme
   const svgProps = { width: w, height: h, viewBox: `0 0 ${vw} ${vh}` };
 
   switch (type) {
+    // ── Feed Stream: blue arrow-right with "F" ──
+    case EquipmentType.FeedStream:
+      return (
+        <svg {...svgProps}>
+          <polygon
+            points="2,4 30,4 42,16 30,28 2,28"
+            fill="#BFDBFE" stroke="#3B82F6" strokeWidth={SW} strokeLinejoin="round"
+          />
+          <text x="18" y="20" textAnchor="middle" fill="#1D4ED8"
+            fontSize="12" fontWeight="bold" fontFamily="Arial, sans-serif">F</text>
+        </svg>
+      );
+
+    // ── Product Stream: green arrow-right with "P" ──
+    case EquipmentType.ProductStream:
+      return (
+        <svg {...svgProps}>
+          <polygon
+            points="2,4 30,4 42,16 30,28 2,28"
+            fill="#BBF7D0" stroke="#22C55E" strokeWidth={SW} strokeLinejoin="round"
+          />
+          <text x="18" y="20" textAnchor="middle" fill="#166534"
+            fontSize="12" fontWeight="bold" fontFamily="Arial, sans-serif">P</text>
+        </svg>
+      );
+
     // ── Mixer: pentagon arrow pointing right ──
     case EquipmentType.Mixer:
       return (
@@ -325,6 +355,30 @@ export function EquipmentIcon({ type, width, height, selected = false }: Equipme
             fill={fill} stroke={stroke} strokeWidth={SW} />
           <line x1="10" y1="14" x2="30" y2="14" stroke={DETAIL} strokeWidth={0.8} />
           <line x1="12" y1="20" x2="28" y2="20" stroke={DETAIL} strokeWidth={0.8} />
+        </svg>
+      );
+
+    // ── Design Spec: crosshair/target ──
+    case EquipmentType.DesignSpec:
+      return (
+        <svg {...svgProps}>
+          <circle cx="20" cy="20" r="16" fill="none" stroke="#8B5CF6" strokeWidth={SW} />
+          <circle cx="20" cy="20" r="10" fill="none" stroke="#8B5CF6" strokeWidth={1} />
+          <circle cx="20" cy="20" r="4" fill="#8B5CF6" />
+          <line x1="20" y1="2" x2="20" y2="10" stroke="#8B5CF6" strokeWidth={1} />
+          <line x1="20" y1="30" x2="20" y2="38" stroke="#8B5CF6" strokeWidth={1} />
+          <line x1="2" y1="20" x2="10" y2="20" stroke="#8B5CF6" strokeWidth={1} />
+          <line x1="30" y1="20" x2="38" y2="20" stroke="#8B5CF6" strokeWidth={1} />
+        </svg>
+      );
+
+    // ── Pipe Segment: horizontal pipe with flanges ──
+    case EquipmentType.PipeSegment:
+      return (
+        <svg {...svgProps}>
+          <rect x="2" y="6" width="6" height="12" rx="1" fill={fill} stroke={stroke} strokeWidth={SW} />
+          <rect x="8" y="8" width="44" height="8" fill={fill} stroke={stroke} strokeWidth={SW} />
+          <rect x="52" y="6" width="6" height="12" rx="1" fill={fill} stroke={stroke} strokeWidth={SW} />
         </svg>
       );
 

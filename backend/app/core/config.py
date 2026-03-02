@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     DWSIM_PATH: str = "/opt/dwsim"
 
+    SUPABASE_URL: str = ""
+    SUPABASE_ANON_KEY: str = ""
+    SUPABASE_JWT_SECRET: str = ""
+
     model_config = {"env_file": str(_env_file), "env_file_encoding": "utf-8", "extra": "ignore"}
 
 

@@ -1,9 +1,23 @@
+import { supabase } from './supabase';
+
 const API_BASE = import.meta.env.VITE_API_URL ?? '';
 
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.access_token) {
+    return {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${session.access_token}`,
+    };
+  }
+  return { 'Content-Type': 'application/json' };
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const authHeaders = await getAuthHeaders();
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: { ...authHeaders, ...options?.headers },
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -56,6 +70,7 @@ export interface FlowsheetResponse {
   project_id: string;
   nodes: Record<string, unknown>[];
   edges: Record<string, unknown>[];
+  simulation_basis?: Record<string, unknown>;
   updated_at: string;
 }
 
@@ -66,11 +81,16 @@ export function getFlowsheet(projectId: string) {
 export function saveFlowsheet(
   projectId: string,
   nodes: Record<string, unknown>[],
-  edges: Record<string, unknown>[]
+  edges: Record<string, unknown>[],
+  simulationBasis?: { compounds: string[]; property_package?: string },
 ) {
+  const payload: Record<string, unknown> = { nodes, edges };
+  if (simulationBasis) {
+    payload.simulation_basis = simulationBasis;
+  }
   return request<FlowsheetResponse>(`/api/projects/${projectId}/flowsheet`, {
     method: 'PUT',
-    body: JSON.stringify({ nodes, edges }),
+    body: JSON.stringify(payload),
   });
 }
 
@@ -187,7 +207,10 @@ export function diffVersions(projectId: string, v1: string, v2: string) {
 // ── Export / Import ──
 
 export async function exportFlowsheet(projectId: string, format: string): Promise<Response> {
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/export?format=${format}`);
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/export?format=${format}`, {
+    headers: authHeaders,
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res;
 }
@@ -195,8 +218,14 @@ export async function exportFlowsheet(projectId: string, format: string): Promis
 export async function importFlowsheet(projectId: string, file: File) {
   const formData = new FormData();
   formData.append('file', file);
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = {};
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
   const res = await fetch(`${API_BASE}/api/projects/${projectId}/import`, {
     method: 'POST',
+    headers,
     body: formData,
   });
   if (!res.ok) {
@@ -224,9 +253,10 @@ export function validateFlowsheet(nodes: Record<string, unknown>[], edges: Recor
 // ── Results Export ──
 
 export async function exportSimulationResults(results: Record<string, unknown>, format: string): Promise<Response> {
+  const authHeaders = await getAuthHeaders();
   const res = await fetch(`${API_BASE}/api/simulation/export?format=${format}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders,
     body: JSON.stringify(results),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -236,7 +266,10 @@ export async function exportSimulationResults(results: Record<string, unknown>, 
 // ── Backup / Restore ──
 
 export async function downloadBackup(projectId: string): Promise<Response> {
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/backup`);
+  const authHeaders = await getAuthHeaders();
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/backup`, {
+    headers: authHeaders,
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res;
 }
@@ -245,6 +278,92 @@ export function restoreBackup(backupData: Record<string, unknown>) {
   return request<ProjectResponse>('/api/projects/restore', {
     method: 'POST',
     body: JSON.stringify(backupData),
+  });
+}
+
+// ── Sensitivity Analysis ──
+
+export interface SensitivityResultResponse {
+  variable_values: number[];
+  output_values: Record<string, (number | null)[]>;
+  variable_label: string;
+  status: string;
+  error: string | null;
+}
+
+export function runSensitivity(data: {
+  base_nodes: Record<string, unknown>[];
+  base_edges: Record<string, unknown>[];
+  property_package: string;
+  simulation_basis?: Record<string, unknown>;
+  variable: {
+    node_id: string;
+    parameter_key: string;
+    min_value: number;
+    max_value: number;
+    steps: number;
+  };
+  outputs: { node_id: string; result_key: string }[];
+}) {
+  return request<SensitivityResultResponse>('/api/simulation/sensitivity', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+// ── Case Studies ──
+
+export interface CaseResponse {
+  id: string;
+  project_id: string;
+  name: string;
+  description: string | null;
+  property_package: string;
+  simulation_basis: Record<string, unknown>;
+  nodes: Record<string, unknown>[];
+  edges: Record<string, unknown>[];
+  results: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface CaseCompareResponse {
+  cases: CaseResponse[];
+  diffs: Record<string, unknown>;
+}
+
+export function listCases(projectId: string) {
+  return request<CaseResponse[]>(`/api/projects/${projectId}/cases`);
+}
+
+export function createCase(projectId: string, data: {
+  name: string;
+  description?: string | null;
+  nodes: Record<string, unknown>[];
+  edges: Record<string, unknown>[];
+  simulation_basis: Record<string, unknown>;
+  property_package: string;
+  results?: Record<string, unknown> | null;
+}) {
+  return request<CaseResponse>(`/api/projects/${projectId}/cases`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteCase(projectId: string, caseId: string) {
+  return request<void>(`/api/projects/${projectId}/cases/${caseId}`, { method: 'DELETE' });
+}
+
+export function loadCase(projectId: string, caseId: string) {
+  return request<CaseResponse>(`/api/projects/${projectId}/cases/${caseId}/load`, {
+    method: 'POST',
+  });
+}
+
+export function compareCases(projectId: string, caseIds: string[]) {
+  return request<CaseCompareResponse>(`/api/projects/${projectId}/cases/compare`, {
+    method: 'POST',
+    body: JSON.stringify({ case_ids: caseIds }),
   });
 }
 
@@ -292,9 +411,10 @@ export async function* agentChatStream(
   messages: ChatMessage[],
   flowsheetContext?: Record<string, unknown>
 ): AsyncGenerator<string> {
+  const authHeaders = await getAuthHeaders();
   const res = await fetch(`${API_BASE}/api/agent/chat/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders,
     body: JSON.stringify({ messages, flowsheet_context: flowsheetContext }),
   });
 

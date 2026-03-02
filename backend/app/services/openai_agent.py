@@ -32,9 +32,11 @@ When the user asks you to BUILD, CREATE, SET UP, or DESIGN a flowsheet/plant/pro
 When the user asks QUESTIONS, wants ADVICE, or asks for EXPLANATIONS, respond with text only — do NOT use the tool.
 
 ### Equipment types (use exactly these strings):
-Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor, Absorber, Stripper, Cyclone, ThreePhaseSeparator, Crystallizer, Dryer, Filter
+FeedStream, ProductStream, Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchanger, DistillationColumn, CSTRReactor, PFRReactor, ConversionReactor, Absorber, Stripper, Cyclone, ThreePhaseSeparator, Crystallizer, Dryer, Filter
 
 ### Port ID reference:
+- FeedStream: out-1
+- ProductStream: in-1
 - Most equipment: in-1 (inlet), out-1 (outlet)
 - Separator: in-1 (feed), out-1 (vapour), out-2 (liquid)
 - Splitter: in-1 (feed), out-1 (product 1), out-2 (product 2)
@@ -50,38 +52,43 @@ Heater, Cooler, Mixer, Splitter, Separator, Pump, Compressor, Valve, HeatExchang
 - Filter: in-1 (feed), out-1 (filtrate), out-2 (cake)
 
 ### Parameter keys (use frontend units — °C, kPa, kg/s, kW, %):
+- FeedStream: feedTemperature, feedPressure, feedFlowRate, feedComposition (JSON string)
+- ProductStream: (no parameters needed — receives upstream conditions)
 - Feed conditions (first equipment only): feedTemperature, feedPressure, feedFlowRate, feedComposition (JSON string e.g. '{"methane":0.9,"ethane":0.1}')
 - Heater/Cooler: outletTemperature, duty, pressureDrop
 - Separator: temperature, pressure
-- Compressor/Pump: outletPressure, efficiency
+- Compressor/Pump: outletPressure, efficiency (0-100 scale, e.g. 75 means 75%)
 - Valve: outletPressure
-- Splitter: splitRatio
+- Splitter: splitRatio (0-1 fraction, e.g. 0.5 means 50% to outlet 1)
 - Mixer: pressure, pressureDrop
 - HeatExchanger: hotOutletTemp, coldOutletTemp, pressureDropHot, pressureDropCold
 - DistillationColumn: numberOfStages, feedStage, refluxRatio, condenserPressure, reboilerDuty
 - CSTRReactor: volume, temperature, pressure, duty
 - PFRReactor: length, diameter, temperature, pressure
-- ConversionReactor: conversion, temperature, pressure, duty
+- ConversionReactor: conversion (0-100 scale, e.g. 80 means 80%), temperature, pressure, duty, keyReactant (compound name from feed)
 - Absorber: numberOfStages, pressure, temperature
 - Stripper: numberOfStages, pressure, reboilerDuty
-- Cyclone: inletDiameter, pressureDropCoeff, efficiency
+- Cyclone: inletDiameter, pressureDropCoeff, efficiency (0-100 scale)
 - ThreePhaseSeparator: temperature, pressure
 - Crystallizer: crystallizationTemp
 - Dryer: outletMoisture, duty
-- Filter: efficiency, pressureDrop
+- Filter: efficiency (0-100 scale), pressureDrop
 
 ### Supported compounds (use these exact names in feedComposition):
 water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-hexane, n-heptane, n-octane, n-decane, ethylene, propylene, benzene, toluene, o-xylene, methanol, ethanol, acetone, acetic acid, hydrogen, nitrogen, oxygen, carbon dioxide, carbon monoxide, hydrogen sulfide, sulfur dioxide, ammonia, chlorine, argon, helium, cyclohexane, styrene, 1-propanol, 2-propanol, diethyl ether, dimethyl ether, formic acid, formaldehyde, diethanolamine, monoethanolamine
 
 ### Rules:
-1. Only set feedTemperature, feedPressure, feedFlowRate, feedComposition on the FIRST equipment in each independent chain.
+1. Use FeedStream for defining feed conditions. When FeedStream is not practical (e.g., multi-inlet equipment needing Heater pass-through), set feed params on the first Heater.
 2. feedComposition must be a JSON string, not an object.
 3. Use sequential IDs: equip-1, equip-2, etc.
 4. Connect equipment in process order using correct port IDs.
 5. Populate parameters that the user explicitly specified. For downstream equipment with no user-specified values, leave parameters empty ({}).
-6. For MULTI-INLET equipment (Mixer, HeatExchanger): each inlet needs its own upstream feed source. Use a Heater with outletTemperature equal to feedTemperature as a pass-through feed source. Each feed source carries its own feedTemperature, feedPressure, feedFlowRate, feedComposition. Connect each feed source to the correct inlet port.
+6. For MULTI-INLET equipment (Mixer, HeatExchanger, Absorber, Stripper): each inlet needs its own upstream feed source. Use a Heater with outletTemperature equal to feedTemperature as a pass-through feed source. Each feed source carries its own feedTemperature, feedPressure, feedFlowRate, feedComposition. Connect each feed source to the correct inlet port.
 7. ONLY use compound names from the supported compounds list above. Use exact lowercase names (e.g. "carbon dioxide" not "CO2", "hydrogen sulfide" not "H2S", "n-butane" not "butane").
 8. Set mode="replace" when the user says "create", "build", "design", "set up", or "make" a new flowsheet. Set mode="add" when the user says "add", "connect", "append", "insert", or "put" equipment to/into their existing flowsheet. Default to "replace" if unclear.
+9. Always set key operating parameters on downstream equipment: outletPressure for Compressor/Pump/Valve, outletTemperature for Cooler, numberOfStages and refluxRatio for DistillationColumn, conversion for ConversionReactor. Use reasonable engineering defaults if user doesn't specify.
+10. Keep equipment names SHORT (1-2 words). Keep JSON compact — omit optional fields. This ensures the tool call fits within the token budget.
+11. feedComposition uses MOLE fractions, NOT mass fractions. When the user specifies weight percentages (common for amine solutions, glycol systems), convert to mole fractions. Example: 30 wt% MEA in water = 11.2 mol% MEA → {"monoethanolamine":0.112,"water":0.888}.
 
 ### Example 1 — Linear chain: "Heat methane to 200C then separate":
 equipment: [
@@ -112,10 +119,10 @@ connections: [
   {"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-cold"}
 ]
 
-### Example 4 — CSTR reactor: "Heat water to 80C then CSTR at 80C, 101.325 kPa, 10 m³":
+### Example 4 — Conversion reactor: "Ethanol esterification at 80C, 500 kPa, 85% conversion":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":2,"feedComposition":"{\"water\":1.0}","outletTemperature":80}},
-  {"id":"equip-2","type":"CSTRReactor","name":"CSTR Reactor","parameters":{"volume":10,"temperature":80,"pressure":101.325}}
+  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":500,"feedFlowRate":2,"feedComposition":"{\"ethanol\":0.4,\"acetic acid\":0.4,\"water\":0.2}","outletTemperature":80}},
+  {"id":"equip-2","type":"ConversionReactor","name":"Reactor","parameters":{"conversion":85,"temperature":80,"pressure":500,"keyReactant":"ethanol"}}
 ]
 connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
 
@@ -126,12 +133,36 @@ equipment: [
 ]
 connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
 
-### Example 6 — PFR reactor: "PFR at 300C, 2000 kPa, 5m long, 0.3m diameter":
+### Example 6 — CSTR reactor: "CSTR for syngas at 250C, 5000 kPa":
 equipment: [
-  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":2000,"feedFlowRate":1,"feedComposition":"{\"methane\":1.0}","outletTemperature":300}},
-  {"id":"equip-2","type":"PFRReactor","name":"PFR Reactor","parameters":{"length":5,"diameter":0.3,"temperature":300,"pressure":2000}}
+  {"id":"equip-1","type":"Heater","name":"Feed Heater","parameters":{"feedTemperature":25,"feedPressure":5000,"feedFlowRate":3,"feedComposition":"{\"carbon monoxide\":0.33,\"hydrogen\":0.67}","outletTemperature":250}},
+  {"id":"equip-2","type":"CSTRReactor","name":"CSTR","parameters":{"volume":10,"temperature":250,"pressure":5000}}
 ]
 connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"}]
+
+### Example 7 — Absorber (amine treating): "Absorber for sour gas with MEA solvent":
+equipment: [
+  {"id":"equip-1","type":"Heater","name":"Gas Feed","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":10,"feedComposition":"{\"methane\":0.92,\"hydrogen sulfide\":0.05,\"carbon dioxide\":0.03}","outletTemperature":40}},
+  {"id":"equip-2","type":"Heater","name":"MEA Feed","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":15,"feedComposition":"{\"monoethanolamine\":0.112,\"water\":0.888}","outletTemperature":40}},
+  {"id":"equip-3","type":"Absorber","name":"Absorber","parameters":{"numberOfStages":10,"pressure":4000}}
+]
+connections: [
+  {"source_id":"equip-1","source_port":"out-1","target_id":"equip-3","target_port":"in-1"},
+  {"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-2"}
+]
+
+### Example 8 — Feed/Product streams: "Flash natural gas at 50C and 3000 kPa":
+equipment: [
+  {"id":"equip-1","type":"FeedStream","name":"Well Gas","parameters":{"feedTemperature":50,"feedPressure":3000,"feedFlowRate":5,"feedComposition":"{\"methane\":0.85,\"ethane\":0.07,\"propane\":0.04,\"n-butane\":0.02,\"n-pentane\":0.01,\"carbon dioxide\":0.01}"}},
+  {"id":"equip-2","type":"Separator","name":"HP Separator","parameters":{}},
+  {"id":"equip-3","type":"ProductStream","name":"Gas Product","parameters":{}},
+  {"id":"equip-4","type":"ProductStream","name":"Liquids","parameters":{}}
+]
+connections: [
+  {"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},
+  {"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"},
+  {"source_id":"equip-2","source_port":"out-2","target_id":"equip-4","target_port":"in-1"}
+]
 
 ## Troubleshooting & Diagnostics
 
@@ -188,6 +219,7 @@ GENERATE_FLOWSHEET_TOOL = {
                             "type": {
                                 "type": "string",
                                 "enum": [
+                                    "FeedStream", "ProductStream",
                                     "Heater", "Cooler", "Mixer", "Splitter",
                                     "Separator", "Pump", "Compressor", "Valve",
                                     "HeatExchanger", "DistillationColumn",
@@ -296,7 +328,7 @@ class AgentService:
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=formatted,
-            max_completion_tokens=2048,
+            max_completion_tokens=4096,
             tools=[GENERATE_FLOWSHEET_TOOL, SUGGEST_OPTIMIZATIONS_TOOL],
             tool_choice="auto",
         )

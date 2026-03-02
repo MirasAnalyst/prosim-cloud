@@ -16,6 +16,15 @@ from app.models.flowsheet import Flowsheet
 from app.models.simulation import SimulationResult
 from app.schemas.simulation import SimulationRequest, SimulationResponse, BatchSimulationRequest
 from app.services.dwsim_engine import DWSIMEngine
+from app.schemas.sensitivity import SensitivityRequest, SensitivityResult
+from app.schemas.dynamic import DynamicRequest, DynamicResult
+from app.schemas.optimization import OptimizationRequest, OptimizationResult
+from app.schemas.pinch import PinchRequest, PinchResult
+from app.schemas.utility import UtilityRequest, UtilityResult
+from app.schemas.emissions import EmissionsRequest, EmissionsResult
+from app.schemas.relief_valve import ReliefValveRequest, ReliefValveResult
+from app.schemas.hydraulics import HydraulicsRequest, HydraulicsResult
+from app.schemas.control_valve import ControlValveRequest, ControlValveResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,6 +62,7 @@ async def run_simulation(body: SimulationRequest, db: AsyncSession = Depends(get
             "edges": edges,
             "property_package": body.property_package,
             "convergence_settings": body.convergence_settings.model_dump() if body.convergence_settings else None,
+            "simulation_basis": body.simulation_basis,
         })
     except Exception as exc:
         logger.exception("Simulation execution failed")
@@ -119,6 +129,7 @@ async def run_simulation_stream(body: SimulationRequest):
                 "property_package": body.property_package,
                 "convergence_settings": body.convergence_settings.model_dump() if body.convergence_settings else None,
                 "progress_callback": progress_callback,
+                "simulation_basis": body.simulation_basis,
             })
         )
         while not sim_task.done():
@@ -176,6 +187,26 @@ async def run_batch_simulation(body: BatchSimulationRequest):
     return {"results": results, "parameter_matrix": parameter_matrix}
 
 
+@router.post("/sensitivity", response_model=SensitivityResult)
+async def run_sensitivity_analysis(body: SensitivityRequest):
+    """Run sensitivity analysis by varying one parameter."""
+    from app.services.sensitivity_engine import run_sensitivity
+
+    result = await run_sensitivity(
+        base_nodes=[n if isinstance(n, dict) else n.model_dump(by_alias=True) for n in body.base_nodes],
+        base_edges=[e if isinstance(e, dict) else e.model_dump(by_alias=True) for e in body.base_edges],
+        property_package=body.property_package,
+        variable_node_id=body.variable.node_id,
+        variable_param_key=body.variable.parameter_key,
+        min_value=body.variable.min_value,
+        max_value=body.variable.max_value,
+        steps=body.variable.steps,
+        outputs=[{"node_id": o.node_id, "result_key": o.result_key} for o in body.outputs],
+        simulation_basis=body.simulation_basis,
+    )
+    return result
+
+
 @router.post("/export")
 async def export_simulation_results(
     body: dict,
@@ -219,3 +250,109 @@ async def generate_report(body: SimulationRequest):
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=simulation_report.pdf"},
     )
+
+
+@router.post("/dynamic", response_model=DynamicResult)
+async def run_dynamic_simulation(body: DynamicRequest):
+    """Run pseudo-dynamic step-response simulation."""
+    from app.services.dynamic_engine import run_dynamic
+
+    result = await run_dynamic(
+        base_nodes=[n if isinstance(n, dict) else n.model_dump(by_alias=True) for n in body.base_nodes],
+        base_edges=[e if isinstance(e, dict) else e.model_dump(by_alias=True) for e in body.base_edges],
+        property_package=body.property_package,
+        disturbances=[d.model_dump() for d in body.disturbances],
+        tracked_outputs=[o.model_dump() for o in body.tracked_outputs],
+        time_horizon=body.time_horizon,
+        time_steps=body.time_steps,
+        equipment_volumes=body.equipment_volumes,
+        simulation_basis=body.simulation_basis,
+    )
+    return result
+
+
+@router.post("/optimize", response_model=OptimizationResult)
+async def run_optimization(body: OptimizationRequest):
+    """Run process optimization."""
+    from app.services.optimization_engine import run_optimization as _run_opt
+
+    result = await _run_opt(
+        base_nodes=[n if isinstance(n, dict) else n.model_dump(by_alias=True) for n in body.base_nodes],
+        base_edges=[e if isinstance(e, dict) else e.model_dump(by_alias=True) for e in body.base_edges],
+        property_package=body.property_package,
+        objective=body.objective.model_dump(),
+        decision_variables=[dv.model_dump() for dv in body.decision_variables],
+        constraints=[c.model_dump() for c in body.constraints],
+        solver=body.solver,
+        max_iterations=body.max_iterations,
+        simulation_basis=body.simulation_basis,
+    )
+    return result
+
+
+@router.post("/pinch", response_model=PinchResult)
+async def run_pinch_analysis(body: PinchRequest):
+    """Run pinch analysis."""
+    from app.services.pinch_engine import run_pinch_analysis as _pinch
+
+    result = _pinch(
+        streams=[s.model_dump() for s in body.streams],
+        dt_min=body.dt_min,
+    )
+    return result
+
+
+@router.post("/utility", response_model=UtilityResult)
+async def compute_utility_summary(body: UtilityRequest):
+    """Compute utility costs from simulation results."""
+    from app.services.utility_engine import compute_utilities
+
+    result = compute_utilities(
+        simulation_results=body.simulation_results,
+        costs=body.costs.model_dump() if body.costs else None,
+        hours_per_year=body.hours_per_year,
+    )
+    return result
+
+
+@router.post("/emissions", response_model=EmissionsResult)
+async def compute_emissions(body: EmissionsRequest):
+    """Compute environmental emissions."""
+    from app.services.emissions_engine import compute_emissions as _compute
+
+    result = _compute(
+        fuel_type=body.fuel.fuel_type,
+        fuel_consumption_gj_hr=body.fuel.consumption,
+        equipment_counts=body.equipment_counts.model_dump() if body.equipment_counts else None,
+        carbon_price=body.carbon_price,
+        hours_per_year=body.hours_per_year,
+        simulation_results=body.simulation_results,
+    )
+    return result
+
+
+@router.post("/relief-valve", response_model=ReliefValveResult)
+async def size_relief_valve(body: ReliefValveRequest):
+    """Size a relief valve per API 520/521/526."""
+    from app.services.relief_valve_engine import size_relief_valve as _size
+
+    result = _size(**body.model_dump())
+    return result
+
+
+@router.post("/hydraulics", response_model=HydraulicsResult)
+async def compute_hydraulics(body: HydraulicsRequest):
+    """Compute pipe hydraulics."""
+    from app.services.hydraulics_engine import compute_hydraulics as _compute
+
+    result = _compute(**body.model_dump())
+    return result
+
+
+@router.post("/control-valve", response_model=ControlValveResult)
+async def size_control_valve(body: ControlValveRequest):
+    """Size a control valve per ISA 60534."""
+    from app.services.control_valve_engine import size_control_valve as _size
+
+    result = _size(**body.model_dump())
+    return result

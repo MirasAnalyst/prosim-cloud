@@ -2,7 +2,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { equipmentLibrary } from '../../lib/equipment-library';
 import { searchCompounds, type CompoundResult } from '../../lib/api-client';
+import { EquipmentType } from '../../types';
 import { X, Search, Trash2, RefreshCw } from 'lucide-react';
+import DesignSpecInspector from './DesignSpecInspector';
 
 const FEED_PARAM_KEYS = ['feedTemperature', 'feedPressure', 'feedFlowRate'];
 
@@ -13,14 +15,14 @@ export default function PropertyInspector() {
   const removeNode = useFlowsheetStore((s) => s.removeNode);
   const setSelectedNode = useFlowsheetStore((s) => s.setSelectedNode);
   const getUpstreamNodes = useFlowsheetStore((s) => s.getUpstreamNodes);
+  const globalCompounds = useFlowsheetStore((s) => s.simulationBasis.compounds);
 
   const node = nodes.find((n) => n.id === selectedNodeId);
   if (!node) return null;
 
   const def = equipmentLibrary[node.data.equipmentType];
   const upstreamNodes = getUpstreamNodes(node.id);
-  const isFeedNode = upstreamNodes.length === 0;
-
+  const isFeedNode = upstreamNodes.length === 0 || node.data.equipmentType === EquipmentType.FeedStream;
   // Filter out feed params from regular display
   const regularParams = Object.entries(def.parameters).filter(
     ([key]) => !FEED_PARAM_KEYS.includes(key)
@@ -62,7 +64,22 @@ export default function PropertyInspector() {
             parameters={node.data.parameters}
             paramDefs={def.parameters}
             updateNodeData={updateNodeData}
+            globalCompounds={globalCompounds}
           />
+        )}
+
+        {node.data.equipmentType === EquipmentType.DesignSpec && (
+          <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
+            <DesignSpecInspector
+              nodeId={node.id}
+              parameters={node.data.parameters}
+              onParamChange={(key, value) =>
+                updateNodeData(node.id, {
+                  parameters: { ...node.data.parameters, [key]: value },
+                })
+              }
+            />
+          </div>
         )}
 
         <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
@@ -177,9 +194,10 @@ interface FeedConditionsSectionProps {
   parameters: Record<string, number | string | boolean>;
   paramDefs: Record<string, { label: string; unit: string; default: number | string | boolean | null; min?: number; max?: number; type: string }>;
   updateNodeData: (id: string, data: { parameters: Record<string, number | string | boolean> }) => void;
+  globalCompounds?: string[];
 }
 
-function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }: FeedConditionsSectionProps) {
+function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData, globalCompounds }: FeedConditionsSectionProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<CompoundResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -218,7 +236,11 @@ function FeedConditionsSection({ nodeId, parameters, paramDefs, updateNodeData }
     searchTimeout.current = setTimeout(async () => {
       setIsSearching(true);
       try {
-        const results = await searchCompounds(searchQuery);
+        let results = await searchCompounds(searchQuery);
+        // Filter by global compound list if defined
+        if (globalCompounds && globalCompounds.length > 0) {
+          results = results.filter((c) => globalCompounds.includes(c.name));
+        }
         setSearchResults(results);
         setShowResults(true);
       } catch {

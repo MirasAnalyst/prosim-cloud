@@ -127,6 +127,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     }));
 
     const { propertyPackage, convergenceSettings } = useSimulationStore.getState();
+    const { simulationBasis } = useFlowsheetStore.getState();
 
     try {
       const response = await fetch('/api/simulation/run/stream', {
@@ -141,6 +142,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
             tolerance: convergenceSettings.tolerance,
             damping: convergenceSettings.damping,
           },
+          simulation_basis: simulationBasis.compounds.length > 0 ? simulationBasis : undefined,
         }),
         signal: controller.signal,
       });

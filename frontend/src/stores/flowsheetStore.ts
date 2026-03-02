@@ -35,6 +35,11 @@ export interface EquipmentGroup {
   size: { width: number; height: number };
 }
 
+export interface SimulationBasis {
+  compounds: string[];
+  property_package?: string;
+}
+
 interface FlowsheetState {
   nodes: Node<EquipmentNodeData>[];
   edges: Edge[];
@@ -42,6 +47,7 @@ interface FlowsheetState {
   currentProjectId: string | null;
   projectName: string;
   saveStatus: 'saved' | 'saving' | 'error';
+  simulationBasis: SimulationBasis;
 
   // Equipment Groups
   groups: EquipmentGroup[];
@@ -75,6 +81,7 @@ interface FlowsheetState {
   getUpstreamNodes: (nodeId: string) => string[];
   clear: () => void;
   setProjectName: (name: string) => void;
+  setSimulationBasis: (basis: SimulationBasis) => void;
   initProject: () => Promise<void>;
 }
 
@@ -82,10 +89,10 @@ let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 function debounceSave(get: () => FlowsheetState, set?: (partial: Partial<FlowsheetState>) => void) {
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
-    const { currentProjectId, nodes, edges } = get();
+    const { currentProjectId, nodes, edges, simulationBasis } = get();
     if (currentProjectId) {
       set?.({ saveStatus: 'saving' });
-      saveFlowsheet(currentProjectId, nodes as any, edges as any)
+      saveFlowsheet(currentProjectId, nodes as any, edges as any, simulationBasis)
         .then(() => set?.({ saveStatus: 'saved' }))
         .catch(() => set?.({ saveStatus: 'error' }));
     }
@@ -99,6 +106,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   currentProjectId: null,
   projectName: 'Untitled Project',
   saveStatus: 'saved' as const,
+  simulationBasis: { compounds: [] },
 
   // Equipment Groups
   groups: [],
@@ -304,12 +312,17 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   },
 
   onConnect: (connection) => {
+    // Detect energy port connections (handles starting with 'energy')
+    const isEnergySource = connection.sourceHandle?.startsWith('energy') ?? false;
+    const isEnergyTarget = connection.targetHandle?.startsWith('energy') ?? false;
+    const edgeType = (isEnergySource || isEnergyTarget) ? 'energy-stream' : 'stream';
+
     set((state) => ({
       edges: addEdge(
         {
           ...connection,
-          type: 'stream',
-          animated: true,
+          type: edgeType,
+          animated: edgeType === 'stream',
         },
         state.edges
       ),
@@ -339,8 +352,8 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       sourceHandle: s.sourcePort,
       target: s.targetId,
       targetHandle: s.targetPort,
-      type: 'stream',
-      animated: true,
+      type: (s as any).type ?? 'stream',
+      animated: (s as any).type !== 'energy-stream',
     }));
     set({ nodes, edges, selectedNodeId: null });
     get().pushHistory();
@@ -353,6 +366,11 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
 
   clear: () => {
     set({ nodes: [], edges: [], selectedNodeId: null });
+  },
+
+  setSimulationBasis: (basis) => {
+    set({ simulationBasis: basis });
+    debounceSave(get, set);
   },
 
   setProjectName: (name) => {
@@ -371,6 +389,16 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
         set({ currentProjectId: project.id, projectName: project.name });
         try {
           const flowsheet = await getFlowsheet(project.id);
+          // Load simulation basis if present
+          if (flowsheet.simulation_basis) {
+            const basis = flowsheet.simulation_basis as { compounds?: string[]; property_package?: string };
+            set({
+              simulationBasis: {
+                compounds: basis.compounds ?? [],
+                property_package: basis.property_package,
+              },
+            });
+          }
           if (flowsheet.nodes && flowsheet.nodes.length > 0) {
             const equipment: EquipmentData[] = flowsheet.nodes.map((n: any) => ({
               id: n.id,
@@ -385,6 +413,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
               sourcePort: e.sourceHandle ?? e.source_handle ?? '',
               targetId: e.target,
               targetPort: e.targetHandle ?? e.target_handle ?? '',
+              type: e.type ?? 'stream',
             }));
             get().loadFlowsheet(equipment, streams);
           }

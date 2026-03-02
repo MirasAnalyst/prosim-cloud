@@ -10,7 +10,8 @@ _use_null_pool = "pooler.supabase.com" in settings.DATABASE_URL or ":6543/" in s
 _pool_kwargs = {"poolclass": NullPool} if _use_null_pool else {
     "pool_size": 10, "max_overflow": 20, "pool_timeout": 30, "pool_pre_ping": True,
 }
-engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True, **_pool_kwargs)
+_connect_args = {"prepare_threshold": None} if _use_null_pool else {}
+engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True, connect_args=_connect_args, **_pool_kwargs)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

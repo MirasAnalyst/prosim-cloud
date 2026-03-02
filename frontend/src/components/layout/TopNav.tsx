@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Play, Loader2, Bot, Beaker, XCircle, Undo2, Redo2, Settings2,
   Sun, Moon, Menu, History, Download, Upload, Archive, ChevronDown,
+  FlaskConical, Wrench, BarChart3,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useSimulationStore } from '../../stores/simulationStore';
@@ -19,12 +20,40 @@ import {
 import { downloadBlob } from '../../lib/download-utils';
 import { exportCanvasAsSvg, exportCanvasAsPng, exportCanvasAsPdf } from '../../lib/canvas-export';
 
-export default function TopNav({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
+export default function TopNav({
+  onToggleSidebar,
+  onToggleBasis,
+  basisOpen,
+  onToggleSensitivity,
+  onToggleCases,
+  onToggleDesignSpec,
+  onToggleOptimization,
+  onToggleDynamic,
+  onTogglePinch,
+  onToggleUtility,
+  onToggleEmissions,
+  onToggleReliefValve,
+  onToggleHydraulics,
+  onToggleControlValve,
+}: {
+  onToggleSidebar?: () => void;
+  onToggleBasis?: () => void;
+  basisOpen?: boolean;
+  onToggleSensitivity?: () => void;
+  onToggleCases?: () => void;
+  onToggleDesignSpec?: () => void;
+  onToggleOptimization?: () => void;
+  onToggleDynamic?: () => void;
+  onTogglePinch?: () => void;
+  onToggleUtility?: () => void;
+  onToggleEmissions?: () => void;
+  onToggleReliefValve?: () => void;
+  onToggleHydraulics?: () => void;
+  onToggleControlValve?: () => void;
+}) {
   const simulationStatus = useSimulationStore((s) => s.status);
   const runSimulation = useSimulationStore((s) => s.runSimulation);
   const cancelSimulation = useSimulationStore((s) => s.cancelSimulation);
-  const propertyPackage = useSimulationStore((s) => s.propertyPackage);
-  const setPropertyPackage = useSimulationStore((s) => s.setPropertyPackage);
   const toggleAgent = useAgentStore((s) => s.togglePanel);
   const agentOpen = useAgentStore((s) => s.isOpen);
   const projectName = useFlowsheetStore((s) => s.projectName);
@@ -48,14 +77,18 @@ export default function TopNav({ onToggleSidebar }: { onToggleSidebar?: () => vo
   const [editValue, setEditValue] = useState(projectName);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const exportRef = useRef<HTMLDivElement>(null);
+  const analysisRef = useRef<HTMLDivElement>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
 
   // Close popovers on outside click
   useEffect(() => {
-    if (!settingsOpen && !exportOpen) return;
+    if (!settingsOpen && !exportOpen && !analysisOpen && !toolsOpen) return;
     const handler = (e: MouseEvent) => {
       if (settingsOpen && settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
         setSettingsOpen(false);
@@ -63,10 +96,16 @@ export default function TopNav({ onToggleSidebar }: { onToggleSidebar?: () => vo
       if (exportOpen && exportRef.current && !exportRef.current.contains(e.target as Node)) {
         setExportOpen(false);
       }
+      if (analysisOpen && analysisRef.current && !analysisRef.current.contains(e.target as Node)) {
+        setAnalysisOpen(false);
+      }
+      if (toolsOpen && toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
+        setToolsOpen(false);
+      }
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [settingsOpen, exportOpen]);
+  }, [settingsOpen, exportOpen, analysisOpen, toolsOpen]);
 
   const isRunning = simulationStatus === SimulationStatus.Running;
 
@@ -220,16 +259,14 @@ export default function TopNav({ onToggleSidebar }: { onToggleSidebar?: () => vo
       </div>
 
       <div className="flex items-center gap-2">
-        <select
-          value={propertyPackage}
-          onChange={(e) => setPropertyPackage(e.target.value)}
-          className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 text-sm rounded-lg px-2 py-1.5 focus:outline-none focus:border-blue-500"
+        {/* Simulation Basis */}
+        <button
+          onClick={onToggleBasis}
+          className={`${btnClass} ${basisOpen ? '!bg-blue-600 !text-white' : ''}`}
+          title="Simulation Basis"
         >
-          <option value="PengRobinson">Peng-Robinson</option>
-          <option value="SRK">SRK</option>
-          <option value="NRTL">NRTL</option>
-          <option value="UNIQUAC">UNIQUAC</option>
-        </select>
+          <FlaskConical size={14} />
+        </button>
 
         {/* Convergence Settings */}
         <div className="relative" ref={settingsRef}>
@@ -269,6 +306,71 @@ export default function TopNav({ onToggleSidebar }: { onToggleSidebar?: () => vo
         >
           <History size={14} />
         </button>
+
+        {/* Analysis dropdown */}
+        <div className="relative" ref={analysisRef}>
+          <button
+            onClick={() => setAnalysisOpen(!analysisOpen)}
+            className={`flex items-center gap-1 ${btnClass} ${analysisOpen ? '!bg-blue-600 !text-white' : ''}`}
+            title="Analysis"
+          >
+            <BarChart3 size={14} />
+            <ChevronDown size={10} />
+          </button>
+          {analysisOpen && (
+            <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg shadow-xl z-50 py-1">
+              <button onClick={() => { setAnalysisOpen(false); onToggleSensitivity?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Sensitivity Analysis
+              </button>
+              <button onClick={() => { setAnalysisOpen(false); onToggleCases?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Case Studies
+              </button>
+              <button onClick={() => { setAnalysisOpen(false); onToggleDesignSpec?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Design Specifications
+              </button>
+              <button onClick={() => { setAnalysisOpen(false); onToggleOptimization?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Optimization
+              </button>
+              <button onClick={() => { setAnalysisOpen(false); onToggleDynamic?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Dynamic Simulation
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Tools dropdown */}
+        <div className="relative" ref={toolsRef}>
+          <button
+            onClick={() => setToolsOpen(!toolsOpen)}
+            className={`flex items-center gap-1 ${btnClass} ${toolsOpen ? '!bg-blue-600 !text-white' : ''}`}
+            title="Tools"
+          >
+            <Wrench size={14} />
+            <ChevronDown size={10} />
+          </button>
+          {toolsOpen && (
+            <div className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg shadow-xl z-50 py-1">
+              <button onClick={() => { setToolsOpen(false); onTogglePinch?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Pinch Analysis
+              </button>
+              <button onClick={() => { setToolsOpen(false); onToggleUtility?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Utility Summary
+              </button>
+              <button onClick={() => { setToolsOpen(false); onToggleEmissions?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Environmental Calc.
+              </button>
+              <button onClick={() => { setToolsOpen(false); onToggleReliefValve?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Relief Valve Sizing
+              </button>
+              <button onClick={() => { setToolsOpen(false); onToggleHydraulics?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Pipe Hydraulics
+              </button>
+              <button onClick={() => { setToolsOpen(false); onToggleControlValve?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Control Valve Sizing
+              </button>
+            </div>
+          )}
+        </div>
 
         {/* Export dropdown */}
         <div className="relative" ref={exportRef}>

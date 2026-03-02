@@ -7,6 +7,17 @@ import FlowsheetCanvas from '../canvas/FlowsheetCanvas';
 import PropertyInspector from '../inspector/PropertyInspector';
 import AgentPanel from '../agent/AgentPanel';
 import VersionPanel from '../version/VersionPanel';
+import SimulationBasisPanel from '../basis/SimulationBasisPanel';
+import SensitivityPanel from '../analysis/SensitivityPanel';
+import CaseManagerPanel from '../analysis/CaseManagerPanel';
+import OptimizationPanel from '../analysis/OptimizationPanel';
+import DynamicPanel from '../analysis/DynamicPanel';
+import PinchPanel from '../tools/PinchPanel';
+import UtilityPanel from '../tools/UtilityPanel';
+import EmissionsPanel from '../tools/EmissionsPanel';
+import ReliefValvePanel from '../tools/ReliefValvePanel';
+import HydraulicsPanel from '../tools/HydraulicsPanel';
+import ControlValvePanel from '../tools/ControlValvePanel';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useAgentStore } from '../../stores/agentStore';
@@ -14,6 +25,17 @@ import { useThemeStore } from '../../stores/themeStore';
 
 export default function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [basisOpen, setBasisOpen] = useState(false);
+  const [sensitivityOpen, setSensitivityOpen] = useState(false);
+  const [casesOpen, setCasesOpen] = useState(false);
+  const [optimizationOpen, setOptimizationOpen] = useState(false);
+  const [dynamicOpen, setDynamicOpen] = useState(false);
+  const [pinchOpen, setPinchOpen] = useState(false);
+  const [utilityOpen, setUtilityOpen] = useState(false);
+  const [emissionsOpen, setEmissionsOpen] = useState(false);
+  const [reliefValveOpen, setReliefValveOpen] = useState(false);
+  const [hydraulicsOpen, setHydraulicsOpen] = useState(false);
+  const [controlValveOpen, setControlValveOpen] = useState(false);
   const initProject = useFlowsheetStore((s) => s.initProject);
   const theme = useThemeStore((s) => s.theme);
 
@@ -94,7 +116,22 @@ export default function AppLayout() {
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
       <Toaster richColors position="bottom-right" theme={theme} />
-      <TopNav onToggleSidebar={() => setSidebarOpen(prev => !prev)} />
+      <TopNav
+        onToggleSidebar={() => setSidebarOpen(prev => !prev)}
+        onToggleBasis={() => setBasisOpen(prev => !prev)}
+        basisOpen={basisOpen}
+        onToggleSensitivity={() => setSensitivityOpen(prev => !prev)}
+        onToggleCases={() => setCasesOpen(prev => !prev)}
+        onToggleDesignSpec={() => {}}
+        onToggleOptimization={() => setOptimizationOpen(prev => !prev)}
+        onToggleDynamic={() => setDynamicOpen(prev => !prev)}
+        onTogglePinch={() => setPinchOpen(prev => !prev)}
+        onToggleUtility={() => setUtilityOpen(prev => !prev)}
+        onToggleEmissions={() => setEmissionsOpen(prev => !prev)}
+        onToggleReliefValve={() => setReliefValveOpen(prev => !prev)}
+        onToggleHydraulics={() => setHydraulicsOpen(prev => !prev)}
+        onToggleControlValve={() => setControlValveOpen(prev => !prev)}
+      />
       <div className="flex flex-1 overflow-hidden">
         <div className={`${sidebarOpen ? 'block' : 'hidden'} lg:block`}>
           <EquipmentPalette />
@@ -116,6 +153,17 @@ export default function AppLayout() {
       <BottomPanel />
       <AgentPanel />
       <VersionPanel />
+      <SimulationBasisPanel open={basisOpen} onClose={() => setBasisOpen(false)} />
+      <SensitivityPanel open={sensitivityOpen} onClose={() => setSensitivityOpen(false)} />
+      <CaseManagerPanel open={casesOpen} onClose={() => setCasesOpen(false)} />
+      <OptimizationPanel open={optimizationOpen} onClose={() => setOptimizationOpen(false)} />
+      <DynamicPanel open={dynamicOpen} onClose={() => setDynamicOpen(false)} />
+      <PinchPanel open={pinchOpen} onClose={() => setPinchOpen(false)} />
+      <UtilityPanel open={utilityOpen} onClose={() => setUtilityOpen(false)} />
+      <EmissionsPanel open={emissionsOpen} onClose={() => setEmissionsOpen(false)} />
+      <ReliefValvePanel open={reliefValveOpen} onClose={() => setReliefValveOpen(false)} />
+      <HydraulicsPanel open={hydraulicsOpen} onClose={() => setHydraulicsOpen(false)} />
+      <ControlValvePanel open={controlValveOpen} onClose={() => setControlValveOpen(false)} />
     </div>
   );
 }

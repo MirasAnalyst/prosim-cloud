@@ -28,6 +28,7 @@ class EdgeData(BaseModel):
 class FlowsheetUpdate(BaseModel):
     nodes: list[NodeData] = []
     edges: list[EdgeData] = []
+    simulation_basis: dict[str, Any] | None = None
 
 
 class FlowsheetResponse(BaseModel):
@@ -37,4 +38,5 @@ class FlowsheetResponse(BaseModel):
     project_id: uuid.UUID
     nodes: list[dict[str, Any]]
     edges: list[dict[str, Any]]
+    simulation_basis: dict[str, Any] = {}
     updated_at: datetime

@@ -52,10 +52,14 @@ async def update_flowsheet(
             nodes=[n.model_dump() for n in body.nodes],
             edges=[e.model_dump() for e in body.edges],
         )
+        if body.simulation_basis is not None:
+            flowsheet.simulation_basis = body.simulation_basis
         db.add(flowsheet)
     else:
         flowsheet.nodes = [n.model_dump() for n in body.nodes]
         flowsheet.edges = [e.model_dump() for e in body.edges]
+        if body.simulation_basis is not None:
+            flowsheet.simulation_basis = body.simulation_basis
 
     await db.flush()
     await db.refresh(flowsheet)

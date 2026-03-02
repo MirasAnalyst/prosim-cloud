@@ -61,6 +61,7 @@ class SimulationRequest(BaseModel):
     edges: list[dict[str, Any]] = []
     property_package: str = "PengRobinson"
     convergence_settings: ConvergenceSettings | None = None
+    simulation_basis: dict[str, Any] | None = None
 
     @field_validator("property_package")
     @classmethod

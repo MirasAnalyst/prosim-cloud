@@ -1,4 +1,6 @@
 export enum EquipmentType {
+  FeedStream = 'FeedStream',
+  ProductStream = 'ProductStream',
   Mixer = 'Mixer',
   Splitter = 'Splitter',
   Heater = 'Heater',
@@ -19,14 +21,19 @@ export enum EquipmentType {
   Crystallizer = 'Crystallizer',
   Dryer = 'Dryer',
   Filter = 'Filter',
+  DesignSpec = 'DesignSpec',
+  PipeSegment = 'PipeSegment',
 }
 
 export enum EquipmentCategory {
+  Streams = 'Streams',
   Mixing = 'Mixing',
   HeatTransfer = 'Heat Transfer',
   Separation = 'Separation',
   PressureChange = 'Pressure Change',
   Reaction = 'Reaction',
+  Logical = 'Logical',
+  Piping = 'Piping',
 }
 
 export interface PortDefinition {

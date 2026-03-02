@@ -149,7 +149,12 @@ test.describe('Tier 5: Enhancements', () => {
   });
 
   test('Test 4: UNIQUAC property package in dropdown', async ({ page }) => {
-    // Verify the UNIQUAC option exists in the property package dropdown
+    // Property package dropdown is now inside the Simulation Basis panel
+    // Click the Basis button to open the panel, then check options
+    await page.goto('/');
+    await page.waitForLoadState('load');
+    await page.locator('button[title="Simulation Basis"]').click();
+    await page.waitForTimeout(500);
     const options = await page.locator('select').first().locator('option').allTextContents();
     expect(options).toContain('UNIQUAC');
     expect(options).toContain('NRTL');

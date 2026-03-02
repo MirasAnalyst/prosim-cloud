@@ -11,12 +11,13 @@ import '@xyflow/react/dist/style.css';
 import EquipmentNode from './EquipmentNode';
 import GroupNode from './GroupNode';
 import StreamEdge from './StreamEdge';
+import EnergyStreamEdge from './EnergyStreamEdge';
 import AnnotationLayer from './AnnotationLayer';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { EquipmentType } from '../../types';
 
 const nodeTypes = { equipment: EquipmentNode, group: GroupNode };
-const edgeTypes = { stream: StreamEdge };
+const edgeTypes = { stream: StreamEdge, 'energy-stream': EnergyStreamEdge };
 
 const defaultEdgeOptions = {
   type: 'stream',

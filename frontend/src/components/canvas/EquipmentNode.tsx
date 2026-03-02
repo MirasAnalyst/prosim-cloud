@@ -57,6 +57,10 @@ function getResultBadge(
       return `${Number(flow).toFixed(2)} kg/s`;
     }
     case EquipmentType.Valve: {
+      const cv = eqResult.calculatedCv;
+      if (cv != null && Number(cv) > 0) {
+        return `Cv: ${Number(cv).toFixed(1)} | ${Number(eqResult.percentOpen ?? 0).toFixed(0)}% open`;
+      }
       const dp = eqResult.pressureDrop;
       if (dp == null) return null;
       return `ΔP: ${Number(dp).toFixed(1)} kPa`;
@@ -92,6 +96,47 @@ function getResultBadge(
       if (eff == null) return null;
       return `Eff: ${Number(eff).toFixed(1)}%`;
     }
+    case EquipmentType.DesignSpec: {
+      const conv = eqResult.converged;
+      const achieved = eqResult.achievedValue;
+      if (conv != null) {
+        const status = conv ? 'OK' : 'FAIL';
+        return achieved != null ? `${status} (${Number(achieved).toFixed(2)})` : status;
+      }
+      return null;
+    }
+    case EquipmentType.PipeSegment: {
+      const dpPipe = eqResult.pressureDrop;
+      const vel = eqResult.velocity;
+      if (dpPipe == null) return null;
+      const parts = [`ΔP: ${Number(dpPipe).toFixed(2)} kPa`];
+      if (vel != null) parts.push(`V: ${Number(vel).toFixed(2)} m/s`);
+      return parts.join(' | ');
+    }
+    case EquipmentType.FeedStream: {
+      const t = eqResult.outletTemperature;
+      const p = eqResult.outletPressure;
+      const f = eqResult.massFlow;
+      if (t == null && p == null && f == null) return null;
+      const parts: string[] = [];
+      if (t != null) parts.push(`${Number(t).toFixed(1)}°C`);
+      if (p != null) parts.push(`${Number(p).toFixed(1)} kPa`);
+      if (f != null) parts.push(`${Number(f).toFixed(3)} kg/s`);
+      return parts.join(' | ');
+    }
+    case EquipmentType.ProductStream: {
+      const t = eqResult.outletTemperature;
+      const p = eqResult.outletPressure;
+      const f = eqResult.massFlow;
+      const vf = eqResult.vaporFraction;
+      if (t == null && p == null && f == null) return null;
+      const parts: string[] = [];
+      if (t != null) parts.push(`${Number(t).toFixed(1)}°C`);
+      if (p != null) parts.push(`${Number(p).toFixed(1)} kPa`);
+      if (f != null) parts.push(`${Number(f).toFixed(3)} kg/s`);
+      if (vf != null) parts.push(`VF: ${Number(vf).toFixed(3)}`);
+      return parts.join(' | ');
+    }
     default:
       return null;
   }
@@ -114,10 +159,12 @@ function EquipmentNode({ id, data, selected }: NodeProps) {
     ? getResultBadge(nodeData.equipmentType, eqResult)
     : null;
 
-  const leftPorts = def.ports.filter((p) => p.position === 'left');
-  const rightPorts = def.ports.filter((p) => p.position === 'right');
-  const topPorts = def.ports.filter((p) => p.position === 'top');
-  const bottomPorts = def.ports.filter((p) => p.position === 'bottom');
+  const isEnergy = (portId: string) => portId.startsWith('energy');
+  const leftPorts = def.ports.filter((p) => p.position === 'left' && !isEnergy(p.id));
+  const rightPorts = def.ports.filter((p) => p.position === 'right' && !isEnergy(p.id));
+  const topPorts = def.ports.filter((p) => p.position === 'top' && !isEnergy(p.id));
+  const bottomPorts = def.ports.filter((p) => p.position === 'bottom' && !isEnergy(p.id));
+  const energyPorts = def.ports.filter((p) => isEnergy(p.id));
 
   return (
     <div
@@ -220,6 +267,27 @@ function EquipmentNode({ id, data, selected }: NodeProps) {
           title={port.name}
         />
       ))}
+
+      {/* Energy ports — smaller, orange handles */}
+      {energyPorts.map((port) => {
+        const pos = port.position === 'top' ? Position.Top : Position.Bottom;
+        const samePosPorts = energyPorts.filter(p => p.position === port.position);
+        const idxInPos = samePosPorts.indexOf(port);
+        const style = port.position === 'top' || port.position === 'bottom'
+          ? { left: `${((idxInPos + 1) / (samePosPorts.length + 1)) * 100 + (port.position === 'bottom' && bottomPorts.length > 0 ? 30 : 0)}%` }
+          : {};
+        return (
+          <Handle
+            key={port.id}
+            id={port.id}
+            type={port.type === 'inlet' ? 'target' : 'source'}
+            position={pos}
+            className="!w-2.5 !h-2.5 !bg-orange-200 !border-2 !border-orange-500 hover:!bg-orange-400"
+            style={style}
+            title={`⚡ ${port.name}`}
+          />
+        );
+      })}
     </div>
   );
 }

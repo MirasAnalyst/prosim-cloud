@@ -133,6 +133,7 @@ EQUIPMENT_TYPE_MAP: dict[str, str] = {
     "Crystallizer": "Crystallizer",
     "Dryer": "Dryer",
     "Filter": "Filter",
+    "PipeSegment": "PipeSegment",
 }
 
 # Default feed conditions (SI units) when no upstream data and no user params
@@ -189,6 +190,14 @@ _GAMMA_TABLE: dict[str, float] = {
     "methanol": 1.20, "ethanol": 1.13, "acetone": 1.11,
     "dimethyl ether": 1.11, "diethyl ether": 1.08,
     "formaldehyde": 1.27,
+}
+
+# Heat of absorption (kJ/mol, exothermic) for acid gas absorption in amine solvents
+_HEAT_OF_ABSORPTION: dict[str, float] = {
+    "carbon dioxide": 84.0,
+    "hydrogen sulfide": 60.0,
+    "sulfur dioxide": 50.0,
+    "ammonia": 35.0,
 }
 
 
@@ -334,6 +343,7 @@ class DWSIMEngine:
         nodes = self._normalize_nodes(flowsheet_data.get("nodes", []))
         edges = flowsheet_data.get("edges", [])
         property_package = flowsheet_data.get("property_package", "PengRobinson")
+        simulation_basis = flowsheet_data.get("simulation_basis") or {}
 
         if not nodes:
             return {"status": "error", "error": "No equipment nodes in flowsheet"}
@@ -347,7 +357,10 @@ class DWSIMEngine:
         # Fallback: basic calculations (works with or without thermo/CoolProp)
         convergence_settings = flowsheet_data.get("convergence_settings") or {}
         progress_callback = flowsheet_data.get("progress_callback")
-        return await self._simulate_basic(nodes, edges, property_package, convergence_settings, progress_callback)
+        return await self._simulate_basic(
+            nodes, edges, property_package, convergence_settings,
+            progress_callback, simulation_basis,
+        )
 
     # ------------------------------------------------------------------
     # Shared flash helper (reusable across equipment types)
@@ -500,6 +513,20 @@ class DWSIMEngine:
                 except Exception:
                     pass
 
+            # Viscosity (Pa·s)
+            mu_liquid = None
+            mu_gas = None
+            if liquid_phase is not None:
+                try:
+                    mu_liquid = liquid_phase.mu()
+                except Exception:
+                    pass
+            if gas_phase is not None:
+                try:
+                    mu_gas = gas_phase.mu()
+                except Exception:
+                    pass
+
             return {
                 "T": T,
                 "P": P,
@@ -510,6 +537,8 @@ class DWSIMEngine:
                 "MW_mix": MW_mix,    # g/mol
                 "MWs": list(constants.MWs),
                 "rho_liquid": rho_liquid,  # kg/m³ or None
+                "mu_liquid": mu_liquid,    # Pa·s or None
+                "mu_gas": mu_gas,          # Pa·s or None
                 "gas_zs": gas_zs,
                 "liquid_zs": liquid_zs,
                 "comp_names": comp_names,
@@ -572,6 +601,9 @@ class DWSIMEngine:
         incoming: dict[str, set[str]] = {nid: set() for nid in node_ids}
         outgoing: dict[str, set[str]] = {nid: set() for nid in node_ids}
         for e in edges:
+            # Skip energy streams — they don't define material flow dependencies
+            if e.get("type", "stream") == "energy-stream":
+                continue
             src, tgt = e.get("source", ""), e.get("target", "")
             if src in node_ids and tgt in node_ids:
                 incoming[tgt].add(src)
@@ -600,7 +632,7 @@ class DWSIMEngine:
     # Build feed from node parameters (Feature 1)
     # ------------------------------------------------------------------
     @staticmethod
-    def _build_feed_from_params(params: dict[str, Any]) -> dict[str, Any]:
+    def _build_feed_from_params(params: dict[str, Any], property_package: str = "PengRobinson") -> dict[str, Any]:
         """Build SI feed conditions from user-specified node parameters.
 
         Reads feedTemperature (°C), feedPressure (kPa), feedFlowRate (kg/s),
@@ -643,7 +675,7 @@ class DWSIMEngine:
         comp = feed["composition"]
         comp_names = list(comp.keys())
         zs = [float(v) for v in comp.values()]
-        flash = DWSIMEngine._flash_tp(comp_names, zs, feed["temperature"], feed["pressure"])
+        flash = DWSIMEngine._flash_tp(comp_names, zs, feed["temperature"], feed["pressure"], property_package)
         if flash and flash.get("MW_mix", 0) > 0:
             mw_kg = flash["MW_mix"] / 1000.0  # kg/mol
             feed["enthalpy"] = flash["H"] / mw_kg  # J/kg
@@ -754,11 +786,32 @@ class DWSIMEngine:
         property_package: str = "PengRobinson",
         convergence_settings: dict[str, Any] | None = None,
         progress_callback: Any = None,
+        simulation_basis: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             logs: list[str] = []
             equipment_results: dict[str, Any] = {}
             has_errors = False
+            stream_results: dict[str, Any] = {}
+
+            # Separate FeedStream/ProductStream/DesignSpec nodes from equipment nodes
+            feed_stream_nodes = [n for n in nodes if n.get("type") == "FeedStream"]
+            product_stream_nodes = [n for n in nodes if n.get("type") == "ProductStream"]
+            design_spec_nodes = [n for n in nodes if n.get("type") == "DesignSpec"]
+            equipment_nodes = [n for n in nodes if n.get("type") not in ("FeedStream", "ProductStream", "DesignSpec")]
+
+            # Cache thermo constants from simulation basis for reuse
+            _basis_constants = None
+            _basis_properties = None
+            basis_compounds = (simulation_basis or {}).get("compounds", []) if simulation_basis else []
+            if basis_compounds and _thermo_available:
+                try:
+                    _basis_constants, _basis_properties = ChemicalConstantsPackage.from_IDs(basis_compounds)
+                    logs.append(f"Simulation basis: {len(basis_compounds)} compounds loaded ({', '.join(basis_compounds[:5])}{'...' if len(basis_compounds) > 5 else ''})")
+                except Exception as exc:
+                    logs.append(f"WARNING: Failed to load simulation basis compounds: {exc}")
+
+            basis_set = set(basis_compounds) if basis_compounds else None
 
             # Activity coefficient model info
             if property_package in ("NRTL", "UNIQUAC"):
@@ -777,6 +830,10 @@ class DWSIMEngine:
                 tgt = edge.get("target", "")
                 sh = edge.get("sourceHandle", "")
                 th = edge.get("targetHandle", "")
+                # Skip energy streams for material flow adjacency
+                edge_type = edge.get("type", "stream")
+                if edge_type == "energy-stream":
+                    continue
                 downstream.setdefault(src, []).append((tgt, sh, th))
                 upstream.setdefault(tgt, []).append((src, sh, th))
 
@@ -871,6 +928,77 @@ class DWSIMEngine:
                     if te_key in tear_stream_conditions:
                         port_conditions[(src, sh)] = dict(tear_stream_conditions[te_key])
 
+                # Process FeedStream nodes first — they set port_conditions for their outlet
+                for fs_node in feed_stream_nodes:
+                    fs_id = fs_node.get("id", "")
+                    fs_name = fs_node.get("name", fs_id)
+                    fs_params = fs_node.get("parameters", {})
+                    try:
+                        feed_cond = self._build_feed_from_params(fs_params, property_package)
+                        port_conditions[(fs_id, "out-1")] = feed_cond
+
+                        # Store feed stream results
+                        T_c = _k_to_c(feed_cond["temperature"])
+                        P_kpa = _pa_to_kpa(feed_cond["pressure"])
+                        mf = feed_cond.get("mass_flow", 1.0)
+                        comp = feed_cond.get("composition", {})
+                        comp_names = list(comp.keys())
+                        zs = [float(v) for v in comp.values()]
+                        vf = 0.0
+                        # Validate compounds against simulation basis
+                        if basis_set and comp_names:
+                            unknown = [c for c in comp_names if c not in basis_set]
+                            if unknown:
+                                logs.append(f"WARNING: Feed '{fs_name}' has compounds not in simulation basis: {unknown}")
+
+                        flash = self._flash_tp(comp_names, zs, feed_cond["temperature"], feed_cond["pressure"], property_package)
+                        if flash:
+                            vf = flash.get("VF", 0.0) or 0.0
+                            # Propagate flash VF back to port_conditions for downstream
+                            port_conditions[(fs_id, "out-1")]["vapor_fraction"] = vf
+
+                        equipment_results[fs_id] = {
+                            "equipment_id": fs_id,
+                            "equipment_type": "FeedStream",
+                            "name": fs_name,
+                            "outletTemperature": T_c,
+                            "outletPressure": P_kpa,
+                            "massFlow": mf,
+                            "vaporFraction": vf,
+                            "composition": comp,
+                            "outlet_streams": {
+                                "out-1": {
+                                    "temperature": T_c,
+                                    "pressure": P_kpa,
+                                    "flowRate": mf,
+                                    "vapor_fraction": vf,
+                                    "composition": comp,
+                                },
+                            },
+                        }
+
+                        # Store stream result for the outgoing edge
+                        for tgt_id, sh, _th in downstream.get(fs_id, []):
+                            edge_key = f"{fs_id}_{sh}_{tgt_id}"
+                            stream_results[edge_key] = {
+                                "temperature": T_c,
+                                "pressure": P_kpa,
+                                "flowRate": mf,
+                                "vapor_fraction": vf,
+                                "composition": comp,
+                            }
+
+                        logs.append(f"Feed stream '{fs_name}': T={T_c:.1f}°C, P={P_kpa:.1f} kPa, flow={mf:.3f} kg/s")
+                    except Exception as exc:
+                        equipment_results[fs_id] = {
+                            "equipment_id": fs_id,
+                            "equipment_type": "FeedStream",
+                            "name": fs_name,
+                            "error": str(exc),
+                        }
+                        has_errors = True
+                        logs.append(f"ERROR: Feed stream '{fs_name}' failed: {exc}")
+
                 for nid in sorted_ids:
                     node = node_map.get(nid)
                     if not node:
@@ -878,6 +1006,9 @@ class DWSIMEngine:
 
                     try:
                         ntype = node.get("type", "")
+                        # Skip FeedStream/ProductStream/DesignSpec — handled separately
+                        if ntype in ("FeedStream", "ProductStream", "DesignSpec"):
+                            continue
                         if ntype not in EQUIPMENT_TYPE_MAP:
                             logs.append(f"Skipping unknown type '{ntype}' for node {nid}")
                             continue
@@ -900,7 +1031,7 @@ class DWSIMEngine:
 
                         # If no upstream connections, build feed from node parameters
                         if not inlets:
-                            inlets = [self._build_feed_from_params(params)]
+                            inlets = [self._build_feed_from_params(params, property_package)]
 
                         # ----------------------------------------------------------
                         # Equipment-specific calculations (all SI internally)
@@ -1327,6 +1458,31 @@ class DWSIMEngine:
                                     eq_res["chokedFlow"] = True
                                 else:
                                     eq_res["chokedFlow"] = False
+
+                            # ISA 60534 control valve sizing (when sizingMode enabled)
+                            if bool(params.get("sizingMode", False)):
+                                try:
+                                    from app.services.control_valve_engine import size_control_valve
+                                    valve_type = str(params.get("valveType", "globe"))
+                                    pipe_dia = float(params.get("pipeDiameter", 0.1))
+                                    phase_v = "gas" if vf_out > 0.5 else "liquid"
+                                    cv_result = size_control_valve(
+                                        phase=phase_v, valve_type=valve_type,
+                                        inlet_pressure=_pa_to_kpa(P_in),
+                                        outlet_pressure=_pa_to_kpa(P_out),
+                                        temperature=_k_to_c(T_in),
+                                        volumetric_flow=mf / rho * 3600 if rho > 0 else 0,
+                                        specific_gravity=rho / 999.0 if rho > 0 else 1.0,
+                                        mass_flow_rate=mf * 3600,
+                                        molecular_weight=flash_in.get("MW_mix", 28.97) if flash_in else 28.97,
+                                        pipe_diameter=pipe_dia,
+                                    )
+                                    eq_res["calculatedCv"] = cv_result.get("calculated_cv", 0)
+                                    eq_res["selectedCv"] = cv_result.get("selected_cv", 0)
+                                    eq_res["percentOpen"] = cv_result.get("percent_open", 0)
+                                    eq_res["flowRegime"] = cv_result.get("flow_regime", "")
+                                except Exception as exc_cv:
+                                    logs.append(f"WARNING: {name} ISA 60534 sizing failed: {exc_cv}")
 
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
@@ -1783,8 +1939,52 @@ class DWSIMEngine:
                                             # Using 99% recovery for LK and HK
                                             N_min = math.log((0.99 / 0.01) ** 2) / math.log(alpha_lk_hk)
 
-                                            # Underwood: R_min (simplified)
-                                            R_min = 1.0 / (alpha_lk_hk - 1.0)
+                                            # Preliminary component split using N_min (for Underwood R_min calc)
+                                            d_hk_over_b_hk_pre = 0.01 / 0.99
+                                            d_fracs_pre: list[float] = []
+                                            for i in range(len(comp_names)):
+                                                alpha_Nmin = alphas[i] ** N_min if N_min < 200 else 1e6
+                                                ratio_db_pre = d_hk_over_b_hk_pre * alpha_Nmin
+                                                d_i_pre = zs[i] * ratio_db_pre / (1.0 + ratio_db_pre)
+                                                d_fracs_pre.append(max(d_i_pre, 0.0))
+
+                                            # Underwood: multicomponent R_min via theta solve
+                                            # Solve sum(alpha_i * z_i / (alpha_i - theta)) = 1 - q
+                                            q = 1.0 - vf_feed  # feed quality (q=1 for saturated liquid)
+                                            R_min = 1.0 / (alpha_lk_hk - 1.0)  # fallback (binary)
+                                            try:
+                                                # Bisection for theta in (1 + eps, alpha_lk_hk - eps)
+                                                lo = 1.0 + 1e-6
+                                                hi = alpha_lk_hk - 1e-6
+                                                if hi > lo:
+                                                    target = 1.0 - q
+                                                    def _uw_func(theta: float) -> float:
+                                                        return sum(alphas[i] * zs[i] / (alphas[i] - theta)
+                                                                   for i in range(len(comp_names))) - target
+                                                    fa = _uw_func(lo)
+                                                    fb = _uw_func(hi)
+                                                    if fa * fb < 0:
+                                                        for _ in range(100):
+                                                            mid = (lo + hi) / 2.0
+                                                            fm = _uw_func(mid)
+                                                            if abs(fm) < 1e-10 or (hi - lo) < 1e-12:
+                                                                break
+                                                            if fa * fm < 0:
+                                                                hi = mid
+                                                                fb = fm
+                                                            else:
+                                                                lo = mid
+                                                                fa = fm
+                                                        theta = (lo + hi) / 2.0
+                                                        # R_min + 1 = sum(alpha_i * d_i / (alpha_i - theta))
+                                                        d_total_pre = sum(d_fracs_pre) or 1e-12
+                                                        R_min_plus_1 = sum(
+                                                            alphas[i] * (d_fracs_pre[i] / d_total_pre) / (alphas[i] - theta)
+                                                            for i in range(len(comp_names))
+                                                        )
+                                                        R_min = max(R_min_plus_1 - 1.0, 0.01)
+                                            except Exception:
+                                                pass  # keep binary fallback
 
                                             # Gilliland correlation
                                             R = reflux_ratio
@@ -2126,10 +2326,14 @@ class DWSIMEngine:
                             T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
                             P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
 
-                            # Apply conversion to first component (key reactant) (T2-02b)
+                            # Apply conversion to key reactant (T2-02b)
                             out_comp = dict(in_comp)
                             if out_comp:
-                                key_reactant = list(out_comp.keys())[0]
+                                key_reactant_param = params.get("keyReactant", "")
+                                if key_reactant_param and key_reactant_param in out_comp:
+                                    key_reactant = key_reactant_param
+                                else:
+                                    key_reactant = list(out_comp.keys())[0]
                                 z_before = out_comp[key_reactant]
                                 consumed = z_before * conversion
                                 out_comp[key_reactant] = z_before - consumed
@@ -2209,7 +2413,7 @@ class DWSIMEngine:
                             if feed2 is None and len(inlets) >= 2:
                                 feed2 = inlets[1]
                             if feed1 is None:
-                                feed1 = self._build_feed_from_params(params)
+                                feed1 = self._build_feed_from_params(params, property_package)
                             if feed2 is None:
                                 feed2 = dict(_DEFAULT_FEED)
 
@@ -2333,19 +2537,37 @@ class DWSIMEngine:
                             out1_comp = {k: v / t1 for k, v in out1_comp.items()}
                             out2_comp = {k: v / t2 for k, v in out2_comp.items()}
 
-                            # Estimate outlet temperatures (simple: average)
-                            T_out1 = T1 if ntype == "Absorber" else T_avg
-                            T_out2 = T_avg
+                            # Outlet temperatures with heat of absorption
+                            if ntype == "Absorber":
+                                T_out1 = T1  # lean gas exits near gas feed temp
+                                # Heat of absorption raises rich solvent temperature
+                                Q_abs = 0.0  # kW
+                                for c in comp_names_all:
+                                    if c in _HEAT_OF_ABSORPTION:
+                                        moles_absorbed = (comp1.get(c, 0.0) - out1_comp.get(c, 0.0)) * G
+                                        Q_abs += moles_absorbed * _HEAT_OF_ABSORPTION[c]
+                                Cp_solvent = 3500.0  # J/(kg·K), ~aqueous amine
+                                delta_T = Q_abs * 1000.0 / (mf2 * Cp_solvent) if mf2 > 0.01 else 0.0
+                                T_out2 = T_avg + min(delta_T, 60.0)  # cap at +60K
+                            else:
+                                T_out1 = T_avg
+                                T_out2 = T_avg
 
                             eq_res["numberOfStages"] = n_stages
                             eq_res["pressure"] = round(_pa_to_kpa(P_op), 3)
+
+                            # Flash outlet streams for real enthalpies
+                            flash_o1 = self._flash_tp(list(out1_comp.keys()), list(out1_comp.values()), T_out1, P_op, property_package)
+                            flash_o2 = self._flash_tp(list(out2_comp.keys()), list(out2_comp.values()), T_out2, P_op, property_package)
+                            h_o1 = flash_o1["H"] / (flash_o1["MW_mix"] / 1000.0) if flash_o1 and flash_o1.get("MW_mix", 0) > 0 else feed1.get("enthalpy", 0.0)
+                            h_o2 = flash_o2["H"] / (flash_o2["MW_mix"] / 1000.0) if flash_o2 and flash_o2.get("MW_mix", 0) > 0 else feed2.get("enthalpy", 0.0)
 
                             outlets["out-1"] = {
                                 "temperature": T_out1,
                                 "pressure": P_op,
                                 "mass_flow": max(mf_out1, 1e-10),
                                 "vapor_fraction": 1.0 if ntype == "Absorber" else 0.5,
-                                "enthalpy": feed1.get("enthalpy", 0.0),
+                                "enthalpy": h_o1,
                                 "composition": out1_comp,
                             }
                             outlets["out-2"] = {
@@ -2353,7 +2575,7 @@ class DWSIMEngine:
                                 "pressure": P_op,
                                 "mass_flow": max(mf_out2, 1e-10),
                                 "vapor_fraction": 0.0 if ntype == "Absorber" else 0.0,
-                                "enthalpy": feed2.get("enthalpy", 0.0),
+                                "enthalpy": h_o2,
                                 "composition": out2_comp,
                             }
                             logs.append(f"{name}: {n_stages} stages, {ntype}")
@@ -2576,6 +2798,62 @@ class DWSIMEngine:
                             outlets["out-1"] = {"temperature": T_in, "pressure": P_out, "mass_flow": filtrate_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": dict(comp)}
                             outlets["out-2"] = {"temperature": T_in, "pressure": P_in, "mass_flow": cake_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": dict(comp)}
                             logs.append(f"{name}: eff={efficiency * 100:.0f}%, ΔP={_pa_to_kpa(dp):.1f} kPa, filtrate={filtrate_flow:.4f}, cake={cake_flow:.4f}")
+
+                        elif ntype == "PipeSegment":
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            comp = inlet.get("composition", {})
+                            vf_in = inlet.get("vapor_fraction", 0.0)
+
+                            pipe_length = float(params.get("length", 100))
+                            pipe_dia = float(params.get("diameter", 0.1))
+                            pipe_rough = float(params.get("roughness", 0.000045))
+                            pipe_elev = float(params.get("elevation", 0))
+                            n_elbows = int(params.get("elbows90", 0))
+                            n_tees = int(params.get("tees", 0))
+                            n_gvalves = int(params.get("gateValves", 0))
+
+                            # Get density and viscosity from flash
+                            comp_names = list(comp.keys())
+                            zs_pipe = [float(v) for v in comp.values()]
+                            rho = self._get_density(comp_names, zs_pipe, T_in, P_in, property_package) if comp_names else 1000.0
+                            mu = 0.001  # default water viscosity Pa·s
+                            if comp_names:
+                                flash_pipe = self._flash_tp(comp_names, zs_pipe, T_in, P_in, property_package)
+                                if flash_pipe:
+                                    if vf_in > 0.5 and flash_pipe.get("mu_gas"):
+                                        mu = flash_pipe["mu_gas"]
+                                    elif flash_pipe.get("mu_liquid"):
+                                        mu = flash_pipe["mu_liquid"]
+
+                            from app.services.hydraulics_engine import compute_hydraulics
+                            hyd_result = compute_hydraulics(
+                                mass_flow_rate=mf, density=rho, viscosity=mu,
+                                length=pipe_length, diameter=pipe_dia,
+                                roughness=pipe_rough, elevation=pipe_elev,
+                                elbows_90=n_elbows, tees=n_tees, gate_valves=n_gvalves,
+                            )
+
+                            dp_pa = hyd_result.get("pressure_drop_kpa", 0) * 1000.0
+                            P_out = max(P_in - dp_pa, 1000.0)
+
+                            eq_res["pressureDrop"] = round(hyd_result.get("pressure_drop_kpa", 0), 3)
+                            eq_res["velocity"] = round(hyd_result.get("velocity_m_s", 0), 4)
+                            eq_res["reynoldsNumber"] = hyd_result.get("reynolds_number", 0)
+                            eq_res["frictionFactor"] = hyd_result.get("friction_factor", 0)
+                            eq_res["flowRegime"] = hyd_result.get("flow_regime", "")
+                            eq_res["erosionalVelocity"] = hyd_result.get("erosional_velocity_m_s", 0)
+                            eq_res["erosionalRatio"] = hyd_result.get("erosional_ratio", 0)
+                            eq_res["erosionalOk"] = hyd_result.get("erosional_ok", True)
+                            eq_res["outletTemperature"] = round(_k_to_c(T_in), 2)
+                            eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 3)
+
+                            outlet = dict(inlet)
+                            outlet["pressure"] = P_out
+                            outlets["out-1"] = outlet
+                            logs.append(f"{name}: ΔP={hyd_result.get('pressure_drop_kpa', 0):.3f} kPa, V={hyd_result.get('velocity_m_s', 0):.2f} m/s, Re={hyd_result.get('reynolds_number', 0):.0f}")
 
                         else:
                             # Unknown equipment – pass through
@@ -2876,9 +3154,214 @@ class DWSIMEngine:
                 except Exception:
                     pass
 
-            # Build stream results from edges (convert to frontend units)
-            stream_results: dict[str, Any] = {}
+            # Process ProductStream nodes — read from upstream port conditions
+            for ps_node in product_stream_nodes:
+                ps_id = ps_node.get("id", "")
+                ps_name = ps_node.get("name", ps_id)
+                try:
+                    # Find upstream condition
+                    ps_inlets = upstream.get(ps_id, [])
+                    if ps_inlets:
+                        src_id, _sh, _th = ps_inlets[0]
+                        # Find matching source outlet
+                        cond = None
+                        for tgt_id, sh2, _th2 in downstream.get(src_id, []):
+                            if tgt_id == ps_id:
+                                cond = port_conditions.get((src_id, sh2))
+                                break
+                        if cond:
+                            T_c = _k_to_c(cond["temperature"])
+                            P_kpa = _pa_to_kpa(cond["pressure"])
+                            mf = cond.get("mass_flow", 0.0)
+                            vf = cond.get("vapor_fraction", 0.0)
+                            comp = cond.get("composition", {})
+                            equipment_results[ps_id] = {
+                                "equipment_id": ps_id,
+                                "equipment_type": "ProductStream",
+                                "name": ps_name,
+                                "outletTemperature": T_c,
+                                "outletPressure": P_kpa,
+                                "massFlow": mf,
+                                "vaporFraction": vf,
+                                "composition": comp,
+                                "inlet_streams": {
+                                    "in-1": {
+                                        "temperature": T_c,
+                                        "pressure": P_kpa,
+                                        "flowRate": mf,
+                                        "vapor_fraction": vf,
+                                        "composition": comp,
+                                    },
+                                },
+                            }
+                            logs.append(f"Product stream '{ps_name}': T={T_c:.1f}°C, P={P_kpa:.1f} kPa, flow={mf:.3f} kg/s, VF={vf:.3f}")
+                        else:
+                            equipment_results[ps_id] = {
+                                "equipment_id": ps_id,
+                                "equipment_type": "ProductStream",
+                                "name": ps_name,
+                                "error": "No upstream conditions available",
+                            }
+                    else:
+                        equipment_results[ps_id] = {
+                            "equipment_id": ps_id,
+                            "equipment_type": "ProductStream",
+                            "name": ps_name,
+                            "error": "Product stream has no inlet connection",
+                        }
+                except Exception as exc:
+                    equipment_results[ps_id] = {
+                        "equipment_id": ps_id,
+                        "equipment_type": "ProductStream",
+                        "name": ps_name,
+                        "error": str(exc),
+                    }
+                    has_errors = True
+
+            # Process DesignSpec nodes — outer secant/bisection loop
+            for ds_node in design_spec_nodes:
+                ds_id = ds_node.get("id", "")
+                ds_name = ds_node.get("name", ds_id)
+                ds_params = ds_node.get("parameters", {})
+                try:
+                    target_stream_id = ds_params.get("targetStreamId", "")
+                    target_property = ds_params.get("targetProperty", "temperature")
+                    target_value = float(ds_params.get("targetValue", 0))
+                    manip_node_id = ds_params.get("manipulatedNodeId", "")
+                    manip_param = ds_params.get("manipulatedParam", "")
+                    lower_bound = float(ds_params.get("lowerBound", 0))
+                    upper_bound = float(ds_params.get("upperBound", 1000))
+                    tolerance = float(ds_params.get("tolerance", 0.01))
+
+                    if not target_stream_id or not manip_node_id or not manip_param:
+                        equipment_results[ds_id] = {
+                            "equipment_id": ds_id, "equipment_type": "DesignSpec",
+                            "name": ds_name, "error": "Missing target or manipulated variable",
+                        }
+                        continue
+
+                    # Property mapping for equipment results
+                    prop_map = {
+                        "temperature": "outletTemperature",
+                        "pressure": "outletPressure",
+                        "flowRate": "massFlow",
+                        "vapor_fraction": "vaporFraction",
+                    }
+                    result_key = prop_map.get(target_property, target_property)
+
+                    def _get_target_value(eq_results_local: dict) -> float | None:
+                        """Extract target value from current results."""
+                        tr = eq_results_local.get(target_stream_id, {})
+                        v = tr.get(result_key)
+                        if v is None:
+                            return None
+                        return float(v)
+
+                    # Secant method with bisection fallback
+                    a, b = lower_bound, upper_bound
+                    x0_ds, x1_ds = a, a + (b - a) * 0.1
+                    f0 = None
+                    ds_converged = False
+                    ds_iterations = 0
+
+                    for ds_iter in range(30):
+                        ds_iterations = ds_iter + 1
+                        # Set manipulated param
+                        for n in nodes:
+                            if n.get("id") == manip_node_id:
+                                n_params = n.get("parameters", n.get("data", {}).get("parameters", {}))
+                                n_params[manip_param] = x1_ds
+                                break
+
+                        # Re-run simulation (simplified: just re-execute _simulate_basic)
+                        # We re-use the current method but this is a simplified inner call
+                        inner_result = await self.simulate({
+                            "nodes": [dict(n) for n in nodes],
+                            "edges": [dict(e) for e in edges],
+                            "property_package": property_package,
+                            "simulation_basis": simulation_basis,
+                        })
+                        inner_eq = inner_result.get("results", inner_result).get("equipment_results", inner_result.get("equipment_results", {}))
+                        current_val = _get_target_value(inner_eq)
+
+                        if current_val is None:
+                            logs.append(f"WARNING: DesignSpec '{ds_name}' — cannot read target value")
+                            break
+
+                        f1 = current_val - target_value
+                        if abs(f1) < tolerance:
+                            ds_converged = True
+                            break
+
+                        if f0 is not None and abs(f1 - f0) > 1e-12:
+                            # Secant step
+                            x_new = x1_ds - f1 * (x1_ds - x0_ds) / (f1 - f0)
+                            x_new = max(a, min(b, x_new))
+                        else:
+                            # Bisection
+                            x_new = (a + b) / 2.0
+
+                        # Update bounds for bisection fallback
+                        if f1 > 0:
+                            b = x1_ds
+                        else:
+                            a = x1_ds
+
+                        x0_ds, f0 = x1_ds, f1
+                        x1_ds = x_new
+
+                    equipment_results[ds_id] = {
+                        "equipment_id": ds_id, "equipment_type": "DesignSpec",
+                        "name": ds_name,
+                        "converged": ds_converged,
+                        "iterations": ds_iterations,
+                        "targetValue": target_value,
+                        "achievedValue": round(current_val, 4) if current_val is not None else None,
+                        "manipulatedValue": round(x1_ds, 4),
+                        "error": round(abs(f1), 6) if 'f1' in dir() else None,
+                    }
+                    if ds_converged:
+                        logs.append(f"DesignSpec '{ds_name}': converged in {ds_iterations} iter, {manip_param}={x1_ds:.4f}")
+                    else:
+                        logs.append(f"WARNING: DesignSpec '{ds_name}': did NOT converge after {ds_iterations} iter")
+                        has_errors = True
+                except Exception as exc:
+                    equipment_results[ds_id] = {
+                        "equipment_id": ds_id, "equipment_type": "DesignSpec",
+                        "name": ds_name, "error": str(exc),
+                    }
+                    has_errors = True
+
+            # Process energy stream edges — propagate duty/power from source to target
             for edge in edges:
+                edge_type = edge.get("type", "stream")
+                if edge_type != "energy-stream":
+                    continue
+                src_id = edge.get("source", "")
+                tgt_id = edge.get("target", "")
+                edge_id = edge.get("id", f"{src_id}_energy_{tgt_id}")
+                src_result = equipment_results.get(src_id, {})
+                duty_w = src_result.get("duty")
+                work_w = src_result.get("work")
+                energy_kw = None
+                if duty_w is not None:
+                    energy_kw = duty_w  # already in kW from equipment results
+                elif work_w is not None:
+                    energy_kw = work_w
+                stream_results[edge_id] = {
+                    "type": "energy",
+                    "duty_kW": energy_kw,
+                    "source": src_id,
+                    "target": tgt_id,
+                }
+                if energy_kw is not None:
+                    logs.append(f"Energy stream {src_result.get('name', src_id)} → {node_map.get(tgt_id, {}).get('name', tgt_id)}: {energy_kw:.1f} kW")
+
+            # Build stream results from edges (convert to frontend units)
+            for edge in edges:
+                edge_type = edge.get("type", "stream")
+                if edge_type == "energy-stream":
+                    continue  # already handled above
                 src = edge.get("source", "")
                 sh = edge.get("sourceHandle", "out-1")
                 edge_id = edge.get("id", f"{src}_{sh}")

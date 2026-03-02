@@ -7,6 +7,30 @@ const feedConditionParams: Record<string, ParameterDefinition> = {
 };
 
 export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
+  [EquipmentType.FeedStream]: {
+    type: EquipmentType.FeedStream,
+    label: 'Feed Stream',
+    category: EquipmentCategory.Streams,
+    icon: 'ArrowRight',
+    parameters: {
+      ...feedConditionParams,
+    },
+    ports: [
+      { id: 'out-1', name: 'Outlet', position: 'right', type: 'outlet' },
+    ],
+  },
+
+  [EquipmentType.ProductStream]: {
+    type: EquipmentType.ProductStream,
+    label: 'Product Stream',
+    category: EquipmentCategory.Streams,
+    icon: 'ArrowRight',
+    parameters: {},
+    ports: [
+      { id: 'in-1', name: 'Inlet', position: 'left', type: 'inlet' },
+    ],
+  },
+
   [EquipmentType.Mixer]: {
     type: EquipmentType.Mixer,
     label: 'Mixer',
@@ -54,6 +78,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
       { id: 'out-1', name: 'Product', position: 'right', type: 'outlet' },
+      { id: 'energy-in', name: 'Energy In', position: 'bottom', type: 'inlet' },
     ],
   },
 
@@ -71,6 +96,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
       { id: 'out-1', name: 'Product', position: 'right', type: 'outlet' },
+      { id: 'energy-out', name: 'Energy Out', position: 'bottom', type: 'outlet' },
     ],
   },
 
@@ -108,6 +134,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     ports: [
       { id: 'in-1', name: 'Inlet', position: 'left', type: 'inlet' },
       { id: 'out-1', name: 'Outlet', position: 'right', type: 'outlet' },
+      { id: 'energy-out', name: 'Power Out', position: 'bottom', type: 'outlet' },
     ],
   },
 
@@ -126,6 +153,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     ports: [
       { id: 'in-1', name: 'Inlet', position: 'left', type: 'inlet' },
       { id: 'out-1', name: 'Outlet', position: 'right', type: 'outlet' },
+      { id: 'energy-out', name: 'Power Out', position: 'bottom', type: 'outlet' },
     ],
   },
 
@@ -139,6 +167,9 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       outletPressure: { label: 'Outlet Pressure', unit: 'kPa', default: 101.325, min: 0, max: 100000, type: 'number' },
       cv: { label: 'Cv', unit: '', default: 0, min: 0, max: 100000, type: 'number' },
       chokedFlowCheck: { label: 'Choked Flow Check', unit: '', default: false, type: 'boolean' },
+      sizingMode: { label: 'ISA 60534 Sizing', unit: '', default: false, type: 'boolean' },
+      valveType: { label: 'Valve Type', unit: '', default: 'globe', type: 'string' },
+      pipeDiameter: { label: 'Pipe Diameter', unit: 'm', default: 0.1, min: 0.01, max: 2, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Inlet', position: 'left', type: 'inlet' },
@@ -166,6 +197,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       { id: 'in-cold', name: 'Cold Inlet', position: 'left', type: 'inlet' },
       { id: 'out-hot', name: 'Hot Outlet', position: 'right', type: 'outlet' },
       { id: 'out-cold', name: 'Cold Outlet', position: 'right', type: 'outlet' },
+      { id: 'energy-out', name: 'Duty Out', position: 'bottom', type: 'outlet' },
     ],
   },
 
@@ -188,6 +220,8 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
       { id: 'out-1', name: 'Distillate', position: 'top', type: 'outlet' },
       { id: 'out-2', name: 'Bottoms', position: 'bottom', type: 'outlet' },
+      { id: 'energy-reboiler', name: 'Reboiler Duty', position: 'bottom', type: 'inlet' },
+      { id: 'energy-condenser', name: 'Condenser Duty', position: 'top', type: 'outlet' },
     ],
   },
 
@@ -246,6 +280,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       temperature: { label: 'Temperature', unit: '°C', default: 80, min: -273.15, max: 2000, type: 'number' },
       pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 50000, type: 'number' },
       duty: { label: 'Heat Duty', unit: 'kW', default: 0, min: -1e8, max: 1e8, type: 'number' },
+      keyReactant: { label: 'Key Reactant', unit: '', default: '', type: 'string' },
       reactionCount: { label: 'Reaction Count', unit: '', default: 1, min: 1, max: 5, type: 'number' },
       reactions: { label: 'Reactions JSON', unit: '', default: '[]', type: 'string' },
     },
@@ -374,9 +409,51 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       { id: 'out-2', name: 'Cake', position: 'bottom', type: 'outlet' },
     ],
   },
+  [EquipmentType.DesignSpec]: {
+    type: EquipmentType.DesignSpec,
+    label: 'Design Spec',
+    category: EquipmentCategory.Logical,
+    icon: 'Target',
+    parameters: {
+      targetStreamId: { label: 'Target Equipment ID', unit: '', default: '', type: 'string' },
+      targetProperty: { label: 'Target Property', unit: '', default: 'temperature', type: 'string' },
+      targetValue: { label: 'Target Value', unit: '', default: 0, min: -1e8, max: 1e8, type: 'number' },
+      manipulatedNodeId: { label: 'Manipulated Equipment ID', unit: '', default: '', type: 'string' },
+      manipulatedParam: { label: 'Manipulated Parameter', unit: '', default: '', type: 'string' },
+      lowerBound: { label: 'Lower Bound', unit: '', default: 0, min: -1e8, max: 1e8, type: 'number' },
+      upperBound: { label: 'Upper Bound', unit: '', default: 1000, min: -1e8, max: 1e8, type: 'number' },
+      tolerance: { label: 'Tolerance', unit: '', default: 0.01, min: 1e-8, max: 100, type: 'number' },
+    },
+    ports: [],
+  },
+
+  [EquipmentType.PipeSegment]: {
+    type: EquipmentType.PipeSegment,
+    label: 'Pipe Segment',
+    category: EquipmentCategory.Piping,
+    icon: 'Minus',
+    parameters: {
+      ...feedConditionParams,
+      length: { label: 'Length', unit: 'm', default: 100, min: 0.1, max: 100000, type: 'number' },
+      diameter: { label: 'Inner Diameter', unit: 'm', default: 0.1, min: 0.001, max: 10, type: 'number' },
+      roughness: { label: 'Roughness', unit: 'm', default: 0.000045, min: 0, max: 0.01, type: 'number' },
+      elevation: { label: 'Elevation Change', unit: 'm', default: 0, min: -1000, max: 1000, type: 'number' },
+      elbows90: { label: '90° Elbows', unit: '', default: 0, min: 0, max: 100, type: 'number' },
+      tees: { label: 'Tees', unit: '', default: 0, min: 0, max: 100, type: 'number' },
+      gateValves: { label: 'Gate Valves', unit: '', default: 0, min: 0, max: 100, type: 'number' },
+    },
+    ports: [
+      { id: 'in-1', name: 'Inlet', position: 'left', type: 'inlet' },
+      { id: 'out-1', name: 'Outlet', position: 'right', type: 'outlet' },
+    ],
+  },
 };
 
 export const equipmentByCategory: Record<EquipmentCategory, EquipmentDefinition[]> = {
+  [EquipmentCategory.Streams]: [
+    equipmentLibrary[EquipmentType.FeedStream],
+    equipmentLibrary[EquipmentType.ProductStream],
+  ],
   [EquipmentCategory.Mixing]: [
     equipmentLibrary[EquipmentType.Mixer],
     equipmentLibrary[EquipmentType.Splitter],
@@ -406,6 +483,12 @@ export const equipmentByCategory: Record<EquipmentCategory, EquipmentDefinition[
     equipmentLibrary[EquipmentType.CSTRReactor],
     equipmentLibrary[EquipmentType.PFRReactor],
     equipmentLibrary[EquipmentType.ConversionReactor],
+  ],
+  [EquipmentCategory.Logical]: [
+    equipmentLibrary[EquipmentType.DesignSpec],
+  ],
+  [EquipmentCategory.Piping]: [
+    equipmentLibrary[EquipmentType.PipeSegment],
   ],
 };
 
