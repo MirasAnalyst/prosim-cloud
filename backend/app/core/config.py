@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-5-mini"
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     DWSIM_PATH: str = "/opt/dwsim"
+    PORT: int = 8000
 
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
