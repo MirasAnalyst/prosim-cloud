@@ -255,6 +255,12 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 6. **Energy balance checker false positives for DistillationColumn, Cyclone, Filter**: These equipment types have internal duties (condenser/reboiler) or heuristic composition splits that don't conserve energy in the simple `Σ(mf*h)_in = Σ(mf*h)_out ± duty` check. Fix: exclude them from energy balance validation with `ntype not in ("DistillationColumn", "Cyclone", "Filter")`. **Energy balance checks must account for equipment with internal energy sources/sinks not captured in the external duty field.**
 
+### Industrial Flowsheet Review: Mistakes and Resolutions
+
+1. **Absorber used physical VLE K-values for chemical absorption systems**: PR EOS gives K_CO2=83 and K_H2S=8 for amine gas treating — 100-1000× too high because it ignores the chemical reaction (CO2 + 2 DEA → products). Absorption factor A=L/(K·G) << 1, so zero acid gas removal. Fix: added `_REACTIVE_K_EFF` table with effective K-values from Kent-Eisenberg correlations (K_CO2≈0.02, K_H2S≈0.008) with Van't Hoff temperature correction. Detect reactive systems by checking for acid-gas + amine/water compounds. **Physical VLE models (PR/SRK) cannot predict chemical absorption — use effective K-values for reactive systems (amine sweetening, SO2 scrubbing).**
+
+2. **Reactive K-value fix included "water" in `_REACTIVE_SOLVENTS` — false positive for water-only scrubbers**: CO2 in pure water follows Henry's law (K≈2-5), not amine chemistry (K≈0.02). Any CO2+water absorber without amine got 100× too much absorption. Fix: split into `_AMINE_SOLVENTS` (MEA/DEA, required for CO2/H2S) and `_AQUEOUS_REACTIVE` (SO2/NH3 work with water alone). Also stored `Q_abs` as negative `duty` in absorber `eq_res` to fix 109% energy balance error. **Reactive absorption corrections must distinguish amine-dependent (CO2/H2S) from aqueous-reactive (SO2/NH3) systems.**
+
 ### Per-Stream Component Properties: Mistakes and Resolutions
 
 1. **CSV export column mismatch — component rows had 11 columns but header had 8**: Component detail sub-rows used offset commas starting at column 7, exceeding the 8-column header. Excel showed 3 unnamed columns. Fix: unified header to 14 columns covering both stream-level and component-level data, with component rows aligning to columns 10-14. **When CSV has parent/child rows, define a single header spanning all columns so both row types align.**

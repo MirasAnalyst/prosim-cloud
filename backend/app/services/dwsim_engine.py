@@ -201,6 +201,24 @@ _HEAT_OF_ABSORPTION: dict[str, float] = {
     "ammonia": 35.0,
 }
 
+# Effective K-values for reactive (chemical) absorption systems.
+# PR/SRK EOS gives physical VLE K-values that ignore chemical reactions
+# (e.g., CO2 + 2 DEA → DEAH⁺ + DEACOO⁻). These effective K-values
+# approximate Kent-Eisenberg / eCPA results at typical absorber conditions.
+# Format: acid_gas -> (K_eff_ref, T_ref_K, dH_abs_kJ_mol for temperature correction)
+_REACTIVE_K_EFF: dict[str, tuple[float, float, float]] = {
+    "carbon dioxide": (0.02, 313.15, 84.0),   # Keff≈0.02 at 40°C in DEA/MEA
+    "hydrogen sulfide": (0.008, 313.15, 60.0),  # Keff≈0.008 at 40°C in DEA/MEA
+    "sulfur dioxide": (0.03, 313.15, 50.0),     # Keff≈0.03 at 40°C in aqueous
+    "ammonia": (0.05, 298.15, 35.0),            # Keff≈0.05 at 25°C in water
+}
+# Amine solvents that enable reactive absorption for CO2/H2S
+_AMINE_SOLVENTS: set[str] = {
+    "monoethanolamine", "diethanolamine",
+}
+# Aqueous solvents for SO2/NH3 physical+reactive absorption (no amine needed)
+_AQUEOUS_REACTIVE: set[str] = {"sulfur dioxide", "ammonia"}
+
 # C4: Solubility data for crystallizer (g solute / 100g water at various temperatures)
 # Format: compound -> list of (T_celsius, solubility_g_per_100g_water)
 _SOLUBILITY_TABLE: dict[str, list[tuple[float, float]]] = {
@@ -1920,8 +1938,15 @@ class DWSIMEngine:
                                 else:
                                     T_hot_out = T_hot_in - duty / (mf_hot * cp_hot) if mf_hot * cp_hot > 0 else T_hot_in
                             else:
-                                # Default: 10 K approach on hot side
-                                T_hot_out = T_cold_in + 10.0
+                                # Default: 30% of driving force as approach (prevents excessive duty with large ΔT)
+                                dT_available = T_hot_in - T_cold_in
+                                approach_hx = max(10.0, 0.3 * dT_available)
+                                T_hot_out = T_cold_in + approach_hx
+                                logs.append(
+                                    f"{name}: no outlet temps specified — using {approach_hx:.0f}K approach "
+                                    f"(T_hot_out = {_k_to_c(T_hot_out):.0f}°C). Specify hotOutletTemp or "
+                                    f"coldOutletTemp for accuracy."
+                                )
                                 if h_hot_in_kg is not None:
                                     flash_h_out = self._flash_tp(hot_comp_names, hot_zs, T_hot_out, P_hot_in - dp_hot, property_package)
                                     if flash_h_out and flash_h_out.get("MW_mix", 0) > 0:
@@ -2455,6 +2480,20 @@ class DWSIMEngine:
 
                                             # M6: Partial condenser support
                                             condenser_type = str(params.get("condenserType", "total")).lower()
+
+                                            # Auto-detect cryogenic distillation: switch to partial condenser
+                                            if condenser_type == "total" and T_dist < 123.15:  # -150°C in K
+                                                condenser_type = "partial"
+                                                logs.append(
+                                                    f"WARNING: {name} distillate bubble point {_k_to_c(T_dist):.0f}°C — "
+                                                    f"auto-switched to partial condenser for cryogenic column"
+                                                )
+                                            elif condenser_type == "total" and T_dist < 173.15:  # -100°C in K
+                                                logs.append(
+                                                    f"WARNING: {name} total condenser produces distillate at "
+                                                    f"{_k_to_c(T_dist):.0f}°C — consider condenserType='partial'"
+                                                )
+
                                             dist_vf = 0.0
                                             if condenser_type == "partial":
                                                 dist_vf = 1.0  # distillate exits as vapor
@@ -2705,7 +2744,17 @@ class DWSIMEngine:
                                 term2 = 1.75 * rho * abs(u_sup) * (1 - eps) / (d_p * eps ** 3)
                                 dPdz = (term1 + term2) * abs(u_sup)
                                 dp_total = dPdz * length
-                                P_out_pfr = max(P_out - dp_total, 1000.0)
+                                # Cap at 80% of operating pressure to prevent vacuum blowthrough
+                                dp_max = 0.8 * P_out
+                                if dp_total > dp_max:
+                                    logs.append(
+                                        f"WARNING: {name} Ergun ΔP ({_pa_to_kpa(dp_total):.0f} kPa) exceeds 80% of "
+                                        f"operating pressure ({_pa_to_kpa(P_out):.0f} kPa) — capped at "
+                                        f"{_pa_to_kpa(dp_max):.0f} kPa. Check particle diameter "
+                                        f"({d_p*1000:.1f} mm) and void fraction ({eps:.2f})."
+                                    )
+                                    dp_total = dp_max
+                                P_out_pfr = max(P_out - dp_total, 10000.0)  # Floor: 10 kPa
                                 outlet["pressure"] = P_out_pfr
                                 eq_res["pressureDrop"] = round(_pa_to_kpa(dp_total), 2)
                                 logs.append(f"  PFR Ergun ΔP = {_pa_to_kpa(dp_total):.1f} kPa")
@@ -2774,6 +2823,11 @@ class DWSIMEngine:
                                 if total_z > 0:
                                     out_comp = {k: v / total_z for k, v in out_comp.items()}
                                 logs.append(f"{name}: key reactant '{key_reactant}' z={z_before:.4f} → {out_comp.get(key_reactant, 0):.4f}")
+                                if consumed > 1e-6:
+                                    logs.append(
+                                        f"WARNING: {name} uses 'products' pseudo-component — energy balance will be "
+                                        f"approximate (missing heat of reaction). Specify real product species for accuracy."
+                                    )
 
                             # Flash outlet for enthalpy (T3-07: filter pseudo-components)
                             clean_comp = _clean_composition(out_comp)
@@ -2888,17 +2942,78 @@ class DWSIMEngine:
                             K_vals: dict[str, float] = {}
                             flash_abs = self._flash_tp(cn, zs_comb, T_avg, P_op, property_package)
                             if flash_abs:
-                                gas_zs = flash_abs["gas_zs"]
-                                liq_zs = flash_abs["liquid_zs"]
-                                for i, c in enumerate(cn):
-                                    x_i = liq_zs[i] if liq_zs[i] > 1e-12 else 1e-12
-                                    y_i = gas_zs[i] if gas_zs[i] > 1e-12 else 1e-12
-                                    K_vals[c] = y_i / x_i
+                                vf_abs = flash_abs.get("VF", 0.0)
+                                if 0.001 < vf_abs < 0.999:
+                                    # Two-phase result: K = y/x directly
+                                    gas_zs_abs = flash_abs["gas_zs"]
+                                    liq_zs_abs = flash_abs["liquid_zs"]
+                                    for i, c in enumerate(cn):
+                                        x_i = liq_zs_abs[i] if liq_zs_abs[i] > 1e-12 else 1e-12
+                                        y_i = gas_zs_abs[i] if gas_zs_abs[i] > 1e-12 else 1e-12
+                                        K_vals[c] = y_i / x_i
+                                else:
+                                    # Single-phase: bubble-point flash for equilibrium K-values
+                                    bp_ok = False
+                                    try:
+                                        state_bp = flash_abs["flasher"].flash(VF=0, P=P_op, zs=flash_abs["zs"])
+                                        gas_bp = getattr(state_bp, 'gas', None)
+                                        liq_bp = getattr(state_bp, 'liquid0', None)
+                                        if gas_bp and liq_bp:
+                                            for i, c in enumerate(cn):
+                                                x_i = liq_bp.zs[i] if liq_bp.zs[i] > 1e-12 else 1e-12
+                                                y_i = gas_bp.zs[i] if gas_bp.zs[i] > 1e-12 else 1e-12
+                                                K_vals[c] = y_i / x_i
+                                            bp_ok = True
+                                            logs.append(f"{name}: used bubble-point flash for K-values (combined feed VF={vf_abs:.3f})")
+                                    except Exception as e_bp:
+                                        logs.append(f"{name}: bubble-point flash failed ({e_bp}), using Wilson K")
+                                    if not bp_ok:
+                                        # Wilson K-value correlation fallback
+                                        consts = flash_abs.get("constants")
+                                        if consts and hasattr(consts, 'Tcs'):
+                                            for i, c in enumerate(cn):
+                                                Tc_i = consts.Tcs[i]
+                                                Pc_i = consts.Pcs[i]
+                                                omega_i = consts.omegas[i]
+                                                K_vals[c] = (Pc_i / P_op) * math.exp(
+                                                    5.37 * (1.0 + omega_i) * (1.0 - Tc_i / T_avg)
+                                                )
+                                            logs.append(f"{name}: used Wilson K-value correlation")
+                                        else:
+                                            for c in cn:
+                                                mw = _get_mw(c)
+                                                K_vals[c] = max(0.1, 5.0 - mw / 50.0)
                             else:
                                 # Fallback: light components K>1, heavy K<1
                                 for c in cn:
                                     mw = _get_mw(c)
                                     K_vals[c] = max(0.1, 5.0 - mw / 50.0)
+
+                            # Detect reactive absorption: acid gas + amine solvent
+                            # PR/SRK EOS gives physical VLE K-values that are 100-1000x too high
+                            # for systems where chemical reaction drives absorption
+                            acid_gases_present = {c for c in comp_names_all if c in _REACTIVE_K_EFF}
+                            amines_present = {c for c in comp_names_all if c in _AMINE_SOLVENTS}
+                            has_water = "water" in comp_names_all
+                            if acid_gases_present and ntype == "Absorber":
+                                # CO2/H2S require amine solvent; SO2/NH3 work with water alone
+                                reactive_comps: set[str] = set()
+                                for c in acid_gases_present:
+                                    if c in _AQUEOUS_REACTIVE and has_water:
+                                        reactive_comps.add(c)
+                                    elif amines_present:
+                                        reactive_comps.add(c)
+                                if reactive_comps:
+                                    R_gas = 8.314e-3  # kJ/(mol·K)
+                                    for c in reactive_comps:
+                                        K_ref, T_ref, dH = _REACTIVE_K_EFF[c]
+                                        K_eff = K_ref * math.exp(-dH / R_gas * (1.0 / T_avg - 1.0 / T_ref))
+                                        K_eff = max(K_eff, 1e-4)  # floor
+                                        K_vals[c] = K_eff
+                                    logs.append(
+                                        f"{name}: reactive absorption detected — using effective K-values for "
+                                        f"{', '.join(sorted(reactive_comps))} (chemical + physical equilibrium)"
+                                    )
 
                             # C5: Kremser equation with consistent molar basis
                             # Absorber: feed1=gas (in-1), feed2=solvent (in-2)
@@ -2987,6 +3102,9 @@ class DWSIMEngine:
 
                             eq_res["numberOfStages"] = n_stages
                             eq_res["pressure"] = round(_pa_to_kpa(P_op), 3)
+                            # Store heat of absorption as negative duty (exothermic)
+                            if ntype == "Absorber" and Q_abs > 0:
+                                eq_res["duty"] = round(-Q_abs, 3)  # kW, negative = exothermic
 
                             # Flash outlet streams for real enthalpies and VF (H7)
                             flash_o1 = self._flash_tp(list(out1_comp.keys()), list(out1_comp.values()), T_out1, P_op, property_package)
@@ -3138,32 +3256,57 @@ class DWSIMEngine:
                             liquid_flow = mf * (1 - mass_vap_frac)
 
                             # H3: Split liquid into light/heavy — user-configurable fraction
+                            # Polarity/density-based assignment: aqueous compounds → heavy liquid,
+                            # hydrocarbons → light liquid (matches HYSYS/DWSIM convention)
+                            _AQUEOUS_COMPOUNDS = {
+                                "water", "monoethanolamine", "diethanolamine",
+                                "methanol", "ethanol", "1-propanol", "2-propanol",
+                                "acetic acid", "formic acid", "formaldehyde",
+                                "ammonia", "hydrogen sulfide", "carbon dioxide",
+                            }
                             light_zs = dict(liquid_comp)
                             heavy_zs = dict(liquid_comp)
                             light_frac = float(params.get("lightLiquidFraction", 0.5))
                             light_frac = max(0.0, min(1.0, light_frac))
                             if len(comp_names) >= 2 and liquid_flow > 0:
-                                # MW-based heuristic for composition split
-                                mws = [_get_mw(c) for c in comp_names]
                                 liq_zs_list = [liquid_comp.get(c, 0.0) for c in comp_names]
-                                avg_mw = sum(m * z for m, z in zip(mws, liq_zs_list))
                                 l_sum, h_sum = 0.0, 0.0
                                 lz, hz = {}, {}
-                                for c, z, mw in zip(comp_names, liq_zs_list, mws):
-                                    if mw <= avg_mw:
-                                        lz[c] = z
-                                        l_sum += z
-                                    else:
+                                for c, z in zip(comp_names, liq_zs_list):
+                                    if z < 1e-15:
+                                        continue
+                                    c_lower = c.lower()
+                                    is_aqueous = c_lower in _AQUEOUS_COMPOUNDS
+                                    if not is_aqueous:
+                                        # Non-aqueous: check pure liquid density > 900 kg/m³
+                                        try:
+                                            flash_pure = self._flash_tp([c], [1.0], T_in, P_in, property_package)
+                                            if flash_pure and flash_pure.get("rho_liquid") and flash_pure["rho_liquid"] > 900:
+                                                is_aqueous = True
+                                        except Exception:
+                                            pass
+                                    if is_aqueous:
                                         hz[c] = z
                                         h_sum += z
+                                    else:
+                                        lz[c] = z
+                                        l_sum += z
+                                # Dissolved gases (not classified): distribute proportionally
+                                for c, z in zip(comp_names, liq_zs_list):
+                                    if z >= 1e-15 and c not in lz and c not in hz:
+                                        if l_sum + h_sum > 0:
+                                            frac_l = l_sum / (l_sum + h_sum)
+                                            lz[c] = z * frac_l
+                                            hz[c] = z * (1 - frac_l)
+                                            l_sum += lz[c]
+                                            h_sum += hz[c]
                                 if l_sum > 0:
                                     light_zs = {c: v / l_sum for c, v in lz.items()}
                                 if h_sum > 0:
                                     heavy_zs = {c: v / h_sum for c, v in hz.items()}
                                 if not params.get("lightLiquidFraction"):
-                                    # Use heuristic only if user didn't specify
                                     light_frac = l_sum / (l_sum + h_sum) if (l_sum + h_sum) > 0 else 0.5
-                                    logs.append(f"WARNING: {name} liquid split is MW-based heuristic — specify lightLiquidFraction for accuracy")
+                                    logs.append(f"WARNING: {name} liquid split is polarity-based heuristic — specify lightLiquidFraction for accuracy")
 
                             eq_res["vaporFraction"] = round(VF, 4)
                             eq_res["vaporFlow"] = round(vapor_flow, 4)
@@ -3576,10 +3719,10 @@ class DWSIMEngine:
 
                 # Energy balance check (Q/W from equipment results)
                 # M10: Skip duty/work adjustment for HeatExchanger (internal heat transfer, not external Q)
-                # Skip DistillationColumn entirely (internal condenser + reboiler duties make
-                # stream-only balance meaningless), and Cyclone/Filter (heuristic composition
-                # split without mixing enthalpy correction)
-                if inlet_mass > 0 and outlet_mass > 0 and ntype not in ("DistillationColumn", "Cyclone", "Filter"):
+                # Skip DistillationColumn (internal condenser/reboiler), Cyclone/Filter (heuristic splits),
+                # ConversionReactor/PFRReactor ("products" pseudo-component has no thermo properties)
+                _EB_SKIP = ("DistillationColumn", "Cyclone", "Filter", "ConversionReactor", "PFRReactor")
+                if inlet_mass > 0 and outlet_mass > 0 and ntype not in _EB_SKIP:
                     if ntype == "HeatExchanger":
                         # For HX, check Σ(mf*h)_in ≈ Σ(mf*h)_out directly (no external Q)
                         denom = max(abs(inlet_enthalpy_rate), abs(outlet_enthalpy_rate), 1e-6)
