@@ -457,6 +457,45 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       { id: 'out-1', name: 'Outlet', position: 'right', type: 'outlet' },
     ],
   },
+
+  [EquipmentType.EquilibriumReactor]: {
+    type: EquipmentType.EquilibriumReactor,
+    label: 'Equilibrium Reactor',
+    category: EquipmentCategory.Reaction,
+    icon: 'FlaskRound',
+    parameters: {
+      ...feedConditionParams,
+      outletTemperature: { label: 'Outlet Temperature', unit: '°C', default: 500, min: -273.15, max: 3000, type: 'number' },
+      pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 100000, type: 'number' },
+      stoichiometry: { label: 'Stoichiometry (JSON)', unit: '', default: '{"reactants":{"carbon monoxide":1,"water":1},"products":{"carbon dioxide":1,"hydrogen":1}}', type: 'string' },
+      keqA: { label: 'Keq ln(A)', unit: '', default: 5.0, min: -50, max: 50, type: 'number' },
+      keqB: { label: 'Keq B/T', unit: 'K', default: 4000, min: -50000, max: 50000, type: 'number' },
+      duty: { label: 'Duty', unit: 'kW', default: 0, min: -1e8, max: 1e8, type: 'number' },
+    },
+    ports: [
+      { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
+      { id: 'out-1', name: 'Product', position: 'right', type: 'outlet' },
+      { id: 'energy-in', name: 'Energy In', position: 'bottom', type: 'inlet' },
+    ],
+  },
+
+  [EquipmentType.GibbsReactor]: {
+    type: EquipmentType.GibbsReactor,
+    label: 'Gibbs Reactor',
+    category: EquipmentCategory.Reaction,
+    icon: 'FlaskRound',
+    parameters: {
+      ...feedConditionParams,
+      outletTemperature: { label: 'Outlet Temperature', unit: '°C', default: 800, min: -273.15, max: 3000, type: 'number' },
+      pressure: { label: 'Pressure', unit: 'kPa', default: 101.325, min: 0, max: 100000, type: 'number' },
+      duty: { label: 'Duty', unit: 'kW', default: 0, min: -1e8, max: 1e8, type: 'number' },
+    },
+    ports: [
+      { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
+      { id: 'out-1', name: 'Product', position: 'right', type: 'outlet' },
+      { id: 'energy-in', name: 'Energy In', position: 'bottom', type: 'inlet' },
+    ],
+  },
 };
 
 export const equipmentByCategory: Record<EquipmentCategory, EquipmentDefinition[]> = {
@@ -493,6 +532,8 @@ export const equipmentByCategory: Record<EquipmentCategory, EquipmentDefinition[
     equipmentLibrary[EquipmentType.CSTRReactor],
     equipmentLibrary[EquipmentType.PFRReactor],
     equipmentLibrary[EquipmentType.ConversionReactor],
+    equipmentLibrary[EquipmentType.EquilibriumReactor],
+    equipmentLibrary[EquipmentType.GibbsReactor],
   ],
   [EquipmentCategory.Logical]: [
     equipmentLibrary[EquipmentType.DesignSpec],

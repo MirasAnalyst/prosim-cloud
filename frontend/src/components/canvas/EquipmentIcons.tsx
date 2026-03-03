@@ -26,6 +26,8 @@ const shapeData: Record<string, { vw: number; vh: number; baseSize: number }> = 
   [EquipmentType.Filter]: { vw: 40, vh: 50, baseSize: 75 },
   [EquipmentType.DesignSpec]: { vw: 40, vh: 40, baseSize: 60 },
   [EquipmentType.PipeSegment]: { vw: 60, vh: 24, baseSize: 90 },
+  [EquipmentType.EquilibriumReactor]: { vw: 40, vh: 56, baseSize: 80 },
+  [EquipmentType.GibbsReactor]: { vw: 40, vh: 56, baseSize: 80 },
 };
 
 /** Compute pixel dimensions for the canvas node, preserving aspect ratio. */
@@ -379,6 +381,32 @@ export function EquipmentIcon({ type, width, height, selected = false }: Equipme
           <rect x="2" y="6" width="6" height="12" rx="1" fill={fill} stroke={stroke} strokeWidth={SW} />
           <rect x="8" y="8" width="44" height="8" fill={fill} stroke={stroke} strokeWidth={SW} />
           <rect x="52" y="6" width="6" height="12" rx="1" fill={fill} stroke={stroke} strokeWidth={SW} />
+        </svg>
+      );
+
+    // ── Equilibrium Reactor: vertical cylinder with "Eq" label ──
+    case EquipmentType.EquilibriumReactor:
+      return (
+        <svg {...svgProps}>
+          <path d="M6,12 L6,44 A14,6 0 0,0 34,44 L34,12 Z"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <ellipse cx="20" cy="12" rx="14" ry="6"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <text x="20" y="33" textAnchor="middle" fill="#059669"
+            fontSize="11" fontWeight="bold" fontFamily="Arial, sans-serif">Eq</text>
+        </svg>
+      );
+
+    // ── Gibbs Reactor: vertical cylinder with "G" label ──
+    case EquipmentType.GibbsReactor:
+      return (
+        <svg {...svgProps}>
+          <path d="M6,12 L6,44 A14,6 0 0,0 34,44 L34,12 Z"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <ellipse cx="20" cy="12" rx="14" ry="6"
+            fill={fill} stroke={stroke} strokeWidth={SW} />
+          <text x="20" y="33" textAnchor="middle" fill="#7C3AED"
+            fontSize="14" fontWeight="bold" fontFamily="Arial, sans-serif">G</text>
         </svg>
       );
 

@@ -1,13 +1,168 @@
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useUnitStore } from '../../stores/unitStore';
-import { SimulationStatus, type StreamConditions } from '../../types';
+import { SimulationStatus, type StreamConditions, type PhaseProperties } from '../../types';
 import { X, ChevronDown, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 
 function fmt(v: number | undefined | null, decimals = 4): string {
   if (v == null || isNaN(v)) return '-';
   return v.toFixed(decimals);
+}
+
+function fmtSci(v: number | undefined | null): string {
+  if (v == null || isNaN(v)) return '-';
+  if (Math.abs(v) < 0.001 || Math.abs(v) > 1e6) return v.toExponential(3);
+  return v.toFixed(4);
+}
+
+function TransportPropertiesSection({ conditions }: { conditions: StreamConditions }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const hasAny =
+    conditions.density != null ||
+    conditions.viscosity != null ||
+    conditions.thermal_conductivity != null ||
+    conditions.surface_tension != null ||
+    conditions.Cp_mass != null ||
+    conditions.Cv_mass != null ||
+    conditions.Z_factor != null ||
+    conditions.volumetric_flow != null;
+
+  if (!hasAny) return null;
+
+  return (
+    <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 text-xs font-semibold text-purple-400 uppercase tracking-wider mb-2 hover:text-purple-300 transition-colors w-full"
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Transport Properties
+      </button>
+      {expanded && (
+        <div className="space-y-1.5">
+          {conditions.density != null && (
+            <PropertyRow label="Density" value={fmt(conditions.density, 2)} unit="kg/m³" />
+          )}
+          {conditions.viscosity != null && (
+            <PropertyRow label="Viscosity" value={fmtSci(conditions.viscosity)} unit="Pa·s" />
+          )}
+          {conditions.thermal_conductivity != null && (
+            <PropertyRow label="Thermal Cond." value={fmtSci(conditions.thermal_conductivity)} unit="W/m·K" />
+          )}
+          {conditions.surface_tension != null && (
+            <PropertyRow label="Surface Tension" value={fmtSci(conditions.surface_tension)} unit="N/m" />
+          )}
+          {conditions.Cp_mass != null && (
+            <PropertyRow label="Cp" value={fmt(conditions.Cp_mass, 2)} unit="J/kg·K" />
+          )}
+          {conditions.Cv_mass != null && (
+            <PropertyRow label="Cv" value={fmt(conditions.Cv_mass, 2)} unit="J/kg·K" />
+          )}
+          {conditions.Z_factor != null && (
+            <PropertyRow label="Z Factor" value={fmt(conditions.Z_factor, 4)} unit="" />
+          )}
+          {conditions.volumetric_flow != null && (
+            <PropertyRow label="Vol. Flow" value={fmtSci(conditions.volumetric_flow)} unit="m³/s" />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PhasePropertiesSection({ conditions }: { conditions: StreamConditions }) {
+  const [expanded, setExpanded] = useState(false);
+  const pp = conditions.phase_properties;
+  if (!pp) return null;
+
+  const VF = conditions.vapor_fraction ?? 0;
+  const hasLiquid = VF < 1.0 && pp.liquid;
+  const hasVapor = VF > 0.0 && pp.vapor;
+
+  if (!hasLiquid && !hasVapor) return null;
+
+  return (
+    <div className="border-t border-gray-200 dark:border-gray-800 pt-3">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1 text-xs font-semibold text-green-400 uppercase tracking-wider mb-2 hover:text-green-300 transition-colors w-full"
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        Phase Properties
+      </button>
+      {expanded && (
+        <div className="space-y-3">
+          {hasVapor && pp.vapor && (
+            <PhaseDetail label="Vapor Phase" phase={pp.vapor} />
+          )}
+          {hasLiquid && pp.liquid && (
+            <PhaseDetail label="Liquid Phase" phase={pp.liquid} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PhaseDetail({ label, phase }: { label: string; phase: PhaseProperties }) {
+  const [compExpanded, setCompExpanded] = useState(false);
+
+  return (
+    <div className="bg-gray-50 dark:bg-gray-800/50 rounded p-2">
+      <h4 className="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase mb-1.5">
+        {label}
+      </h4>
+      <div className="space-y-1">
+        {phase.density != null && (
+          <PropertyRow label="Density" value={fmt(phase.density, 2)} unit="kg/m³" />
+        )}
+        {phase.viscosity != null && (
+          <PropertyRow label="Viscosity" value={fmtSci(phase.viscosity)} unit="Pa·s" />
+        )}
+        {phase.thermal_conductivity != null && (
+          <PropertyRow label="Thermal Cond." value={fmtSci(phase.thermal_conductivity)} unit="W/m·K" />
+        )}
+        {phase.Cp != null && (
+          <PropertyRow label="Cp" value={fmt(phase.Cp, 2)} unit="J/mol·K" />
+        )}
+        {phase.Cv != null && (
+          <PropertyRow label="Cv" value={fmt(phase.Cv, 2)} unit="J/mol·K" />
+        )}
+        {phase.enthalpy != null && (
+          <PropertyRow label="Enthalpy" value={fmt(phase.enthalpy, 2)} unit="J/mol" />
+        )}
+        {phase.entropy != null && (
+          <PropertyRow label="Entropy" value={fmt(phase.entropy, 4)} unit="J/mol·K" />
+        )}
+        {phase.Z != null && (
+          <PropertyRow label="Z Factor" value={fmt(phase.Z, 4)} unit="" />
+        )}
+      </div>
+      {phase.composition && Object.keys(phase.composition).length > 0 && (
+        <div className="mt-1.5">
+          <button
+            onClick={() => setCompExpanded(!compExpanded)}
+            className="flex items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+          >
+            {compExpanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+            Composition
+          </button>
+          {compExpanded && (
+            <div className="mt-1 space-y-0.5">
+              {Object.entries(phase.composition).map(([name, z]) => (
+                <div key={name} className="flex justify-between text-[10px]">
+                  <span className="text-gray-500 dark:text-gray-400 truncate mr-2">{name}</span>
+                  <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(z, 6)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function StreamPropertiesDisplay({ conditions }: { conditions: StreamConditions }) {
@@ -43,6 +198,12 @@ function StreamPropertiesDisplay({ conditions }: { conditions: StreamConditions 
           )}
         </div>
       </div>
+
+      {/* Transport Properties */}
+      <TransportPropertiesSection conditions={conditions} />
+
+      {/* Phase Properties */}
+      <PhasePropertiesSection conditions={conditions} />
 
       {/* Composition (mole fractions) */}
       {conditions.composition && Object.keys(conditions.composition).length > 0 && (

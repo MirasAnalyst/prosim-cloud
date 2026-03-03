@@ -20,6 +20,8 @@ import ReliefValvePanel from '../tools/ReliefValvePanel';
 import HydraulicsPanel from '../tools/HydraulicsPanel';
 import ControlValvePanel from '../tools/ControlValvePanel';
 import PhaseEnvelopePanel from '../tools/PhaseEnvelopePanel';
+import BinaryVLEPanel from '../tools/BinaryVLEPanel';
+import ColumnProfilePanel from '../analysis/ColumnProfilePanel';
 import InsightsPanel from '../analysis/InsightsPanel';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
@@ -40,6 +42,8 @@ export default function AppLayout() {
   const [hydraulicsOpen, setHydraulicsOpen] = useState(false);
   const [controlValveOpen, setControlValveOpen] = useState(false);
   const [phaseEnvelopeOpen, setPhaseEnvelopeOpen] = useState(false);
+  const [binaryVLEOpen, setBinaryVLEOpen] = useState(false);
+  const [columnProfileOpen, setColumnProfileOpen] = useState(false);
   const [insightsOpen, setInsightsOpen] = useState(false);
   const initProject = useFlowsheetStore((s) => s.initProject);
   const theme = useThemeStore((s) => s.theme);
@@ -140,6 +144,8 @@ export default function AppLayout() {
         onToggleHydraulics={() => setHydraulicsOpen(prev => !prev)}
         onToggleControlValve={() => setControlValveOpen(prev => !prev)}
         onTogglePhaseEnvelope={() => setPhaseEnvelopeOpen(prev => !prev)}
+        onToggleBinaryVLE={() => setBinaryVLEOpen(prev => !prev)}
+        onToggleColumnProfile={() => setColumnProfileOpen(prev => !prev)}
         onToggleInsights={() => setInsightsOpen(prev => !prev)}
       />
       <div className="flex flex-1 overflow-hidden">
@@ -175,6 +181,8 @@ export default function AppLayout() {
       <HydraulicsPanel open={hydraulicsOpen} onClose={() => setHydraulicsOpen(false)} />
       <ControlValvePanel open={controlValveOpen} onClose={() => setControlValveOpen(false)} />
       <PhaseEnvelopePanel open={phaseEnvelopeOpen} onClose={() => setPhaseEnvelopeOpen(false)} />
+      <BinaryVLEPanel open={binaryVLEOpen} onClose={() => setBinaryVLEOpen(false)} />
+      <ColumnProfilePanel open={columnProfileOpen} onClose={() => setColumnProfileOpen(false)} />
       <InsightsPanel open={insightsOpen} onClose={() => setInsightsOpen(false)} />
     </div>
   );

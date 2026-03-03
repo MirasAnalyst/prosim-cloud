@@ -38,6 +38,8 @@ export default function TopNav({
   onToggleHydraulics,
   onToggleControlValve,
   onTogglePhaseEnvelope,
+  onToggleBinaryVLE,
+  onToggleColumnProfile,
   onToggleInsights,
 }: {
   onToggleSidebar?: () => void;
@@ -55,6 +57,8 @@ export default function TopNav({
   onToggleHydraulics?: () => void;
   onToggleControlValve?: () => void;
   onTogglePhaseEnvelope?: () => void;
+  onToggleBinaryVLE?: () => void;
+  onToggleColumnProfile?: () => void;
   onToggleInsights?: () => void;
 }) {
   const simulationStatus = useSimulationStore((s) => s.status);
@@ -354,6 +358,9 @@ export default function TopNav({
               <button onClick={() => { setAnalysisOpen(false); onToggleDynamic?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Dynamic Simulation
               </button>
+              <button onClick={() => { setAnalysisOpen(false); onToggleColumnProfile?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Column Profiles
+              </button>
               <button onClick={() => { setAnalysisOpen(false); onToggleInsights?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Optimization Insights
               </button>
@@ -394,6 +401,9 @@ export default function TopNav({
               <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
               <button onClick={() => { setToolsOpen(false); onTogglePhaseEnvelope?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Phase Envelope
+              </button>
+              <button onClick={() => { setToolsOpen(false); onToggleBinaryVLE?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Binary VLE Diagrams
               </button>
             </div>
           )}

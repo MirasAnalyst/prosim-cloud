@@ -495,6 +495,67 @@ async def run_insights_from_file(
         )
 
 
+@router.post("/property-advisor")
+async def property_advisor(body: dict):
+    """Recommend a property package based on compounds."""
+    from app.services.property_advisor import advise_property_package
+
+    compounds = body.get("compounds", [])
+    result = advise_property_package(compounds)
+    return result
+
+
+@router.post("/bip/matrix")
+async def get_bip_matrix(body: dict):
+    """Get BIP matrix for given compounds and property package."""
+    from app.services.bip_manager import get_bip_matrix as _get_bip
+
+    compounds = body.get("compounds", [])
+    property_package = body.get("property_package", "PengRobinson")
+    result = _get_bip(compounds, property_package)
+    return result
+
+
+@router.post("/binary-vle/txy")
+async def binary_vle_txy(body: dict):
+    """Compute Txy diagram for a binary mixture at constant pressure."""
+    from app.services.binary_vle import compute_txy
+
+    comp_a = body.get("comp_a", "")
+    comp_b = body.get("comp_b", "")
+    P = float(body.get("P", 101325))
+    property_package = body.get("property_package", "PengRobinson")
+    n_points = min(int(body.get("n_points", 51)), 200)
+
+    if not comp_a or not comp_b:
+        raise HTTPException(status_code=400, detail="comp_a and comp_b are required")
+
+    result = compute_txy(comp_a, comp_b, P, property_package, n_points)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@router.post("/binary-vle/pxy")
+async def binary_vle_pxy(body: dict):
+    """Compute Pxy diagram for a binary mixture at constant temperature."""
+    from app.services.binary_vle import compute_pxy
+
+    comp_a = body.get("comp_a", "")
+    comp_b = body.get("comp_b", "")
+    T = float(body.get("T", 373.15))
+    property_package = body.get("property_package", "PengRobinson")
+    n_points = min(int(body.get("n_points", 51)), 200)
+
+    if not comp_a or not comp_b:
+        raise HTTPException(status_code=400, detail="comp_a and comp_b are required")
+
+    result = compute_pxy(comp_a, comp_b, T, property_package, n_points)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
 @router.post("/phase-envelope")
 async def phase_envelope(body: dict):
     """Compute PT phase envelope (bubble/dew curves) for a mixture.

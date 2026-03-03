@@ -38,12 +38,14 @@ export interface EquipmentGroup {
 export interface SimulationBasis {
   compounds: string[];
   property_package?: string;
+  bip_overrides?: Record<string, number>;
 }
 
 interface FlowsheetState {
   nodes: Node<EquipmentNodeData>[];
   edges: Edge[];
   selectedNodeId: string | null;
+  selectedEdgeId: string | null;
   currentProjectId: string | null;
   projectName: string;
   saveStatus: 'saved' | 'saving' | 'error';
@@ -77,6 +79,7 @@ interface FlowsheetState {
   onEdgesChange: OnEdgesChange;
   onConnect: OnConnect;
   setSelectedNode: (id: string | null) => void;
+  setSelectedEdge: (id: string | null) => void;
   loadFlowsheet: (equipment: EquipmentData[], streams: { id: string; sourceId: string; sourcePort: string; targetId: string; targetPort: string }[]) => void;
   getUpstreamNodes: (nodeId: string) => string[];
   clear: () => void;
@@ -103,6 +106,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   nodes: [],
   edges: [],
   selectedNodeId: null,
+  selectedEdgeId: null,
   currentProjectId: null,
   projectName: 'Untitled Project',
   saveStatus: 'saved' as const,
@@ -290,7 +294,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
     }));
     const selectChange = changes.find((c) => c.type === 'select');
     if (selectChange && selectChange.type === 'select') {
-      set({ selectedNodeId: selectChange.selected ? selectChange.id : null });
+      set({ selectedNodeId: selectChange.selected ? selectChange.id : null, selectedEdgeId: null });
     }
     // Push history for remove changes
     if (changes.some((c) => c.type === 'remove')) {
@@ -306,6 +310,10 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
     set((state) => ({
       edges: applyEdgeChanges(changes, state.edges),
     }));
+    const edgeSelect = changes.find((c) => c.type === 'select');
+    if (edgeSelect && edgeSelect.type === 'select') {
+      set({ selectedEdgeId: edgeSelect.selected ? edgeSelect.id : null, selectedNodeId: null });
+    }
     if (changes.some((c) => c.type === 'remove')) {
       debounceSave(get, set);
     }
@@ -332,7 +340,11 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   },
 
   setSelectedNode: (id) => {
-    set({ selectedNodeId: id });
+    set({ selectedNodeId: id, selectedEdgeId: id ? null : get().selectedEdgeId });
+  },
+
+  setSelectedEdge: (id) => {
+    set({ selectedEdgeId: id, selectedNodeId: id ? null : get().selectedNodeId });
   },
 
   loadFlowsheet: (equipment, streams) => {
@@ -355,7 +367,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
       type: (s as any).type ?? 'stream',
       animated: (s as any).type !== 'energy-stream',
     }));
-    set({ nodes, edges, selectedNodeId: null });
+    set({ nodes, edges, selectedNodeId: null, selectedEdgeId: null });
     get().pushHistory();
     debounceSave(get, set);
   },
@@ -365,7 +377,7 @@ export const useFlowsheetStore = create<FlowsheetState>((set, get) => ({
   },
 
   clear: () => {
-    set({ nodes: [], edges: [], selectedNodeId: null });
+    set({ nodes: [], edges: [], selectedNodeId: null, selectedEdgeId: null });
   },
 
   setSimulationBasis: (basis) => {

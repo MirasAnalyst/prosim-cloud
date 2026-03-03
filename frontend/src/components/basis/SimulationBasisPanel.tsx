@@ -1,12 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
-import { X, Search, Trash2, FlaskConical } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { X, Search, Trash2, FlaskConical, Lightbulb } from 'lucide-react';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { searchCompounds, type CompoundResult } from '../../lib/api-client';
+import BIPMatrixEditor from './BIPMatrixEditor';
 
 interface SimulationBasisPanelProps {
   open: boolean;
   onClose: () => void;
+}
+
+interface AdvisorResult {
+  recommended: string;
+  reason: string;
+  alternatives: string[];
+  warnings: string[];
 }
 
 export default function SimulationBasisPanel({ open, onClose }: SimulationBasisPanelProps) {
@@ -19,8 +27,34 @@ export default function SimulationBasisPanel({ open, onClose }: SimulationBasisP
   const [searchResults, setSearchResults] = useState<CompoundResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  const [advisor, setAdvisor] = useState<AdvisorResult | null>(null);
   const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchContainerRef = useRef<HTMLDivElement>(null);
+
+  // Property package advisor — fires when compounds change
+  const fetchAdvisor = useCallback(async (compounds: string[]) => {
+    if (compounds.length === 0) {
+      setAdvisor(null);
+      return;
+    }
+    try {
+      const res = await fetch('/api/simulation/property-advisor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ compounds }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAdvisor(data);
+      }
+    } catch {
+      // silently ignore advisor errors
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAdvisor(simulationBasis.compounds);
+  }, [simulationBasis.compounds, fetchAdvisor]);
 
   // Debounced compound search
   useEffect(() => {
@@ -107,6 +141,34 @@ export default function SimulationBasisPanel({ open, onClose }: SimulationBasisP
           </select>
         </div>
 
+        {/* Property Package Advisor */}
+        {advisor && advisor.recommended !== propertyPackage && (
+          <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+            <div className="flex items-start gap-2">
+              <Lightbulb size={14} className="text-blue-500 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <div className="text-xs font-semibold text-blue-700 dark:text-blue-300 mb-1">
+                  Recommended: {advisor.recommended === 'PengRobinson' ? 'Peng-Robinson' : advisor.recommended}
+                </div>
+                <div className="text-[11px] text-blue-600 dark:text-blue-400 mb-2">
+                  {advisor.reason}
+                </div>
+                {advisor.warnings.length > 0 && (
+                  <div className="text-[10px] text-amber-600 dark:text-amber-400 mb-2">
+                    {advisor.warnings.join(' ')}
+                  </div>
+                )}
+                <button
+                  onClick={() => setPropertyPackage(advisor.recommended)}
+                  className="text-[11px] bg-blue-600 text-white px-2.5 py-1 rounded hover:bg-blue-700 transition-colors"
+                >
+                  Apply {advisor.recommended === 'PengRobinson' ? 'Peng-Robinson' : advisor.recommended}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Compound List */}
         <div>
           <label className="block text-xs text-gray-500 dark:text-gray-400 mb-2 font-semibold uppercase tracking-wider">
@@ -182,6 +244,9 @@ export default function SimulationBasisPanel({ open, onClose }: SimulationBasisP
             </div>
           )}
         </div>
+
+        {/* BIP Matrix Editor */}
+        <BIPMatrixEditor />
       </div>
     </div>
   );

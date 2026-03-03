@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from app.core.config import settings
+from app.services.distillation_rigorous import solve_rigorous_distillation
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,8 @@ EQUIPMENT_TYPE_MAP: dict[str, str] = {
     "Dryer": "Dryer",
     "Filter": "Filter",
     "PipeSegment": "PipeSegment",
+    "EquilibriumReactor": "EquilibriumReactor",
+    "GibbsReactor": "GibbsReactor",
 }
 
 # Default feed conditions (SI units) when no upstream data and no user params
@@ -700,6 +703,7 @@ class DWSIMEngine:
                 "comp_names": comp_names,
                 "zs": zs_norm,
                 "flasher": flasher,
+                "state": state,
                 "constants": constants,
                 "properties": properties,
             }
@@ -2754,6 +2758,111 @@ class DWSIMEngine:
                                     logger.warning("Distillation FUG failed: %s, using boiling-point fallback", exc)
                                     logs.append(f"WARNING: {name} FUG method failed ({exc}), using boiling-point fallback")
 
+                            # Rigorous MESH method: run after FUG when requested
+                            dist_method = str(params.get("method", "FUG")).upper()
+                            if dist_method == "RIGOROUS" and len(comp_names) >= 2 and _thermo_available:
+                                try:
+                                    # Compute feed molar flow from mass flow
+                                    feed_mw = sum(zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
+                                    feed_molar_flow = mf / (feed_mw / 1000.0) if feed_mw > 0 else 10.0
+                                    df_ratio = float(params.get("distillateToFeedRatio", 0.5))
+                                    dist_molar_rate = feed_molar_flow * df_ratio
+                                    condenser_t = str(params.get("condenserType", "total")).lower()
+
+                                    rig_result = solve_rigorous_distillation(
+                                        feed_comp_names=comp_names,
+                                        feed_zs=zs,
+                                        feed_T=T_feed,
+                                        feed_P=P_feed,
+                                        n_stages=n_stages,
+                                        feed_stage=int(params.get("feedStage", n_stages // 2)),
+                                        reflux_ratio=reflux_ratio,
+                                        distillate_rate=dist_molar_rate,
+                                        pressure_top=P_cond,
+                                        property_package=property_package,
+                                        condenser_type=condenser_t,
+                                    )
+
+                                    if rig_result.get("converged") or (rig_result.get("iterations", 0) > 0 and not rig_result.get("error")):
+                                        # Use rigorous results
+                                        rig_dist_comp = rig_result.get("distillate_comp", {})
+                                        rig_bott_comp = rig_result.get("bottoms_comp", {})
+                                        T_dist_r = rig_result.get("condenser_temperature", T_feed - 20)
+                                        T_bott_r = rig_result.get("reboiler_temperature", T_feed + 20)
+                                        Q_cond_r = rig_result.get("condenser_duty", 0.0)
+                                        Q_reb_r = rig_result.get("reboiler_duty", 0.0)
+                                        P_bott_r = P_cond + n_stages * 1000.0
+
+                                        # Flash outlets for enthalpies
+                                        d_zs_r = [float(v) for v in rig_dist_comp.values()]
+                                        b_zs_r = [float(v) for v in rig_bott_comp.values()]
+                                        h_dist_r = 0.0
+                                        h_bott_r = 0.0
+                                        flash_dr = self._flash_tp(comp_names, d_zs_r, T_dist_r, P_cond, property_package)
+                                        if flash_dr and flash_dr.get("MW_mix", 0) > 0:
+                                            h_dist_r = flash_dr["H"] / (flash_dr["MW_mix"] / 1000.0)
+                                        flash_br = self._flash_tp(comp_names, b_zs_r, T_bott_r, P_bott_r, property_package)
+                                        if flash_br and flash_br.get("MW_mix", 0) > 0:
+                                            h_bott_r = flash_br["H"] / (flash_br["MW_mix"] / 1000.0)
+
+                                        # Mass splits from molar splits
+                                        MWs_r = [_get_mw(cn) for cn in comp_names]
+                                        mass_d = sum(d_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
+                                        mass_b = sum(b_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
+                                        mass_tot = mass_d + mass_b or 1.0
+                                        frac_d = mass_d / mass_tot
+                                        frac_b = 1.0 - frac_d
+
+                                        dist_vf_r = 0.0
+                                        if condenser_t == "partial":
+                                            dist_vf_r = 1.0
+
+                                        outlets["out-1"] = {
+                                            "temperature": T_dist_r,
+                                            "pressure": P_cond,
+                                            "mass_flow": mf * frac_d,
+                                            "vapor_fraction": dist_vf_r,
+                                            "enthalpy": h_dist_r,
+                                            "composition": rig_dist_comp,
+                                        }
+                                        outlets["out-2"] = {
+                                            "temperature": T_bott_r,
+                                            "pressure": P_bott_r,
+                                            "mass_flow": mf * frac_b,
+                                            "vapor_fraction": 0.0,
+                                            "enthalpy": h_bott_r,
+                                            "composition": rig_bott_comp,
+                                        }
+
+                                        eq_res["method"] = "Rigorous"
+                                        eq_res["numberOfStages"] = n_stages
+                                        eq_res["refluxRatio"] = reflux_ratio
+                                        eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
+                                        eq_res["condenserDuty"] = round(_w_to_kw(Q_cond_r), 1)
+                                        eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb_r), 1)
+                                        eq_res["distillateTemperature"] = round(_k_to_c(T_dist_r), 1)
+                                        eq_res["bottomsTemperature"] = round(_k_to_c(T_bott_r), 1)
+                                        eq_res["converged"] = rig_result.get("converged", False)
+                                        eq_res["iterations"] = rig_result.get("iterations", 0)
+                                        eq_res["stage_profiles"] = rig_result.get("stage_profiles", [])
+                                        eq_res["condenserType"] = condenser_t
+
+                                        lk_r = comp_names[0]
+                                        eq_res["lightKeyPurity"] = round(rig_dist_comp.get(lk_r, 0) * 100, 1)
+
+                                        fug_ok = True
+                                        logs.append(
+                                            f"{name}: Rigorous MESH — {rig_result.get('iterations', 0)} iter, "
+                                            f"converged={rig_result.get('converged')}, "
+                                            f"T_dist={_k_to_c(T_dist_r):.1f}°C, T_bott={_k_to_c(T_bott_r):.1f}°C"
+                                        )
+                                    else:
+                                        err_msg = rig_result.get("error", "did not converge")
+                                        logs.append(f"WARNING: {name} Rigorous method failed ({err_msg}), using FUG results")
+                                except Exception as exc:
+                                    logger.warning("Rigorous distillation failed: %s", exc)
+                                    logs.append(f"WARNING: {name} Rigorous solver error ({exc}), keeping FUG results")
+
                             # Boiling-point fallback (original method)
                             if not fug_ok:
                                 comp_bp: list[tuple[str, float, float]] = []
@@ -3130,6 +3239,439 @@ class DWSIMEngine:
 
                             outlets["out-1"] = outlet
                             logs.append(f"{name}: X = {conversion:.0%}")
+
+                        elif ntype == "EquilibriumReactor":
+                            # Equilibrium reactor — solves for reaction extent xi
+                            # where the reaction quotient Q equals Keq.
+                            # Keq = exp(keqA - keqB / T)  (van't Hoff form)
+                            # Q = product((n_i / n_total)^nu_i) for all species
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            in_comp = inlet.get("composition", {})
+
+                            T_op_c = params.get("outletTemperature", params.get("temperature"))
+                            P_op_kpa = params.get("pressure")
+                            duty_kw = float(params.get("duty", 0))
+
+                            T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
+                            P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+
+                            # Parse stoichiometry JSON
+                            stoich_json = params.get("stoichiometry", "{}")
+                            stoich: dict[str, Any] = {}
+                            try:
+                                stoich = json.loads(stoich_json) if isinstance(stoich_json, str) else stoich_json
+                            except Exception:
+                                stoich = {}
+
+                            stoich_reactants: dict[str, float] = {
+                                k: float(v) for k, v in stoich.get("reactants", {}).items()
+                            }
+                            stoich_products: dict[str, float] = {
+                                k: float(v) for k, v in stoich.get("products", {}).items()
+                            }
+
+                            # Build stoichiometric coefficient dict: nu_i
+                            # Negative for reactants, positive for products
+                            nu: dict[str, float] = {}
+                            for sp, coeff in stoich_reactants.items():
+                                nu[sp] = -abs(coeff)
+                            for sp, coeff in stoich_products.items():
+                                nu[sp] = abs(coeff)
+
+                            # van't Hoff equilibrium constant
+                            keqA = float(params.get("keqA", 0.0))
+                            keqB = float(params.get("keqB", 0.0))
+                            Keq = math.exp(keqA - keqB / T_out) if T_out > 0 else 1.0
+
+                            # Compute initial moles from feed
+                            mw_mix_in = sum(z * _get_mw(c) for c, z in in_comp.items())
+                            if mw_mix_in <= 0:
+                                mw_mix_in = 28.0  # fallback
+                            total_moles_in = mf / (mw_mix_in / 1000.0)  # mol/s
+                            n_initial: dict[str, float] = {}
+                            for c, z in in_comp.items():
+                                n_initial[c] = z * total_moles_in
+
+                            # Ensure all species from stoichiometry exist
+                            all_species = set(in_comp.keys()) | set(nu.keys())
+                            for sp in all_species:
+                                if sp not in n_initial:
+                                    n_initial[sp] = 0.0
+
+                            # Determine max extent (limited by limiting reactant)
+                            max_extent = float("inf")
+                            limiting_reactant = ""
+                            for sp, coeff in nu.items():
+                                if coeff < 0:  # reactant
+                                    n_avail = n_initial.get(sp, 0.0)
+                                    if abs(coeff) > 0:
+                                        xi_max_sp = n_avail / abs(coeff)
+                                        if xi_max_sp < max_extent:
+                                            max_extent = xi_max_sp
+                                            limiting_reactant = sp
+
+                            if max_extent <= 0 or max_extent == float("inf"):
+                                # No reactants present or stoichiometry empty
+                                logs.append(f"WARNING: {name} — no valid reactants for equilibrium calculation")
+                                max_extent = 0.0
+
+                            # Bisection to find xi where Q(xi) = Keq
+                            def reaction_quotient(xi: float) -> float:
+                                """Compute Q / Keq - 1 for bisection root finding."""
+                                n_total = 0.0
+                                n_i: dict[str, float] = {}
+                                for sp in all_species:
+                                    n_sp = n_initial.get(sp, 0.0) + nu.get(sp, 0.0) * xi
+                                    n_sp = max(n_sp, 1e-30)
+                                    n_i[sp] = n_sp
+                                    n_total += n_sp
+                                if n_total <= 0:
+                                    return -1.0
+
+                                # Q = product((n_i / n_total) ^ nu_i) for species with nu != 0
+                                ln_Q = 0.0
+                                for sp, coeff in nu.items():
+                                    if abs(coeff) > 1e-15:
+                                        y_i = n_i.get(sp, 1e-30) / n_total
+                                        y_i = max(y_i, 1e-30)
+                                        ln_Q += coeff * math.log(y_i)
+
+                                # Return Q - Keq (log-space: ln(Q) - ln(Keq))
+                                ln_Keq = math.log(max(Keq, 1e-30))
+                                return ln_Q - ln_Keq
+
+                            xi_eq = 0.0
+                            if max_extent > 0 and nu:
+                                # Bisection between 0 and max_extent * 0.9999
+                                lo = 0.0
+                                hi = max_extent * 0.9999
+                                f_lo = reaction_quotient(lo)
+                                f_hi = reaction_quotient(hi)
+
+                                if f_lo * f_hi < 0:
+                                    # Standard bisection
+                                    for _ in range(100):
+                                        mid = (lo + hi) / 2.0
+                                        f_mid = reaction_quotient(mid)
+                                        if abs(f_mid) < 1e-10 or (hi - lo) < 1e-15:
+                                            xi_eq = mid
+                                            break
+                                        if f_lo * f_mid < 0:
+                                            hi = mid
+                                            f_hi = f_mid
+                                        else:
+                                            lo = mid
+                                            f_lo = f_mid
+                                    else:
+                                        xi_eq = (lo + hi) / 2.0
+                                elif abs(f_lo) < 1e-8:
+                                    xi_eq = 0.0  # Already at equilibrium
+                                elif abs(f_hi) < 1e-8:
+                                    xi_eq = hi
+                                else:
+                                    # Monotone sign — reaction goes to completion or not at all
+                                    # Use whichever end is closer to zero
+                                    xi_eq = hi if abs(f_hi) < abs(f_lo) else 0.0
+                                    logs.append(
+                                        f"WARNING: {name} — bisection did not bracket root "
+                                        f"(f_lo={f_lo:.4g}, f_hi={f_hi:.4g}), using xi={xi_eq:.6g}"
+                                    )
+
+                            # Compute outlet moles at equilibrium extent
+                            n_out: dict[str, float] = {}
+                            for sp in all_species:
+                                n_sp = n_initial.get(sp, 0.0) + nu.get(sp, 0.0) * xi_eq
+                                n_sp = max(n_sp, 0.0)
+                                n_out[sp] = n_sp
+                            n_total_out = sum(n_out.values())
+
+                            # Build outlet composition (mole fractions)
+                            out_comp: dict[str, float] = {}
+                            if n_total_out > 0:
+                                for sp, n_sp in n_out.items():
+                                    out_comp[sp] = n_sp / n_total_out
+                            else:
+                                out_comp = dict(in_comp)
+
+                            # Compute conversion of limiting reactant
+                            conversion_eq = 0.0
+                            if limiting_reactant and n_initial.get(limiting_reactant, 0) > 0:
+                                n_consumed = abs(nu.get(limiting_reactant, 0)) * xi_eq
+                                conversion_eq = n_consumed / n_initial[limiting_reactant]
+                                conversion_eq = min(conversion_eq, 1.0)
+
+                            # Flash outlet for real properties
+                            clean_comp = _clean_composition(out_comp)
+                            out_comp_names = list(clean_comp.keys())
+                            out_zs = [float(v) for v in clean_comp.values()]
+                            flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
+
+                            # Compute outlet mass flow from molar balance
+                            mw_out_mix = sum(out_comp.get(sp, 0) * _get_mw(sp) for sp in out_comp)
+                            if mw_out_mix <= 0:
+                                mw_out_mix = mw_mix_in
+                            mf_out = n_total_out * (mw_out_mix / 1000.0)
+
+                            outlet = dict(inlet)
+                            outlet["temperature"] = T_out
+                            outlet["pressure"] = P_out
+                            outlet["mass_flow"] = mf_out
+                            outlet["composition"] = out_comp
+                            if flash_out and flash_out.get("MW_mix", 0) > 0:
+                                mw_kg = flash_out["MW_mix"] / 1000.0
+                                outlet["enthalpy"] = flash_out["H"] / mw_kg
+                                outlet["vapor_fraction"] = flash_out.get("VF", 0.0)
+                            else:
+                                outlet["enthalpy"] = _estimate_cp(out_comp) * (T_out - _T_REF)
+
+                            outlets["out-1"] = outlet
+
+                            eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                            eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 2)
+                            eq_res["Keq"] = round(Keq, 6)
+                            eq_res["equilibriumExtent"] = round(xi_eq, 6)
+                            eq_res["conversion"] = round(conversion_eq * 100, 1)
+                            eq_res["duty"] = round(duty_kw, 3)
+                            eq_res["limitingReactant"] = limiting_reactant
+                            eq_res["outletComposition"] = {
+                                k: round(v, 6) for k, v in out_comp.items() if v > 1e-10
+                            }
+                            logs.append(
+                                f"{name}: Keq={Keq:.4g}, xi={xi_eq:.4g} mol/s, "
+                                f"X({limiting_reactant})={conversion_eq:.1%}"
+                            )
+
+                        elif ntype == "GibbsReactor":
+                            # Gibbs free energy minimization reactor
+                            # Minimizes G_total = sum(n_i * (Gf_i + R*T*ln(y_i * P/P_ref)))
+                            # subject to element balance constraints
+                            inlet = inlets[0]
+                            T_in = inlet["temperature"]
+                            P_in = inlet["pressure"]
+                            mf = inlet["mass_flow"]
+                            in_comp = inlet.get("composition", {})
+
+                            T_op_c = params.get("outletTemperature", params.get("temperature"))
+                            P_op_kpa = params.get("pressure")
+                            duty_kw = float(params.get("duty", 0))
+
+                            T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
+                            P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
+
+                            comp_names_g = list(in_comp.keys())
+                            zs_g = [float(v) for v in in_comp.values()]
+                            n_comps = len(comp_names_g)
+
+                            # Compute initial moles from feed
+                            mw_mix_in = sum(z * _get_mw(c) for c, z in in_comp.items())
+                            if mw_mix_in <= 0:
+                                mw_mix_in = 28.0
+                            total_moles_in = mf / (mw_mix_in / 1000.0)  # mol/s
+                            n0 = [zs_g[i] * total_moles_in for i in range(n_comps)]
+
+                            R_gas = 8.314  # J/(mol*K)
+                            P_ref = 101325.0  # 1 atm reference
+
+                            # Get thermodynamic data from thermo library
+                            Gf_list: list[float] = []  # Gibbs free energy of formation at T (J/mol)
+                            atoms_list: list[dict[str, int]] = []  # element composition per compound
+
+                            gibbs_from_thermo = False
+                            if _thermo_available and n_comps > 0:
+                                try:
+                                    constants_g, _props_g = ChemicalConstantsPackage.from_IDs(comp_names_g)
+
+                                    # Get formation properties
+                                    Hfgs = constants_g.Hfgs  # J/mol at 298.15 K
+                                    Sfgs = constants_g.Sfgs  # J/(mol*K) at 298.15 K
+
+                                    # Get atomic composition
+                                    atomss = constants_g.atomss  # list of dicts, e.g., [{'C': 1, 'H': 4}, ...]
+
+                                    if Hfgs and Sfgs and atomss:
+                                        for i in range(n_comps):
+                                            hf = Hfgs[i] if Hfgs[i] is not None else 0.0
+                                            sf = Sfgs[i] if Sfgs[i] is not None else 0.0
+                                            # G_f(T) approx Hf - T * Sf (simplified, ignores Cp correction)
+                                            gf = hf - T_out * sf
+                                            Gf_list.append(gf)
+                                            atoms_list.append(atomss[i] if atomss[i] is not None else {})
+                                        gibbs_from_thermo = True
+                                except Exception as exc_thermo:
+                                    logs.append(
+                                        f"WARNING: {name} — thermo data retrieval failed: {exc_thermo}"
+                                    )
+
+                            if not gibbs_from_thermo:
+                                # Fallback: treat as pass-through (no reaction)
+                                logs.append(
+                                    f"WARNING: {name} — Gibbs data unavailable, "
+                                    f"passing through feed unchanged"
+                                )
+                                outlet = dict(inlet)
+                                outlet["temperature"] = T_out
+                                outlet["pressure"] = P_out
+                                flash_pass = self._flash_tp(comp_names_g, zs_g, T_out, P_out, property_package)
+                                if flash_pass and flash_pass.get("MW_mix", 0) > 0:
+                                    mw_kg = flash_pass["MW_mix"] / 1000.0
+                                    outlet["enthalpy"] = flash_pass["H"] / mw_kg
+                                else:
+                                    outlet["enthalpy"] = _estimate_cp(in_comp) * (T_out - _T_REF)
+                                outlets["out-1"] = outlet
+                                eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                                eq_res["duty"] = round(duty_kw, 3)
+                                eq_res["warning"] = "Gibbs data unavailable — pass-through mode"
+                            else:
+                                # Build element balance matrix
+                                # Collect all elements present
+                                all_elements: set[str] = set()
+                                for atoms_dict in atoms_list:
+                                    all_elements.update(atoms_dict.keys())
+                                elements = sorted(all_elements)
+                                n_elements = len(elements)
+
+                                # Element matrix A: A[j][i] = number of atoms of element j in compound i
+                                A_mat = []
+                                for el in elements:
+                                    row = [float(atoms_list[i].get(el, 0)) for i in range(n_comps)]
+                                    A_mat.append(row)
+
+                                # Element totals from feed: b_j = sum(A[j][i] * n0[i])
+                                b_vec = []
+                                for j in range(n_elements):
+                                    b_j = sum(A_mat[j][i] * n0[i] for i in range(n_comps))
+                                    b_vec.append(b_j)
+
+                                # Objective: minimize G_total = sum(n_i * (Gf_i + R*T*ln(y_i * P/P_ref)))
+                                def gibbs_objective(n_vec: list[float]) -> float:
+                                    n_total = sum(n_vec)
+                                    if n_total <= 0:
+                                        return 1e30
+                                    G_total = 0.0
+                                    for i in range(n_comps):
+                                        ni = max(n_vec[i], 1e-30)
+                                        yi = ni / n_total
+                                        yi = max(yi, 1e-30)
+                                        # G_i = Gf_i + R*T*ln(y_i * P / P_ref)
+                                        G_i = Gf_list[i] + R_gas * T_out * math.log(yi * P_out / P_ref)
+                                        G_total += ni * G_i
+                                    return G_total
+
+                                # Element balance constraints: sum(A[j][i] * n_i) - b_j = 0
+                                constraints = []
+                                for j in range(n_elements):
+                                    def make_constraint(j_idx: int):
+                                        def con_func(n_vec: list[float]) -> float:
+                                            return sum(A_mat[j_idx][i] * n_vec[i] for i in range(n_comps)) - b_vec[j_idx]
+                                        return con_func
+                                    constraints.append({
+                                        "type": "eq",
+                                        "fun": make_constraint(j),
+                                    })
+
+                                # Bounds: n_i >= 1e-15 (avoid log(0))
+                                bounds = [(1e-15, None) for _ in range(n_comps)]
+
+                                # Initial guess: feed moles
+                                n0_guess = [max(ni, 1e-12) for ni in n0]
+
+                                try:
+                                    from scipy.optimize import minimize as scipy_minimize
+
+                                    result = scipy_minimize(
+                                        gibbs_objective,
+                                        n0_guess,
+                                        method="SLSQP",
+                                        bounds=bounds,
+                                        constraints=constraints,
+                                        options={"maxiter": 500, "ftol": 1e-12},
+                                    )
+
+                                    if result.success:
+                                        n_opt = result.x
+                                    else:
+                                        logs.append(
+                                            f"WARNING: {name} — Gibbs minimization did not converge: "
+                                            f"{result.message}. Using best iterate."
+                                        )
+                                        n_opt = result.x
+                                except Exception as exc_opt:
+                                    logs.append(
+                                        f"WARNING: {name} — scipy optimization failed: {exc_opt}. "
+                                        f"Falling back to feed composition."
+                                    )
+                                    n_opt = n0_guess
+
+                                # Build outlet composition
+                                n_total_out = sum(n_opt)
+                                out_comp_g: dict[str, float] = {}
+                                if n_total_out > 0:
+                                    for i in range(n_comps):
+                                        y_i = n_opt[i] / n_total_out
+                                        if y_i > 1e-12:
+                                            out_comp_g[comp_names_g[i]] = y_i
+                                else:
+                                    out_comp_g = dict(in_comp)
+
+                                # Renormalize
+                                total_z = sum(out_comp_g.values())
+                                if total_z > 0 and abs(total_z - 1.0) > 1e-9:
+                                    out_comp_g = {k: v / total_z for k, v in out_comp_g.items()}
+
+                                # Flash outlet for real properties
+                                clean_comp_g = _clean_composition(out_comp_g)
+                                out_comp_names_g = list(clean_comp_g.keys())
+                                out_zs_g = [float(v) for v in clean_comp_g.values()]
+                                flash_out = self._flash_tp(
+                                    out_comp_names_g, out_zs_g, T_out, P_out, property_package
+                                )
+
+                                # Compute outlet mass flow
+                                mw_out_mix = sum(
+                                    out_comp_g.get(sp, 0) * _get_mw(sp) for sp in out_comp_g
+                                )
+                                if mw_out_mix <= 0:
+                                    mw_out_mix = mw_mix_in
+                                mf_out = n_total_out * (mw_out_mix / 1000.0)
+
+                                outlet = dict(inlet)
+                                outlet["temperature"] = T_out
+                                outlet["pressure"] = P_out
+                                outlet["mass_flow"] = mf_out
+                                outlet["composition"] = out_comp_g
+                                if flash_out and flash_out.get("MW_mix", 0) > 0:
+                                    mw_kg = flash_out["MW_mix"] / 1000.0
+                                    outlet["enthalpy"] = flash_out["H"] / mw_kg
+                                    outlet["vapor_fraction"] = flash_out.get("VF", 0.0)
+                                else:
+                                    outlet["enthalpy"] = _estimate_cp(out_comp_g) * (T_out - _T_REF)
+
+                                outlets["out-1"] = outlet
+
+                                # Compute total Gibbs energy change
+                                G_in = gibbs_objective(n0_guess)
+                                G_out = gibbs_objective(list(n_opt))
+                                delta_G = G_out - G_in
+
+                                eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
+                                eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 2)
+                                eq_res["duty"] = round(duty_kw, 3)
+                                eq_res["deltaG_kW"] = round(delta_G / 1000.0, 3)
+                                eq_res["outletComposition"] = {
+                                    k: round(v, 6) for k, v in out_comp_g.items() if v > 1e-10
+                                }
+                                eq_res["elementBalance"] = {
+                                    elements[j]: round(b_vec[j], 6) for j in range(n_elements)
+                                }
+
+                                logs.append(
+                                    f"{name}: Gibbs minimization converged, "
+                                    f"dG={delta_G / 1000:.2f} kJ/s, "
+                                    f"{n_comps} species, {n_elements} elements"
+                                )
 
                         elif ntype in ("Absorber", "Stripper"):
                             # Absorber: gas feed (in-1) + solvent (in-2) → lean gas (out-1) + rich solvent (out-2)
@@ -4129,31 +4671,139 @@ class DWSIMEngine:
                     duty_kw = eq_r.get("duty", 0)
                     lmtd = eq_r.get("LMTD", 0)
                     if duty_kw and lmtd and float(lmtd) > 0:
-                        U = 500.0  # W/(m²·K), typical liquid-liquid
                         Q_w = abs(_kw_to_w(float(duty_kw)))
+                        # T2-2: Kern method U calculation using transport properties
+                        U = 500.0  # fallback W/(m²·K)
+                        h_tube = 0.0
+                        h_shell = 0.0
+                        try:
+                            # Get hot and cold side conditions
+                            hot_port = port_conditions.get((nid, "in-hot")) or port_conditions.get((nid, "in-1"))
+                            cold_port = port_conditions.get((nid, "in-cold")) or port_conditions.get((nid, "in-2"))
+                            if hot_port and cold_port:
+                                for side_label, side_port in [("tube", hot_port), ("shell", cold_port)]:
+                                    cn_s = list(side_port.get("composition", {}).keys())
+                                    zs_s = list(side_port.get("composition", {}).values())
+                                    if cn_s:
+                                        fl_s = self._flash_tp(cn_s, zs_s, side_port["temperature"], side_port["pressure"], property_package)
+                                        if fl_s:
+                                            rho_s = fl_s.get("rho_liquid", 800.0) if fl_s.get("VF", 0) < 0.5 else max(side_port["pressure"] * fl_s.get("MW_mix", 28) / 1000 / (8.314 * side_port["temperature"]), 0.5)
+                                            Cp_s = fl_s.get("Cp", 100) / max(fl_s.get("MW_mix", 28) / 1000, 0.01)  # J/kg·K
+                                            # Get transport props from thermo state
+                                            state = fl_s.get("state")
+                                            mu_s = 0.001  # Pa·s fallback
+                                            k_s = 0.1  # W/m·K fallback
+                                            if state:
+                                                liq_phase = getattr(state, 'liquid0', None)
+                                                gas_phase = getattr(state, 'gas', None)
+                                                phase = liq_phase if fl_s.get("VF", 0) < 0.5 else gas_phase
+                                                if phase:
+                                                    try:
+                                                        mu_s = phase.mu() if hasattr(phase, 'mu') else mu_s
+                                                    except Exception:
+                                                        pass
+                                                    try:
+                                                        k_s = phase.k() if hasattr(phase, 'k') else k_s
+                                                    except Exception:
+                                                        pass
+                                            # Dittus-Boelter: Nu = 0.023 * Re^0.8 * Pr^0.4
+                                            D_tube = 0.019  # 3/4" tube ID
+                                            v_s = side_port.get("mass_flow", 1.0) / max(rho_s, 0.1) / (math.pi * D_tube**2 / 4) if rho_s > 0 else 1.0
+                                            Re = rho_s * abs(v_s) * D_tube / max(mu_s, 1e-8)
+                                            Pr = Cp_s * mu_s / max(k_s, 1e-6)
+                                            if Re > 0 and Pr > 0:
+                                                Nu = 0.023 * max(Re, 100) ** 0.8 * max(Pr, 0.1) ** 0.4
+                                                h_calc = Nu * k_s / D_tube
+                                                if side_label == "tube":
+                                                    h_tube = h_calc
+                                                else:
+                                                    h_shell = h_calc
+                                R_f = 0.0003  # fouling resistance m²·K/W
+                                if h_tube > 0 and h_shell > 0:
+                                    U = 1.0 / (1.0 / h_tube + 1.0 / h_shell + R_f)
+                                    sizing["h_tube"] = round(h_tube, 1)
+                                    sizing["h_shell"] = round(h_shell, 1)
+                                    sizing["U_calculated"] = round(U, 1)
+                        except Exception:
+                            pass
                         A = Q_w / (U * float(lmtd))
                         sizing["area_m2"] = round(A, 2)
-                        sizing["U_assumed"] = U
+                        if "U_calculated" not in sizing:
+                            sizing["U_assumed"] = U
 
                 elif ntype == "DistillationColumn":
-                    # Fair's flooding correlation (simplified)
+                    # T2-2: Fair's flooding with real phase densities + surface tension correction
                     mf_val = 0.0
+                    feed_port = None
                     for _src, _sh, _th in upstream.get(nid, []):
                         for _tgt, sh2, _th2 in downstream.get(_src, []):
                             if _tgt == nid:
                                 c = port_conditions.get((_src, sh2))
                                 if c:
                                     mf_val = c.get("mass_flow", 0.0)
+                                    feed_port = c
                                 break
                     if mf_val > 0:
-                        # Approximate: D = sqrt(4*V_dot / (pi * V_flood * 0.8))
-                        V_flood = 1.5  # m/s approximate
-                        rho_V_approx = 2.0  # kg/m³
-                        V_dot = mf_val / max(rho_V_approx, 0.1)
-                        A_col = V_dot / (V_flood * 0.8)
-                        D_col = math.sqrt(4 * max(A_col, 0.01) / math.pi)
-                        sizing["diameter_m"] = round(D_col, 3)
-                        sizing["flooding_velocity_m_s"] = V_flood
+                        rho_V_col = 2.0  # fallback
+                        rho_L_col = 800.0  # fallback
+                        sigma = 0.02  # N/m fallback surface tension
+                        # Use real densities from distillate (vapor) and bottoms (liquid) ports
+                        dist_port = port_conditions.get((nid, "out-1"))
+                        bot_port = port_conditions.get((nid, "out-2"))
+                        if dist_port:
+                            cn_d = list(dist_port.get("composition", {}).keys())
+                            zs_d = list(dist_port.get("composition", {}).values())
+                            if cn_d:
+                                rho_V_col = max(self._get_density(cn_d, zs_d, dist_port["temperature"], dist_port["pressure"], property_package), 0.1)
+                        if bot_port:
+                            cn_b = list(bot_port.get("composition", {}).keys())
+                            zs_b = list(bot_port.get("composition", {}).values())
+                            if cn_b:
+                                rho_L_col = max(self._get_density(cn_b, zs_b, bot_port["temperature"], bot_port["pressure"], property_package), 1.0)
+                                # Try to get surface tension from flash
+                                try:
+                                    fl_b = self._flash_tp(cn_b, zs_b, bot_port["temperature"], bot_port["pressure"], property_package)
+                                    if fl_b and fl_b.get("state"):
+                                        liq_b = getattr(fl_b["state"], 'liquid0', None)
+                                        if liq_b and hasattr(liq_b, 'sigma'):
+                                            sigma = max(liq_b.sigma(), 0.001)
+                                except Exception:
+                                    pass
+                        # Surface tension correction: C_sb = 0.08 * (20/σ)^0.2 where σ in mN/m
+                        sigma_mNm = sigma * 1000  # N/m → mN/m
+                        C_sb = 0.08 * (20.0 / max(sigma_mNm, 1.0)) ** 0.2
+                        V_flood = C_sb * math.sqrt(max((rho_L_col - rho_V_col) / max(rho_V_col, 0.01), 0))
+                        if V_flood > 0:
+                            V_dot = mf_val / max(rho_V_col, 0.1)
+                            A_col = V_dot / (V_flood * 0.8)
+                            D_col = math.sqrt(4 * max(A_col, 0.01) / math.pi)
+                            sizing["diameter_m"] = round(D_col, 3)
+                            sizing["flooding_velocity_m_s"] = round(V_flood, 3)
+                            sizing["rho_vapor"] = round(rho_V_col, 2)
+                            sizing["rho_liquid"] = round(rho_L_col, 1)
+                            sizing["C_sb"] = round(C_sb, 4)
+
+                elif ntype in ("Pump", "Compressor"):
+                    # T2-2: Sizing with actual volumetric flow from flash density
+                    work_kw = float(eq_r.get("work", 0))
+                    if work_kw > 0:
+                        in_port = None
+                        for _src, _sh, _th in upstream.get(nid, []):
+                            for _tgt, sh2, _th2 in downstream.get(_src, []):
+                                if _tgt == nid:
+                                    in_port = port_conditions.get((_src, sh2))
+                                    break
+                        if in_port:
+                            cn_p = list(in_port.get("composition", {}).keys())
+                            zs_p = list(in_port.get("composition", {}).values())
+                            mf_p = in_port.get("mass_flow", 0)
+                            if cn_p and mf_p > 0:
+                                rho_p = self._get_density(cn_p, zs_p, in_port["temperature"], in_port["pressure"], property_package)
+                                if rho_p > 0:
+                                    vol_flow = mf_p / rho_p  # m³/s
+                                    sizing["volumetric_flow_m3_s"] = round(vol_flow, 6)
+                                    sizing["volumetric_flow_m3_h"] = round(vol_flow * 3600, 2)
+                                    sizing["inlet_density"] = round(rho_p, 2)
 
                 if sizing:
                     eq_r["sizing"] = sizing

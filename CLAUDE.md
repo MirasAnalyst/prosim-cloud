@@ -289,6 +289,12 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 2. **E2E `findStream` searched by node ID but stream result keys are edge IDs**: `findStream(data.stream_results, 'h1')` looked for keys starting with `'h1'`, but stream results are keyed by edge ID (e.g., `'e2'`), so every lookup returned `undefined`. Fix: store the edges array via `setEdges()` inside `runSim()`, then `findStream` matches by `edge.source === sourceId` to find the correct edge ID. **Stream result keys are edge IDs, not node IDs — always look up streams through the edges array.**
 
+3. **New equipment types added to engine but not to `EQUIPMENT_TYPE_MAP`**: Background agent added EquilibriumReactor and GibbsReactor processing blocks (~400 lines) to `dwsim_engine.py` but didn't add them to the `EQUIPMENT_TYPE_MAP` dict. Engine silently skipped them with "Skipping unknown type" log. Fix: added both types to the map. **When adding new equipment types, always update `EQUIPMENT_TYPE_MAP` — the engine's dispatch gate check happens before the `elif ntype ==` blocks.**
+
+4. **Agent-inserted reactor blocks used `params.get("temperature")` but frontend key is `outletTemperature`**: Background agent guessed the parameter key name instead of matching `equipment-library.ts`. Engine silently fell back to inlet temperature, masking the bug. Fix: changed to `params.get("outletTemperature", params.get("temperature"))`. **When agents generate engine code for new equipment, always cross-check parameter keys against the frontend equipment-library definitions.**
+
+5. **Rigorous distillation integration called `self._get_mw(comp_names, zs)` but `_get_mw` is a module-level function**: `_get_mw(comp_name: str)` takes a single compound name, not a list. The call `self._get_mw(comp_names, zs)` would have crashed at runtime. Fix: changed to `sum(zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))`. **Always verify whether helpers are instance methods (`self.`) or module-level functions, and check their signatures before calling.**
+
 ## Dev Commands
 ```bash
 # Backend

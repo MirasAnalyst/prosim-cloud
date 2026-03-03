@@ -23,6 +23,8 @@ export enum EquipmentType {
   Filter = 'Filter',
   DesignSpec = 'DesignSpec',
   PipeSegment = 'PipeSegment',
+  EquilibriumReactor = 'EquilibriumReactor',
+  GibbsReactor = 'GibbsReactor',
 }
 
 export enum EquipmentCategory {
