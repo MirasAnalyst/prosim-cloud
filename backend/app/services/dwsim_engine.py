@@ -2733,8 +2733,12 @@ class DWSIMEngine:
                             # PFR Ergun pressure drop
                             Ea_kj = float(params.get("activationEnergy", 0))
                             A_pre = float(params.get("preExpFactor", 0))
-                            eps = float(params.get("bedVoidFraction", 0.4))
+                            eps = float(params.get("voidFraction", params.get("bedVoidFraction", 0.4)))
                             d_p = float(params.get("particleDiameter", 0.003))
+                            # Sanity check: d_p > 0.1 m likely means user passed mm instead of m
+                            if d_p > 0.1:
+                                logs.append(f"WARNING: {name} particleDiameter={d_p*1000:.0f} mm seems very large — did you mean {d_p/1000:.4f} m ({d_p:.1f} mm)?")
+                                d_p = d_p / 1000.0  # Auto-correct: assume user passed mm
 
                             if d_p > 0 and eps > 0:
                                 mu = 1e-5  # Pa·s (gas viscosity approx)
@@ -3096,9 +3100,22 @@ class DWSIMEngine:
                                 Cp_solvent = 3500.0  # J/(kg·K), ~aqueous amine
                                 delta_T = Q_abs * 1000.0 / (mf2 * Cp_solvent) if mf2 > 0.01 else 0.0
                                 T_out2 = T_avg + min(delta_T, 60.0)  # cap at +60K
-                            else:
-                                T_out1 = T_avg
-                                T_out2 = T_avg
+                            else:  # Stripper
+                                # Overhead exits near cooler feed, bottoms near hotter feed
+                                T_out1 = min(T1, T2)  # overhead gas near cooler temp
+                                T_out2 = max(T1, T2)  # lean solvent near hotter feed
+                                # Endothermic heat of desorption cools the bottoms
+                                Q_strip = 0.0
+                                for c in comp_names_all:
+                                    if c in _HEAT_OF_ABSORPTION:
+                                        # Moles stripped from liquid into gas (L is rich solvent flow for stripper)
+                                        n_liq_in_c = comp1.get(c, 0.0) * L
+                                        n_stripped = max(0, n_liq_in_c - n_out2.get(c, 0.0))
+                                        Q_strip += n_stripped * _HEAT_OF_ABSORPTION[c]
+                                if Q_strip > 0 and mf_out2 > 0.01:
+                                    Cp_s = 3500.0  # J/(kg·K)
+                                    dT_strip = Q_strip * 1000.0 / (mf_out2 * Cp_s)
+                                    T_out2 = T_out2 - min(dT_strip, 40.0)  # endothermic cooling, cap 40K
 
                             eq_res["numberOfStages"] = n_stages
                             eq_res["pressure"] = round(_pa_to_kpa(P_op), 3)
@@ -3167,19 +3184,25 @@ class DWSIMEngine:
                             gas_flow = mf * (1 - solids_frac_cyc * efficiency)
                             solids_flow = mf - gas_flow
 
-                            # Composition: identify heaviest component as "solids"
+                            # Composition: user-specified solids component or heaviest fallback
                             gas_comp_cyc = dict(comp)
                             solids_comp_cyc = dict(comp)
                             if comp and len(comp) >= 2:
-                                mws_cyc = [(c, _get_mw(c)) for c in comp.keys()]
-                                mws_cyc.sort(key=lambda x: x[1], reverse=True)
-                                heaviest_c = mws_cyc[0][0]
-                                # Gas outlet: reduced heaviest component
+                                solids_comp_name = params.get("solidsComponent", "")
+                                if solids_comp_name and solids_comp_name in comp:
+                                    heaviest_c = solids_comp_name
+                                else:
+                                    mws_cyc = [(c, _get_mw(c)) for c in comp.keys()]
+                                    mws_cyc.sort(key=lambda x: x[1], reverse=True)
+                                    heaviest_c = mws_cyc[0][0]
+                                    if not solids_comp_name:
+                                        logs.append(f"WARNING: {name} no solidsComponent specified — using heaviest component '{heaviest_c}' as solids proxy")
+                                # Gas outlet: reduced solids component
                                 gc = dict(comp)
                                 gc[heaviest_c] = max(0, comp.get(heaviest_c, 0) * (1 - efficiency))
                                 gt = sum(gc.values()) or 1
                                 gas_comp_cyc = {k: v / gt for k, v in gc.items()}
-                                # Solids outlet: enriched in heaviest
+                                # Solids outlet: enriched in solids component
                                 solids_comp_cyc = {heaviest_c: 1.0}
 
                             eq_res["pressureDrop"] = round(_pa_to_kpa(dp), 3)
@@ -3393,8 +3416,20 @@ class DWSIMEngine:
                             eq_res["crystalYield"] = round(crystal_frac * 100, 1)
                             eq_res["crystallizationTemp"] = cryst_temp
 
-                            outlets["out-1"] = {"temperature": T_cryst, "pressure": P_in, "mass_flow": crystal_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": crystal_zs}
-                            outlets["out-2"] = {"temperature": T_cryst, "pressure": P_in, "mass_flow": mother_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": mother_zs}
+                            # Flash outlets for real enthalpies at crystallization T
+                            h_cryst_1 = inlet.get("enthalpy", 0.0)
+                            h_cryst_2 = inlet.get("enthalpy", 0.0)
+                            if crystal_zs:
+                                fl_cr1 = self._flash_tp(list(crystal_zs.keys()), list(crystal_zs.values()), T_cryst, P_in, property_package)
+                                if fl_cr1 and fl_cr1.get("MW_mix", 0) > 0:
+                                    h_cryst_1 = fl_cr1["H"] / (fl_cr1["MW_mix"] / 1000.0)
+                            if mother_zs:
+                                fl_cr2 = self._flash_tp(list(mother_zs.keys()), list(mother_zs.values()), T_cryst, P_in, property_package)
+                                if fl_cr2 and fl_cr2.get("MW_mix", 0) > 0:
+                                    h_cryst_2 = fl_cr2["H"] / (fl_cr2["MW_mix"] / 1000.0)
+
+                            outlets["out-1"] = {"temperature": T_cryst, "pressure": P_in, "mass_flow": crystal_flow, "vapor_fraction": 0.0, "enthalpy": h_cryst_1, "composition": crystal_zs}
+                            outlets["out-2"] = {"temperature": T_cryst, "pressure": P_in, "mass_flow": mother_flow, "vapor_fraction": 0.0, "enthalpy": h_cryst_2, "composition": mother_zs}
                             logs.append(f"{name}: crystallization at {cryst_temp}°C, yield={crystal_frac * 100:.1f}%")
 
                         elif ntype == "Dryer":
@@ -3455,8 +3490,19 @@ class DWSIMEngine:
                             eq_res["outletMoisture"] = float(params.get("outletMoisture", 5))
                             eq_res["waterRemoved"] = round(moisture_flow, 4)
 
-                            outlets["out-1"] = {"temperature": T_in, "pressure": P_in, "mass_flow": dry_flow, "vapor_fraction": 0.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": dry_zs}
-                            outlets["out-2"] = {"temperature": T_in + 20, "pressure": P_in, "mass_flow": moisture_flow, "vapor_fraction": 1.0, "enthalpy": inlet.get("enthalpy", 0.0), "composition": vapor_zs}
+                            # Flash outlets for real enthalpies
+                            h_dry = inlet.get("enthalpy", 0.0)
+                            h_vap = inlet.get("enthalpy", 0.0)
+                            if dry_zs and dry_flow > 0:
+                                fl_dry = self._flash_tp(list(dry_zs.keys()), list(dry_zs.values()), T_in, P_in, property_package)
+                                if fl_dry and fl_dry.get("MW_mix", 0) > 0:
+                                    h_dry = fl_dry["H"] / (fl_dry["MW_mix"] / 1000.0)
+                            if vapor_zs and moisture_flow > 0:
+                                fl_vap = self._flash_tp(list(vapor_zs.keys()), list(vapor_zs.values()), T_in, P_in, property_package)
+                                if fl_vap and fl_vap.get("MW_mix", 0) > 0:
+                                    h_vap = fl_vap["H"] / (fl_vap["MW_mix"] / 1000.0)
+                            outlets["out-1"] = {"temperature": T_in, "pressure": P_in, "mass_flow": dry_flow, "vapor_fraction": 0.0, "enthalpy": h_dry, "composition": dry_zs}
+                            outlets["out-2"] = {"temperature": T_in, "pressure": P_in, "mass_flow": moisture_flow, "vapor_fraction": 1.0, "enthalpy": h_vap, "composition": vapor_zs}
                             logs.append(f"{name}: moisture {float(params.get('outletMoisture', 5))}%, removed {moisture_flow:.4f} kg/s")
 
                         elif ntype == "Filter":
@@ -3475,14 +3521,18 @@ class DWSIMEngine:
                             filtrate_flow = mf - cake_flow
                             P_out = max(P_in - dp, 1000.0)
 
-                            # Composition: cake enriched in heaviest component
+                            # Composition: user-specified solids component or heaviest fallback
                             cake_comp = dict(comp)
                             filtrate_comp = dict(comp)
                             if comp and len(comp) >= 2:
-                                comp_names_f = list(comp.keys())
-                                mws_f = [_get_mw(c) for c in comp_names_f]
-                                heaviest_idx = mws_f.index(max(mws_f))
-                                heaviest = comp_names_f[heaviest_idx]
+                                solids_comp_name_f = params.get("solidsComponent", "")
+                                if solids_comp_name_f and solids_comp_name_f in comp:
+                                    heaviest = solids_comp_name_f
+                                else:
+                                    comp_names_f = list(comp.keys())
+                                    mws_f = [_get_mw(c) for c in comp_names_f]
+                                    heaviest_idx = mws_f.index(max(mws_f))
+                                    heaviest = comp_names_f[heaviest_idx]
                                 cake_comp = {heaviest: 1.0}
                                 filt_zs = dict(comp)
                                 filt_zs[heaviest] = max(0, comp.get(heaviest, 0) * (1 - efficiency))
@@ -3998,8 +4048,8 @@ class DWSIMEngine:
                     f1 = None
                     ds_converged = False
                     ds_iterations = 0
-                    # Deep copy nodes to avoid mutating shared parameters
-                    ds_nodes = copy.deepcopy(nodes)
+                    # Deep copy nodes EXCLUDING DesignSpec to avoid infinite recursion
+                    ds_nodes = copy.deepcopy([n for n in nodes if n.get("type") != "DesignSpec"])
 
                     for ds_iter in range(30):
                         ds_iterations = ds_iter + 1
