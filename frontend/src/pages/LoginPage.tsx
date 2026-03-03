@@ -29,7 +29,7 @@ export default function LoginPage() {
     if (error) {
       setError(error);
     } else {
-      navigate('/app');
+      navigate('/');
     }
   };
 
