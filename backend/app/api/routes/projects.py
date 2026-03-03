@@ -9,14 +9,14 @@ from app.db.session import get_db
 from app.models.project import Project
 from app.models.flowsheet import Flowsheet
 from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse
-from app.api.deps.auth import get_current_user, CurrentUser
+from app.api.deps.auth import get_optional_user, CurrentUser
 
 router = APIRouter()
 
 
 @router.get("", response_model=list[ProjectResponse])
 async def list_projects(
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -31,7 +31,7 @@ async def list_projects(
 @router.post("", response_model=ProjectResponse, status_code=201)
 async def create_project(
     body: ProjectCreate,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     project = Project(name=body.name, description=body.description, user_id=current_user.id)
@@ -48,7 +48,7 @@ async def create_project(
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(
     project_id: uuid.UUID,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -64,7 +64,7 @@ async def get_project(
 async def update_project(
     project_id: uuid.UUID,
     body: ProjectUpdate,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -87,7 +87,7 @@ async def update_project(
 @router.delete("/{project_id}", status_code=204)
 async def delete_project(
     project_id: uuid.UUID,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -102,7 +102,7 @@ async def delete_project(
 @router.get("/{project_id}/backup")
 async def backup_project(
     project_id: uuid.UUID,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Download a full backup of the project."""
@@ -133,7 +133,7 @@ async def backup_project(
 @router.post("/restore", response_model=ProjectResponse, status_code=201)
 async def restore_project(
     body: dict,
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Restore a project from backup data."""
