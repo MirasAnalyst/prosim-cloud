@@ -367,6 +367,50 @@ export function compareCases(projectId: string, caseIds: string[]) {
   });
 }
 
+// ── Insights File Upload ──
+
+export async function parseInsightsFile(file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = {};
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
+  const res = await fetch(`${API_BASE}/api/simulation/insights/parse`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+export async function runInsightsFromFile(file: File, economicParams: Record<string, number>, propertyPackage = 'PengRobinson') {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('economic_params_json', JSON.stringify(economicParams));
+  formData.append('property_package', propertyPackage);
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers: Record<string, string> = {};
+  if (session?.access_token) {
+    headers['Authorization'] = `Bearer ${session.access_token}`;
+  }
+  const res = await fetch(`${API_BASE}/api/simulation/insights/upload`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
 // ── Agent Chat ──
 
 export interface ChatMessage {

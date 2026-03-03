@@ -34,6 +34,7 @@ export default function FlowsheetCanvas() {
   const onConnect = useFlowsheetStore((s) => s.onConnect);
   const addNode = useFlowsheetStore((s) => s.addNode);
   const setSelectedNode = useFlowsheetStore((s) => s.setSelectedNode);
+  const setSelectedEdge = useFlowsheetStore((s) => s.setSelectedEdge);
 
   const onDragOver = useCallback((event: DragEvent) => {
     event.preventDefault();
@@ -63,7 +64,8 @@ export default function FlowsheetCanvas() {
 
   const onPaneClick = useCallback(() => {
     setSelectedNode(null);
-  }, [setSelectedNode]);
+    setSelectedEdge(null);
+  }, [setSelectedNode, setSelectedEdge]);
 
   return (
     <div className="flex-1 h-full relative">
