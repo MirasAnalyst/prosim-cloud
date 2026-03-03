@@ -381,6 +381,10 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 25. **DesignSpec converged results not merged into outer simulation**: Inner simulation found the correct manipulated variable but its equipment/stream results were discarded. Fix: merge `inner_eq` and `inner_sr` into outer `equipment_results` and `stream_results`. **DesignSpec's inner simulation results must propagate to the final output — otherwise the converged state is invisible.**
 
+### Complex Industrial E2E Tests: Mistakes and Resolutions
+
+1. **E2E `lightKeyPurity` assertions used fraction thresholds but engine returns percent scale**: Tests 3, 5, 7 asserted `lightKeyPurity > 0.85` (fraction) but engine returns e.g. 92.5 (percent), making assertions trivially true with zero verification value. Fix: changed to `> 85`, `> 80`, `> 70` respectively. **When writing E2E assertions against engine outputs, always verify the unit/scale of the returned value — percent vs fraction mismatches create silently useless tests.**
+
 ## Dev Commands
 ```bash
 # Backend
