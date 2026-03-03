@@ -327,6 +327,8 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 21. **Condenser duty sign inconsistent between FUG (positive) and Rigorous (negative)**: FUG stores `condenserDuty` as positive (heat removed), rigorous stores as negative (thermodynamic convention). Switching methods flips the sign on the same physical quantity. Fix: use `abs()` for both condenser and reboiler duties in the rigorous integration path. **When integrating multiple solver methods, normalize output conventions (sign, units) at the integration boundary.**
 
+22. **E2E tests navigated to `/` but simulator moved to `/app/*` after landing page was committed**: All 22 test files used `page.goto('/')` which now shows the marketing landing page, not the simulator. Tests waiting for `text=Equipment` timed out (26 failures). Also, Tier 5 UNIQUAC test's `page.locator('select').first()` found the unit system dropdown in TopNav instead of the property package dropdown in SimulationBasisPanel. Fix: updated all tests to `page.goto('/app')` and targeted the property package select by its label context. **When committing routing changes (new landing page, auth gates), immediately update all E2E test navigation paths — don't assume `/` still reaches the app.**
+
 ## Dev Commands
 ```bash
 # Backend

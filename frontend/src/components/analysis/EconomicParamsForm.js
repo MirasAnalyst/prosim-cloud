@@ -1,0 +1,16 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useState } from 'react';
+export const DEFAULT_ECONOMIC_PARAMS = {
+    steamCost: 15.0,
+    cwCost: 3.0,
+    elecCost: 0.08,
+    fuelCost: 8.0,
+    carbonPrice: 50.0,
+    hoursPerYear: 8000,
+};
+export default function EconomicParamsForm({ value, onChange, defaultCollapsed = true }) {
+    const [collapsed, setCollapsed] = useState(defaultCollapsed);
+    const set = (key, v) => onChange({ ...value, [key]: v });
+    return (_jsxs("div", { className: "border border-gray-200 dark:border-gray-700 rounded-lg", children: [_jsxs("button", { onClick: () => setCollapsed(!collapsed), className: "w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-lg", children: ["Economic Parameters", collapsed ? _jsx(ChevronRight, { size: 12 }) : _jsx(ChevronDown, { size: 12 })] }), !collapsed && (_jsxs("div", { className: "px-3 pb-3 grid grid-cols-3 gap-2", children: [_jsxs("div", { children: [_jsx("label", { className: "text-[10px] text-gray-500", children: "Steam $/GJ" }), _jsx("input", { type: "number", value: value.steamCost, min: 0, step: 0.5, onChange: (e) => set('steamCost', Number(e.target.value)), className: "w-full text-xs bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1" })] }), _jsxs("div", { children: [_jsx("label", { className: "text-[10px] text-gray-500", children: "CW $/GJ" }), _jsx("input", { type: "number", value: value.cwCost, min: 0, step: 0.5, onChange: (e) => set('cwCost', Number(e.target.value)), className: "w-full text-xs bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1" })] }), _jsxs("div", { children: [_jsx("label", { className: "text-[10px] text-gray-500", children: "Elec $/kWh" }), _jsx("input", { type: "number", value: value.elecCost, min: 0, step: 0.01, onChange: (e) => set('elecCost', Number(e.target.value)), className: "w-full text-xs bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1" })] }), _jsxs("div", { children: [_jsx("label", { className: "text-[10px] text-gray-500", children: "Fuel $/GJ" }), _jsx("input", { type: "number", value: value.fuelCost, min: 0, step: 0.5, onChange: (e) => set('fuelCost', Number(e.target.value)), className: "w-full text-xs bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1" })] }), _jsxs("div", { children: [_jsx("label", { className: "text-[10px] text-gray-500", children: "CO2 $/t" }), _jsx("input", { type: "number", value: value.carbonPrice, min: 0, step: 5, onChange: (e) => set('carbonPrice', Number(e.target.value)), className: "w-full text-xs bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1" })] }), _jsxs("div", { children: [_jsx("label", { className: "text-[10px] text-gray-500", children: "Hrs/yr" }), _jsx("input", { type: "number", value: value.hoursPerYear, min: 1, max: 8760, onChange: (e) => set('hoursPerYear', Number(e.target.value)), className: "w-full text-xs bg-gray-50 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1" })] })] }))] }));
+}

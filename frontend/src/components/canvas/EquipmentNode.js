@@ -1,0 +1,221 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { memo } from 'react';
+import { Handle, Position } from '@xyflow/react';
+import { equipmentLibrary } from '../../lib/equipment-library';
+import { EquipmentIcon, getNodeDimensions } from './EquipmentIcons';
+import { useSimulationStore } from '../../stores/simulationStore';
+import { useUnitStore } from '../../stores/unitStore';
+import { SimulationStatus, EquipmentType } from '../../types';
+function getResultBadge(equipmentType, eqResult, us) {
+    const cT = us.fromSI.temperature;
+    const cDT = us.fromSI.temperatureDelta;
+    const cP = us.fromSI.pressure;
+    const cF = us.fromSI.massFlow;
+    const cW = us.fromSI.power;
+    const cV = us.fromSI.velocity;
+    const uT = us.units.temperature;
+    const uP = us.units.pressure;
+    const uF = us.units.massFlow;
+    const uW = us.units.power;
+    const uV = us.units.velocity;
+    switch (equipmentType) {
+        case EquipmentType.Heater:
+        case EquipmentType.Cooler:
+        case EquipmentType.HeatExchanger: {
+            const duty = eqResult.duty;
+            if (duty == null)
+                return null;
+            const label = `Q: ${cW(Number(duty)).toFixed(1)} ${uW}`;
+            if (equipmentType === EquipmentType.HeatExchanger && eqResult.LMTD != null) {
+                return `${label} | LMTD: ${cDT(Number(eqResult.LMTD)).toFixed(1)}${uT}`;
+            }
+            return label;
+        }
+        case EquipmentType.Pump:
+        case EquipmentType.Compressor: {
+            const work = eqResult.work;
+            if (work == null)
+                return null;
+            return `W: ${cW(Number(work)).toFixed(1)} ${uW}`;
+        }
+        case EquipmentType.Separator: {
+            const vf = eqResult.vaporFraction ?? eqResult.vapor_fraction;
+            if (vf == null)
+                return null;
+            return `VF: ${Number(vf).toFixed(3)}`;
+        }
+        case EquipmentType.DistillationColumn: {
+            const lkPurity = eqResult.lightKeyPurity;
+            if (lkPurity != null)
+                return `LK: ${Number(lkPurity).toFixed(1)}%`;
+            const stages = eqResult.numberOfStages;
+            if (stages != null)
+                return `${stages} stages`;
+            return null;
+        }
+        case EquipmentType.ConversionReactor: {
+            const conv = eqResult.conversion;
+            if (conv == null)
+                return null;
+            return `X: ${Number(conv).toFixed(1)}%`;
+        }
+        case EquipmentType.Splitter: {
+            const ratio = eqResult.splitRatio;
+            if (ratio == null)
+                return null;
+            const r = Number(ratio);
+            return `${(r * 100).toFixed(0)}/${((1 - r) * 100).toFixed(0)}`;
+        }
+        case EquipmentType.Mixer: {
+            const flow = eqResult.totalMassFlow;
+            if (flow == null)
+                return null;
+            return `${cF(Number(flow)).toFixed(2)} ${uF}`;
+        }
+        case EquipmentType.Valve: {
+            const cv = eqResult.calculatedCv;
+            if (cv != null && Number(cv) > 0) {
+                return `Cv: ${Number(cv).toFixed(1)} | ${Number(eqResult.percentOpen ?? 0).toFixed(0)}% open`;
+            }
+            const dp = eqResult.pressureDrop;
+            if (dp == null)
+                return null;
+            return `ΔP: ${cP(Number(dp)).toFixed(1)} ${uP}`;
+        }
+        case EquipmentType.Absorber:
+        case EquipmentType.Stripper: {
+            const stages = eqResult.numberOfStages;
+            if (stages != null)
+                return `${stages} stages`;
+            return null;
+        }
+        case EquipmentType.Cyclone: {
+            const dp = eqResult.pressureDrop;
+            if (dp == null)
+                return null;
+            return `ΔP: ${cP(Number(dp)).toFixed(1)} ${uP}`;
+        }
+        case EquipmentType.ThreePhaseSeparator: {
+            const vf = eqResult.vaporFraction;
+            if (vf == null)
+                return null;
+            return `VF: ${Number(vf).toFixed(3)}`;
+        }
+        case EquipmentType.Crystallizer: {
+            const cy = eqResult.crystalYield;
+            if (cy == null)
+                return null;
+            return `Yield: ${Number(cy).toFixed(1)}%`;
+        }
+        case EquipmentType.Dryer: {
+            const moist = eqResult.outletMoisture;
+            if (moist == null)
+                return null;
+            return `${Number(moist).toFixed(1)}% moisture`;
+        }
+        case EquipmentType.Filter: {
+            const eff = eqResult.efficiency;
+            if (eff == null)
+                return null;
+            return `Eff: ${Number(eff).toFixed(1)}%`;
+        }
+        case EquipmentType.DesignSpec: {
+            const conv = eqResult.converged;
+            const achieved = eqResult.achievedValue;
+            if (conv != null) {
+                const status = conv ? 'OK' : 'FAIL';
+                return achieved != null ? `${status} (${Number(achieved).toFixed(2)})` : status;
+            }
+            return null;
+        }
+        case EquipmentType.PipeSegment: {
+            const dpPipe = eqResult.pressureDrop;
+            const vel = eqResult.velocity;
+            if (dpPipe == null)
+                return null;
+            const parts = [`ΔP: ${cP(Number(dpPipe)).toFixed(2)} ${uP}`];
+            if (vel != null)
+                parts.push(`V: ${cV(Number(vel)).toFixed(2)} ${uV}`);
+            return parts.join(' | ');
+        }
+        case EquipmentType.FeedStream: {
+            const t = eqResult.outletTemperature;
+            const p = eqResult.outletPressure;
+            const f = eqResult.massFlow;
+            if (t == null && p == null && f == null)
+                return null;
+            const parts = [];
+            if (t != null)
+                parts.push(`${cT(Number(t)).toFixed(1)}${uT}`);
+            if (p != null)
+                parts.push(`${cP(Number(p)).toFixed(1)} ${uP}`);
+            if (f != null)
+                parts.push(`${cF(Number(f)).toFixed(3)} ${uF}`);
+            return parts.join(' | ');
+        }
+        case EquipmentType.ProductStream: {
+            const t = eqResult.outletTemperature;
+            const p = eqResult.outletPressure;
+            const f = eqResult.massFlow;
+            const vf = eqResult.vaporFraction;
+            if (t == null && p == null && f == null)
+                return null;
+            const parts = [];
+            if (t != null)
+                parts.push(`${cT(Number(t)).toFixed(1)}${uT}`);
+            if (p != null)
+                parts.push(`${cP(Number(p)).toFixed(1)} ${uP}`);
+            if (f != null)
+                parts.push(`${cF(Number(f)).toFixed(3)} ${uF}`);
+            if (vf != null)
+                parts.push(`VF: ${Number(vf).toFixed(3)}`);
+            return parts.join(' | ');
+        }
+        default:
+            return null;
+    }
+}
+function EquipmentNode({ id, data, selected }) {
+    const nodeData = data;
+    const def = equipmentLibrary[nodeData.equipmentType];
+    const dims = getNodeDimensions(nodeData.equipmentType);
+    const results = useSimulationStore((s) => s.results);
+    const status = useSimulationStore((s) => s.status);
+    const unitSystem = useUnitStore((s) => s.unitSystem);
+    const eqResult = status === SimulationStatus.Completed && results?.equipmentResults
+        ? results.equipmentResults[id]
+        : null;
+    const badge = eqResult
+        ? getResultBadge(nodeData.equipmentType, eqResult, unitSystem)
+        : null;
+    const isEnergy = (portId) => portId.startsWith('energy');
+    const leftPorts = def.ports.filter((p) => p.position === 'left' && !isEnergy(p.id));
+    const rightPorts = def.ports.filter((p) => p.position === 'right' && !isEnergy(p.id));
+    const topPorts = def.ports.filter((p) => p.position === 'top' && !isEnergy(p.id));
+    const bottomPorts = def.ports.filter((p) => p.position === 'bottom' && !isEnergy(p.id));
+    const energyPorts = def.ports.filter((p) => isEnergy(p.id));
+    return (_jsxs("div", { className: "relative flex items-center justify-center", style: {
+            width: dims.width,
+            height: dims.height,
+            filter: selected
+                ? 'drop-shadow(0 0 6px rgba(59, 130, 246, 0.5))'
+                : 'drop-shadow(0 1px 2px rgba(0,0,0,0.3))',
+        }, children: [topPorts.map((port, i) => (_jsx(Handle, { id: port.id, type: port.type === 'inlet' ? 'target' : 'source', position: Position.Top, className: "!w-3 !h-3 !bg-white !border-2 !border-gray-500 hover:!bg-blue-400", style: {
+                    left: `${((i + 1) / (topPorts.length + 1)) * 100}%`,
+                }, title: port.name }, port.id))), leftPorts.map((port, i) => (_jsx(Handle, { id: port.id, type: port.type === 'inlet' ? 'target' : 'source', position: Position.Left, className: "!w-3 !h-3 !bg-white !border-2 !border-gray-500 hover:!bg-blue-400", style: {
+                    top: `${((i + 1) / (leftPorts.length + 1)) * 100}%`,
+                }, title: port.name }, port.id))), _jsx(EquipmentIcon, { type: nodeData.equipmentType, width: dims.width, height: dims.height, selected: selected }), _jsx("span", { className: "absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] text-gray-500 dark:text-gray-400 font-medium", style: { top: dims.height + 4 }, children: nodeData.name }), badge && (_jsx("span", { className: "absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[9px] text-green-400 font-mono", style: { top: dims.height + 18 }, children: badge })), status === SimulationStatus.Running && (_jsx("div", { className: "absolute left-1/2 -translate-x-1/2", style: { top: dims.height + 18 }, children: _jsx("div", { className: "animate-pulse bg-gray-600 rounded-full h-4 w-12" }) })), rightPorts.map((port, i) => (_jsx(Handle, { id: port.id, type: port.type === 'inlet' ? 'target' : 'source', position: Position.Right, className: "!w-3 !h-3 !bg-white !border-2 !border-gray-500 hover:!bg-blue-400", style: {
+                    top: `${((i + 1) / (rightPorts.length + 1)) * 100}%`,
+                }, title: port.name }, port.id))), bottomPorts.map((port, i) => (_jsx(Handle, { id: port.id, type: port.type === 'inlet' ? 'target' : 'source', position: Position.Bottom, className: "!w-3 !h-3 !bg-white !border-2 !border-gray-500 hover:!bg-blue-400", style: {
+                    left: `${((i + 1) / (bottomPorts.length + 1)) * 100}%`,
+                }, title: port.name }, port.id))), energyPorts.map((port) => {
+                const pos = port.position === 'top' ? Position.Top : Position.Bottom;
+                const samePosPorts = energyPorts.filter(p => p.position === port.position);
+                const idxInPos = samePosPorts.indexOf(port);
+                const style = port.position === 'top' || port.position === 'bottom'
+                    ? { left: `${((idxInPos + 1) / (samePosPorts.length + 1)) * 100 + (port.position === 'bottom' && bottomPorts.length > 0 ? 30 : 0)}%` }
+                    : {};
+                return (_jsx(Handle, { id: port.id, type: port.type === 'inlet' ? 'target' : 'source', position: pos, className: "!w-2.5 !h-2.5 !bg-orange-200 !border-2 !border-orange-500 hover:!bg-orange-400", style: style, title: `⚡ ${port.name}` }, port.id));
+            })] }));
+}
+export default memo(EquipmentNode);

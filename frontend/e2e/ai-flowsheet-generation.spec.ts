@@ -9,6 +9,40 @@ import { test, expect } from '@playwright/test';
  */
 
 test.describe('AI Flowsheet Generation', () => {
+  // Skip all AI tests if OpenAI API is unavailable (quota exhausted or no key)
+  let aiAvailable = true;
+
+  test.beforeAll(async ({ browser }) => {
+    const page = await browser.newPage();
+    try {
+      await page.goto('/app');
+      await page.waitForLoadState('load');
+      const res = await page.evaluate(async () => {
+        const r = await fetch('/api/agent/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: 'Hello' }],
+          }),
+        });
+        return { status: r.status };
+      });
+      if (res.status === 429 || res.status >= 500) {
+        aiAvailable = false;
+      }
+    } catch {
+      aiAvailable = false;
+    } finally {
+      await page.close();
+    }
+  });
+
+  test.beforeEach(async ({}, testInfo) => {
+    if (!aiAvailable) {
+      testInfo.skip(true, 'OpenAI API quota exhausted or unavailable');
+    }
+  });
+
   test('API returns flowsheet_action with equipment and connections', async ({ page }) => {
     await page.goto('/app');
     await page.waitForLoadState('networkidle');

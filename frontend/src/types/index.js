@@ -1,0 +1,47 @@
+export var EquipmentType;
+(function (EquipmentType) {
+    EquipmentType["FeedStream"] = "FeedStream";
+    EquipmentType["ProductStream"] = "ProductStream";
+    EquipmentType["Mixer"] = "Mixer";
+    EquipmentType["Splitter"] = "Splitter";
+    EquipmentType["Heater"] = "Heater";
+    EquipmentType["Cooler"] = "Cooler";
+    EquipmentType["Separator"] = "Separator";
+    EquipmentType["Pump"] = "Pump";
+    EquipmentType["Compressor"] = "Compressor";
+    EquipmentType["Valve"] = "Valve";
+    EquipmentType["HeatExchanger"] = "HeatExchanger";
+    EquipmentType["DistillationColumn"] = "DistillationColumn";
+    EquipmentType["CSTRReactor"] = "CSTRReactor";
+    EquipmentType["PFRReactor"] = "PFRReactor";
+    EquipmentType["ConversionReactor"] = "ConversionReactor";
+    EquipmentType["Absorber"] = "Absorber";
+    EquipmentType["Stripper"] = "Stripper";
+    EquipmentType["Cyclone"] = "Cyclone";
+    EquipmentType["ThreePhaseSeparator"] = "ThreePhaseSeparator";
+    EquipmentType["Crystallizer"] = "Crystallizer";
+    EquipmentType["Dryer"] = "Dryer";
+    EquipmentType["Filter"] = "Filter";
+    EquipmentType["DesignSpec"] = "DesignSpec";
+    EquipmentType["PipeSegment"] = "PipeSegment";
+    EquipmentType["EquilibriumReactor"] = "EquilibriumReactor";
+    EquipmentType["GibbsReactor"] = "GibbsReactor";
+})(EquipmentType || (EquipmentType = {}));
+export var EquipmentCategory;
+(function (EquipmentCategory) {
+    EquipmentCategory["Streams"] = "Streams";
+    EquipmentCategory["Mixing"] = "Mixing";
+    EquipmentCategory["HeatTransfer"] = "Heat Transfer";
+    EquipmentCategory["Separation"] = "Separation";
+    EquipmentCategory["PressureChange"] = "Pressure Change";
+    EquipmentCategory["Reaction"] = "Reaction";
+    EquipmentCategory["Logical"] = "Logical";
+    EquipmentCategory["Piping"] = "Piping";
+})(EquipmentCategory || (EquipmentCategory = {}));
+export var SimulationStatus;
+(function (SimulationStatus) {
+    SimulationStatus["Idle"] = "idle";
+    SimulationStatus["Running"] = "running";
+    SimulationStatus["Completed"] = "completed";
+    SimulationStatus["Error"] = "error";
+})(SimulationStatus || (SimulationStatus = {}));

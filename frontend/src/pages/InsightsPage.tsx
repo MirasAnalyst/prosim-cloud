@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Upload, X, Loader2, Sparkles, FileText, AlertTriangle, ArrowLeft, Sun, Moon, ChevronDown, ChevronRight } from 'lucide-react';
+import { Upload, X, Loader2, Sparkles, FileText, AlertTriangle, ArrowLeft, Home, Sun, Moon, ChevronDown, ChevronRight } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import { useThemeStore } from '../stores/themeStore';
 import EconomicParamsForm, { DEFAULT_ECONOMIC_PARAMS, type EconomicParams } from '../components/analysis/EconomicParamsForm';
@@ -169,8 +169,11 @@ export default function InsightsPage() {
       <header className="sticky top-0 z-30 bg-white/80 dark:bg-gray-950/80 backdrop-blur-lg border-b border-gray-200 dark:border-gray-800">
         <div className="max-w-4xl mx-auto px-4 h-12 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Link to="/app" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors">
+            <Link to="/app" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors" title="Back to simulator">
               <ArrowLeft size={16} />
+            </Link>
+            <Link to="/" className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors" title="Home">
+              <Home size={16} />
             </Link>
             <div className="flex items-center gap-2">
               <Sparkles size={16} className="text-amber-500" />
