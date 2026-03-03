@@ -406,7 +406,8 @@ test('7 — Ammonia Synthesis Loop', async ({ page }) => {
     makeNode('mix1', 'Mixer', 'Feed Mixer'),
     makeNode('h1', 'Heater', 'Pre-heater', { outletTemperature: 450 }),
     makeNode('cstr1', 'CSTRReactor', 'NH3 Reactor', {
-      volume: 50, temperature: 450, pressure: 15000,
+      volume: 50, reactionTemp: 450,
+      activationEnergy: 170, preExpFactor: 1.5e10, keyReactant: 'nitrogen',
     }),
     makeNode('cool1', 'Cooler', 'Reactor Effluent Cooler', { outletTemperature: -10 }),
     makeNode('sep1', 'Separator', 'NH3 Separator'),
@@ -496,16 +497,16 @@ test('8 — Methanol Production', async ({ page }) => {
 // ═══════════════════════════════════════════════════════════════════════════
 test('9 — Propane Refrigeration Cycle', async ({ page }) => {
   const nodes = [
-    makeFeed('f1', 'Propane Circuit', -30, 200, 15, { propane: 1.0 }),
+    makeFeed('f1', 'Propane Circuit', -35, 100, 15, { propane: 1.0 }),
     makeNode('comp1', 'Compressor', 'Refrig Compressor', { outletPressure: 1200, efficiency: 75 }),
     makeNode('cool1', 'Cooler', 'Condenser', { outletTemperature: 40 }),
-    makeNode('v1', 'Valve', 'Expansion Valve', { outletPressure: 200 }),
+    makeNode('v1', 'Valve', 'Expansion Valve', { outletPressure: 100 }),
     makeNode('sep1', 'Separator', 'Phase Separator'),
     makeProduct('p1', 'Vapor Return'),
     makeNode('h1', 'Heater', 'Evaporator', { outletTemperature: -30 }),
     makeNode('pipe1', 'PipeSegment', 'Cold Pipe', { length: 50, diameter: 0.2 }),
     makeProduct('p2', 'Cold Duty'),
-    makeFeed('f2', 'Makeup Propane', -30, 200, 0.5, { propane: 1.0 }),
+    makeFeed('f2', 'Makeup Propane', -35, 100, 0.5, { propane: 1.0 }),
   ];
   const edges = [
     E('e1', 'f1', 'out-1', 'comp1', 'in-1'),

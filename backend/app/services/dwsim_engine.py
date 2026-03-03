@@ -574,6 +574,13 @@ class DWSIMEngine:
 
             vf = state.VF if state.VF is not None else 0.0
 
+            # Supercritical override: if all components are above Tc and flash
+            # reports VF=0 (liquid), it's actually supercritical fluid — treat as vapor.
+            # thermo's FlashVL sometimes mis-assigns supercritical fluids as liquid.
+            if vf < 0.5 and hasattr(constants, 'Tcs') and len(constants.Tcs) > 0:
+                if all(T > 0.95 * Tc for Tc in constants.Tcs):
+                    vf = 1.0
+
             # Compute mixture molecular weight
             MW_mix = sum(z * mw for z, mw in zip(zs_norm, constants.MWs))
 
@@ -936,7 +943,7 @@ class DWSIMEngine:
             }
             _OUTLET_REQUIREMENTS: dict[str, int] = {
                 "Splitter": 2, "Separator": 2, "DistillationColumn": 2,
-                "Absorber": 2, "Stripper": 2,
+                "Absorber": 2, "Stripper": 1,  # Stripper can operate with 1 feed (reboiled mode)
             }
             for node in nodes:
                 nid = node.get("id", "")
@@ -1670,12 +1677,8 @@ class DWSIMEngine:
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out
-                            # Thermo-based outlet enthalpy for reference state consistency
-                            flash_valve_out = self._flash_tp(comp_names, zs_v, T_out, P_out, property_package)
-                            if flash_valve_out and flash_valve_out.get("MW_mix", 0) > 0:
-                                outlet["enthalpy"] = flash_valve_out["H"] / (flash_valve_out["MW_mix"] / 1000.0)
-                            else:
-                                outlet["enthalpy"] = inlet["enthalpy"]  # isenthalpic fallback
+                            # Valve is isenthalpic by definition: h_out = h_in
+                            outlet["enthalpy"] = inlet["enthalpy"]
                             outlet["vapor_fraction"] = vf_out
                             outlet["composition"] = dict(comp)
                             outlets["out-1"] = outlet
@@ -2127,6 +2130,7 @@ class DWSIMEngine:
                                 flash_result = self._flash_tp(comp_names, zs, T_op, P_op, property_package)
                                 if flash_result:
                                     vf = flash_result["VF"]
+                                    # Supercritical override now handled in _flash_tp()
                                     # Mass-based split
                                     MWs = flash_result["MWs"]
                                     gas_zs = flash_result["gas_zs"]
@@ -2143,6 +2147,10 @@ class DWSIMEngine:
                                     # Per-phase enthalpy from flash state
                                     h_vap = 0.0
                                     h_liq = 0.0
+                                    # Overall mixture enthalpy as fallback (supercritical/single-phase)
+                                    h_mix = flash_result.get("H", 0.0)
+                                    MW_mix = flash_result.get("MW_mix", 1.0)
+                                    h_mix_mass = h_mix / (MW_mix / 1000.0) if MW_mix > 0 else 0.0
                                     flasher = flash_result.get("flasher")
                                     if flasher:
                                         try:
@@ -2155,6 +2163,12 @@ class DWSIMEngine:
                                                 h_liq = liq_phase.H() / (MW_liq / 1000.0)  # J/kg
                                         except Exception:
                                             pass
+                                    # Supercritical/single-phase fallback: if VF≈1 but no gas phase
+                                    # (supercritical override), use overall mixture enthalpy
+                                    if vf > 0.99 and h_vap == 0.0 and h_mix_mass != 0.0:
+                                        h_vap = h_mix_mass
+                                    if vf < 0.01 and h_liq == 0.0 and h_mix_mass != 0.0:
+                                        h_liq = h_mix_mass
 
                                     outlets["out-1"] = {
                                         "temperature": T_op,
@@ -2902,12 +2916,27 @@ class DWSIMEngine:
                                 feed2 = inlets[1]
                             if feed1 is None:
                                 feed1 = self._build_feed_from_params(params, property_package)
+                            _reboiled_stripper = False
                             if feed2 is None:
                                 if ntype == "Stripper":
-                                    # Reboiled stripper: no external stripping gas — zero mass input
-                                    feed2 = dict(_DEFAULT_FEED)
-                                    feed2["mass_flow"] = 0.0
-                                    logs.append(f"{name}: operating as reboiled stripper (single feed, no stripping gas)")
+                                    # Reboiled stripper: internal G generated from reboiler
+                                    # This vapor comes FROM the liquid feed, not new mass
+                                    _reboiled_stripper = True
+                                    reboil_ratio = float(params.get("reboilRatio", 0.3))
+                                    feed2 = dict(feed1)
+                                    feed2["mass_flow"] = mf1 * reboil_ratio
+                                    feed2["vapor_fraction"] = 1.0
+                                    # Flash at elevated T to get vapor composition for stripping gas
+                                    T_reb = feed1["temperature"] + 20.0
+                                    cn_reb = list(feed1.get("composition", {}).keys())
+                                    zs_reb = [float(v) for v in feed1.get("composition", {}).values()]
+                                    if cn_reb:
+                                        flash_reb = self._flash_tp(cn_reb, zs_reb, T_reb, P_op, property_package)
+                                        if flash_reb and flash_reb.get("VF", 0) > 0.01:
+                                            gas_zs_reb = flash_reb.get("gas_zs", zs_reb)
+                                            feed2["composition"] = {cn_reb[i]: gas_zs_reb[i] for i in range(len(cn_reb))}
+                                            feed2["temperature"] = T_reb
+                                    logs.append(f"{name}: reboiled stripper — estimated internal G = {reboil_ratio*100:.0f}% of feed ({feed2['mass_flow']:.1f} kg/s)")
                                 else:
                                     feed2 = dict(_DEFAULT_FEED)
 
@@ -2999,7 +3028,7 @@ class DWSIMEngine:
                             acid_gases_present = {c for c in comp_names_all if c in _REACTIVE_K_EFF}
                             amines_present = {c for c in comp_names_all if c in _AMINE_SOLVENTS}
                             has_water = "water" in comp_names_all
-                            if acid_gases_present and ntype == "Absorber":
+                            if acid_gases_present and ntype in ("Absorber", "Stripper"):
                                 # CO2/H2S require amine solvent; SO2/NH3 work with water alone
                                 reactive_comps: set[str] = set()
                                 for c in acid_gases_present:
@@ -3070,7 +3099,9 @@ class DWSIMEngine:
                                 mf_out1 += n_out1.get(c, 0.0) * mw_c
                                 mf_out2 += n_out2.get(c, 0.0) * mw_c
                             # Scale to enforce overall mass balance
-                            total_in = mf1 + mf2
+                            # For reboiled strippers, the internal G comes from the feed itself
+                            # (not new mass), so total_in = mf1 only
+                            total_in = mf1 if _reboiled_stripper else mf1 + mf2
                             total_out = mf_out1 + mf_out2
                             if total_out > 1e-12:
                                 scale = total_in / total_out
