@@ -295,6 +295,18 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 5. **Rigorous distillation integration called `self._get_mw(comp_names, zs)` but `_get_mw` is a module-level function**: `_get_mw(comp_name: str)` takes a single compound name, not a list. The call `self._get_mw(comp_names, zs)` would have crashed at runtime. Fix: changed to `sum(zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))`. **Always verify whether helpers are instance methods (`self.`) or module-level functions, and check their signatures before calling.**
 
+6. **Stripper `mf1`/`P_op` referenced before assignment — NameError crash for all reboiled strippers**: The reboiled stripper block (feed2 mass_flow=0) used `mf1`, `P_op`, and `n_stages` which were only assigned further down in the code. Fix: moved variable assignments above the reboiled stripper block. **When adding conditional early-exit branches, ensure all variables used in the branch are assigned before it.**
+
+7. **Rigorous distillation fabricated feed flow as `2*D` instead of using actual feed**: `solve_rigorous_distillation()` had no `feed_flow` parameter — it invented `F = max(2*D, D+0.1)`, only correct when D/F=0.5. Fix: added `feed_flow` parameter, engine passes actual `feed_molar_flow`. **Solvers must receive actual feed conditions from the caller — never fabricate process data internally.**
+
+8. **Condenser duty had wrong sign (positive instead of negative), inflating reboiler duty by 2×Q_c**: Energy balance `Q_r = D*H_D + B*H_B + Q_c - F*H_F` used positive Q_c (heat added) but condensers remove heat (Q_c < 0). Reboiler duty was ~2× too high. Fix: ensured Q_c is negative, reboiler uses `-Q_c` in energy balance. **Condensers remove heat (Q < 0), reboilers add heat (Q > 0) — always enforce sign conventions in energy balances.**
+
+9. **Reboiler liquid flow initialized to zero — Thomas algorithm produces meaningless compositions on first iteration**: `sd.L = 0.0` at reboiler stage makes the TDMA diagonal element zero, producing near-zero or arbitrary liquid compositions that propagate upward. Fix: initialize to `B = F - D` (bottoms flow). **Distillation stage initialization must use physically meaningful flows — zero liquid at the reboiler violates the material balance structure.**
+
+10. **GibbsReactor used `Hf(298) - T*Sf(298)` approximation when `Gfgs` is available**: At 800°C the linear `Hf - T*Sf` formula overestimates Gibbs energy magnitude because it ignores Cp temperature dependence. The thermo library provides `constants.Gfgs` (standard Gibbs at 298K) directly. Fix: use `Gfgs` with Gibbs-Helmholtz temperature correction `Gf(T) = Gf(298) + (Hf - Gf_298)*(1 - T/298.15)`. **Always prefer library-provided thermodynamic properties over manual approximations from constituent values.**
+
+11. **HX Kern sizing assumed all flow through a single 3/4" tube — h overestimated by 10-100×**: Velocity through one tube was 100+ m/s (vs realistic 1-2 m/s), giving Re ~10⁶ and unrealistically high h. Fix: estimate tube count from target velocity (1 m/s liquid, 15 m/s gas), use shell equivalent diameter for shell-side. **Equipment sizing correlations require realistic flow geometry — single-element assumptions produce physically meaningless results.**
+
 ## Dev Commands
 ```bash
 # Backend
