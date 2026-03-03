@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
+import { API_BASE } from '../../lib/api-client';
 export default function HydraulicsPanel({ open, onClose }) {
     const [massFlow, setMassFlow] = useState(10);
     const [density, setDensity] = useState(1000);
@@ -20,7 +21,7 @@ export default function HydraulicsPanel({ open, onClose }) {
         setRunning(true);
         setError('');
         try {
-            const res = await fetch('/api/simulation/hydraulics', {
+            const res = await fetch(`${API_BASE}/api/simulation/hydraulics`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

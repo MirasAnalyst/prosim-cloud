@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
+import { API_BASE } from '../../lib/api-client';
 
 interface HydraulicsPanelProps {
   open: boolean;
@@ -26,7 +27,7 @@ export default function HydraulicsPanel({ open, onClose }: HydraulicsPanelProps)
     setRunning(true);
     setError('');
     try {
-      const res = await fetch('/api/simulation/hydraulics', {
+      const res = await fetch(`${API_BASE}/api/simulation/hydraulics`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

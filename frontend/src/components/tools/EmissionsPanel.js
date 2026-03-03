@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { API_BASE } from '../../lib/api-client';
 export default function EmissionsPanel({ open, onClose }) {
     const simResults = useSimulationStore((s) => s.results);
     const [fuelType, setFuelType] = useState('natural_gas');
@@ -23,7 +24,7 @@ export default function EmissionsPanel({ open, onClose }) {
                 stream_results: simResults.streamResults,
                 equipment_results: simResults.equipmentResults,
             } : null;
-            const res = await fetch('/api/simulation/emissions', {
+            const res = await fetch(`${API_BASE}/api/simulation/emissions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

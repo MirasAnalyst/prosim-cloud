@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
+import { API_BASE } from '../../lib/api-client';
 
 interface ControlValvePanelProps {
   open: boolean;
@@ -26,7 +27,7 @@ export default function ControlValvePanel({ open, onClose }: ControlValvePanelPr
     setRunning(true);
     setError('');
     try {
-      const res = await fetch('/api/simulation/control-valve', {
+      const res = await fetch(`${API_BASE}/api/simulation/control-valve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
+import { API_BASE } from '../../lib/api-client';
 export default function ControlValvePanel({ open, onClose }) {
     const [phase, setPhase] = useState('liquid');
     const [valveType, setValveType] = useState('globe');
@@ -20,7 +21,7 @@ export default function ControlValvePanel({ open, onClose }) {
         setRunning(true);
         setError('');
         try {
-            const res = await fetch('/api/simulation/control-valve', {
+            const res = await fetch(`${API_BASE}/api/simulation/control-valve`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

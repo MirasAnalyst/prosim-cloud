@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
+import { API_BASE } from '../../lib/api-client';
 
 interface ReliefValvePanelProps {
   open: boolean;
@@ -29,7 +30,7 @@ export default function ReliefValvePanel({ open, onClose }: ReliefValvePanelProp
     setRunning(true);
     setError('');
     try {
-      const res = await fetch('/api/simulation/relief-valve', {
+      const res = await fetch(`${API_BASE}/api/simulation/relief-valve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

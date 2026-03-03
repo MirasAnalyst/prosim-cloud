@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
+import { API_BASE } from '../../lib/api-client';
 export default function ReliefValvePanel({ open, onClose }) {
     const [phase, setPhase] = useState('gas');
     const [scenario, setScenario] = useState('blocked_outlet');
@@ -23,7 +24,7 @@ export default function ReliefValvePanel({ open, onClose }) {
         setRunning(true);
         setError('');
         try {
-            const res = await fetch('/api/simulation/relief-valve', {
+            const res = await fetch(`${API_BASE}/api/simulation/relief-valve`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, ReferenceDot } from 'recharts';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
+import { API_BASE } from '../../lib/api-client';
 
 interface PhaseEnvelopePanelProps {
   open: boolean;
@@ -53,7 +54,7 @@ export default function PhaseEnvelopePanel({ open, onClose }: PhaseEnvelopePanel
     setError('');
     setResults(null);
     try {
-      const res = await fetch('/api/simulation/phase-envelope', {
+      const res = await fetch(`${API_BASE}/api/simulation/phase-envelope`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

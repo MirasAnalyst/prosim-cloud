@@ -6,6 +6,7 @@ import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { equipmentLibrary } from '../../lib/equipment-library';
 import { EquipmentType } from '../../types';
+import { API_BASE } from '../../lib/api-client';
 const RESULT_KEYS = [
     { value: 'duty', label: 'Duty (kW)' },
     { value: 'work', label: 'Work (kW)' },
@@ -68,7 +69,7 @@ export default function SensitivityPanel({ open, onClose }) {
             type: e.type ?? 'stream',
         }));
         try {
-            const res = await fetch('/api/simulation/sensitivity', {
+            const res = await fetch(`${API_BASE}/api/simulation/sensitivity`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

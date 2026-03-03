@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { X, Play, Loader2, Download } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { API_BASE } from '../../lib/api-client';
 export default function PinchPanel({ open, onClose }) {
     const simResults = useSimulationStore((s) => s.results);
     const [streams, setStreams] = useState([]);
@@ -15,7 +16,7 @@ export default function PinchPanel({ open, onClose }) {
         if (!simResults)
             return;
         try {
-            await fetch('/api/simulation/pinch', {
+            await fetch(`${API_BASE}/api/simulation/pinch`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ streams: [], dt_min: dtMin }),
@@ -57,7 +58,7 @@ export default function PinchPanel({ open, onClose }) {
         setRunning(true);
         setError('');
         try {
-            const res = await fetch('/api/simulation/pinch', {
+            const res = await fetch(`${API_BASE}/api/simulation/pinch`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ streams, dt_min: dtMin }),

@@ -329,6 +329,58 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 22. **E2E tests navigated to `/` but simulator moved to `/app/*` after landing page was committed**: All 22 test files used `page.goto('/')` which now shows the marketing landing page, not the simulator. Tests waiting for `text=Equipment` timed out (26 failures). Also, Tier 5 UNIQUAC test's `page.locator('select').first()` found the unit system dropdown in TopNav instead of the property package dropdown in SimulationBasisPanel. Fix: updated all tests to `page.goto('/app')` and targeted the property package select by its label context. **When committing routing changes (new landing page, auth gates), immediately update all E2E test navigation paths — don't assume `/` still reaches the app.**
 
+### Chem-Sim Audit Round 2: Mistakes and Resolutions
+
+1. **Heater/Cooler outlet enthalpy from independent TP re-flash instead of energy balance**: HP flash gives T_out, then TP re-flash at T_out recomputes H_out — numerical round-trip error breaks energy conservation. Fix: set `outlet["enthalpy"] = inlet["enthalpy"] + duty_w / mf` directly from the first law. **Derive outlet enthalpy from energy balance, not redundant re-flashes — flash(H,P)→T→flash(T,P)→H' does not guarantee H'==H.**
+
+2. **Heater accepted negative duty (cooling instead of heating)**: User or AI could pass negative duty to a Heater, making it behave as a Cooler. Fix: `duty_w = abs(duty_w)` for Heater, `duty_w = -abs(duty_w)` for Cooler. **Enforce sign conventions per equipment type — heaters must add heat (Q>0).**
+
+3. **Pump outlet enthalpy inconsistent with work input**: Outlet enthalpy came from TP re-flash rather than energy balance, causing `h_out - h_in ≠ W/m`. Fix: `outlet["enthalpy"] = inlet["enthalpy"] + w_actual / mf` and VF from separate flash. **Same pattern as Heater fix — energy balance enthalpy prevents numerical inconsistency.**
+
+4. **Compressor outlet VF never updated after outlet flash**: Outlet VF stayed at inlet value even when compression changed the phase state. Fix: TP flash at (T_out, P_out) to update VF. **Any equipment that changes T or P must re-flash for correct VF.**
+
+5. **Valve `flash_in` referenced before assignment when flash path skipped**: If the conditional flash block was skipped, downstream code crashed with NameError. Fix: initialize `flash_in = None` before the conditional block. **Always initialize variables before conditional branches when used unconditionally afterward.**
+
+6. **Mixer pressure parameter ignored — always used pressureDrop**: `params.get("pressureDrop", 0)` was the only path, ignoring explicit `pressure` parameter. Fix: read `pressure` first, fall back to `pressureDrop` calculation. **Explicit operating parameters should take priority over differential parameters.**
+
+7. **Mixer VF defaulted to 0.0 when HP flash failed**: No fallback flash attempted, so gas mixtures showed as all-liquid. Fix: TP fallback flash at (T_out, P_out) for VF when HP flash fails, preserving energy-balance enthalpy. **When the primary flash fails, attempt a simpler flash for phase determination.**
+
+8. **HX LMTD path didn't update outlet vapor fractions**: VF stayed at inlet values after temperature changes, misleading downstream separators. Fix: extract VF from outlet TP flashes for both hot and cold sides. **Any equipment that changes stream temperature must update VF from flash.**
+
+9. **HX approach temperature could violate 2nd law (T_hot_out < T_cold_in)**: Default approach of `0.3 * dT_available` had no floor, allowing thermodynamic violations for small dT. Fix: `approach = max(1.0, min(0.3*dT, dT-1.0))` with small-dT branch. **Always enforce 2nd law constraints: T_hot_out >= T_cold_in + minimum approach.**
+
+10. **HX NTU cold enthalpy from independent TP flash — energy imbalance near phase change**: Hot and cold side independently flashed, giving slightly different duty values. Fix: compute duty from hot-side flash enthalpies, force `cold_out["enthalpy"] = h_cold_in + Q/mf_cold`. **In HX, one side determines duty, the other must be forced from energy balance.**
+
+11. **CSTR/PFR flashed outlet at inlet composition instead of reacted composition**: Flash used pre-reaction composition, giving wrong enthalpy and VF for the products. Fix: apply Arrhenius kinetics first, then `_clean_composition()` to remove pseudo-components, then flash. **Outlet flash must use the actual outlet composition after reaction.**
+
+12. **CSTR duty echoed user input instead of computed value**: `eq_res["duty"] = duty_kw` was the user's parameter, not the actual energy change. Fix: `actual_duty = mf * (h_out - h_in)`. **Equipment duty must be derived from energy balance, never echoed from user input.**
+
+13. **PFR Ergun pressure drop used hardcoded viscosity (1e-5 Pa·s)**: For liquid-phase PFRs (mu ~1e-3), viscous pressure drop was underestimated by 100×. Fix: use flash-derived `mu_gas` or `mu_liquid` based on VF. **Ergun viscous term is directly proportional to mu — always use composition/T-dependent viscosity.**
+
+14. **PFR outlet flash at nominal pressure ignored Ergun ΔP**: Flash used `P_out` (user parameter) instead of `P_out - dp_ergun`, giving wrong outlet state. Fix: track `P_out_final` after Ergun and flash at actual outlet pressure. **Outlet state must reflect actual outlet conditions including calculated pressure drops.**
+
+15. **CSTR/PFR "products" pseudo-component crashed thermo flash**: Arrhenius kinetics add a "products" entry that has no CAS/properties in thermo library. Fix: `_clean_composition()` removes pseudo-components and renormalizes before flash. **Always clean pseudo-components from composition before passing to thermodynamic flash.**
+
+16. **ConversionReactor consumed more reactant than available — negative mole fractions**: Multi-reaction systems could consume secondary reactants below zero. Fix: `actual_consume = min(consumed * coeff, max_consume)` with limiting reagent warning. **Stoichiometric consumption must be capped at available moles to prevent negative compositions.**
+
+17. **Separator re-flashed outlets redundantly instead of using per-phase enthalpy from initial flash**: `_flash_tp()` already returns `H_liquid` and `H_gas` (J/mol), but Separator performed a second flash to get outlet enthalpies. Fix: use `flash_result["H_liquid"]` and `flash_result["H_gas"]` directly with proper MW conversion. **Extract per-phase properties from the separation flash — redundant re-flashes waste computation and risk inconsistency.**
+
+18. **ThreePhaseSeparator copied inlet enthalpy to both liquid outlets**: Light and heavy liquids got the same mixed-feed enthalpy despite different compositions. Fix: flash each liquid composition separately at (T, P) for correct per-phase enthalpy. **Phase-separating equipment must compute per-phase enthalpies from independent flashes.**
+
+19. **Absorber missing solvent created phantom 1 kg/s default feed**: `dict(_DEFAULT_FEED)` injected 1 kg/s water from nothing, violating mass conservation. Fix: set `feed2["mass_flow"] = 0.0` when solvent feed is absent. **Default feed dicts must not inject mass — set mass_flow=0 when a feed is structurally absent.**
+
+20. **Absorber lean gas outlet used average temperature instead of countercurrent**: `T_out1 = (T1+T2)/2` is wrong for countercurrent columns where the gas exits near the solvent inlet temperature. Fix: `T_out1 = T_solvent + 5K`. **Countercurrent gas outlet approaches the solvent inlet temperature, not the average.**
+
+21. **Cyclone solidsFraction (mass basis) applied directly to mole-fraction composition**: `gc[heaviest] *= (1 - solidsFraction)` mixed mass and mole bases. Fix: convert `solidsFraction` to a mole-fraction removal factor via `mass_frac_heavy = z_heavy * MW_heavy / MW_mix`. **Never mix mass and mole fractions — always convert to a consistent basis before composition operations.**
+
+22. **Crystallizer yield ignored feed saturation state**: `crystal_frac` was a fixed heuristic, not based on actual supersaturation. Fix: `excess = feed_conc - sol_out(T_cryst)`, `crystal_frac = min(0.95, excess / feed_conc)`. **Crystallization yield must be based on supersaturation (feed concentration minus outlet solubility).**
+
+23. **Filter outlets used inlet enthalpy for both filtrate and cake despite different compositions**: Different compositions have different specific enthalpies at the same T/P. Fix: flash filtrate and cake compositions separately. **Any equipment that splits compositions must flash each outlet independently.**
+
+24. **PipeSegment outlet enthalpy not updated after heat loss**: Enthalpy stayed at inlet value even when `Q_loss > 0`, breaking downstream energy balance. Fix: `outlet["enthalpy"] = inlet_h - Q_loss / mf` and VF from flash. **Heat loss must be reflected in outlet enthalpy — first law: h_out = h_in - Q_loss/m.**
+
+25. **DesignSpec converged results not merged into outer simulation**: Inner simulation found the correct manipulated variable but its equipment/stream results were discarded. Fix: merge `inner_eq` and `inner_sr` into outer `equipment_results` and `stream_results`. **DesignSpec's inner simulation results must propagate to the final output — otherwise the converged state is invisible.**
+
 ## Dev Commands
 ```bash
 # Backend

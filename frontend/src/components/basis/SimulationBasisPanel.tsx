@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Search, Trash2, FlaskConical, Lightbulb } from 'lucide-react';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
-import { searchCompounds, type CompoundResult } from '../../lib/api-client';
+import { API_BASE, searchCompounds, type CompoundResult } from '../../lib/api-client';
 import BIPMatrixEditor from './BIPMatrixEditor';
 
 interface SimulationBasisPanelProps {
@@ -38,7 +38,7 @@ export default function SimulationBasisPanel({ open, onClose }: SimulationBasisP
       return;
     }
     try {
-      const res = await fetch('/api/simulation/property-advisor', {
+      const res = await fetch(`${API_BASE}/api/simulation/property-advisor`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ compounds }),

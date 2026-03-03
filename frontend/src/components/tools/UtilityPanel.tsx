@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { X, Play, Loader2 } from 'lucide-react';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { API_BASE } from '../../lib/api-client';
 
 interface UtilityPanelProps {
   open: boolean;
@@ -26,7 +27,7 @@ export default function UtilityPanel({ open, onClose }: UtilityPanelProps) {
         stream_results: simResults.streamResults,
         equipment_results: simResults.equipmentResults,
       };
-      const res = await fetch('/api/simulation/utility', {
+      const res = await fetch(`${API_BASE}/api/simulation/utility`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

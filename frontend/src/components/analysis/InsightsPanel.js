@@ -6,6 +6,7 @@ import { useSimulationStore } from '../../stores/simulationStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import EconomicParamsForm, { DEFAULT_ECONOMIC_PARAMS } from './EconomicParamsForm';
 import InsightsResultsView from './InsightsResultsView';
+import { API_BASE } from '../../lib/api-client';
 export default function InsightsPanel({ open, onClose }) {
     const simResults = useSimulationStore((s) => s.results);
     const nodes = useFlowsheetStore((s) => s.nodes);
@@ -22,7 +23,7 @@ export default function InsightsPanel({ open, onClose }) {
         setError('');
         setResults(null);
         try {
-            const res = await fetch('/api/simulation/insights', {
+            const res = await fetch(`${API_BASE}/api/simulation/insights`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

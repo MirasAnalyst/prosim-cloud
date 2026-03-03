@@ -5,6 +5,7 @@ import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { equipmentLibrary } from '../../lib/equipment-library';
 import { EquipmentType } from '../../types';
+import { API_BASE } from '../../lib/api-client';
 
 const RESULT_KEYS = [
   { value: 'duty', label: 'Duty (kW)' },
@@ -72,7 +73,7 @@ export default function OptimizationPanel({ open, onClose }: OptimizationPanelPr
     setRunning(true);
     setError('');
     try {
-      const res = await fetch('/api/simulation/optimize', {
+      const res = await fetch(`${API_BASE}/api/simulation/optimize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

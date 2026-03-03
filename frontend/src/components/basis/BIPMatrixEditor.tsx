@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { API_BASE } from '../../lib/api-client';
 
 interface BIPData {
   compounds: string[];
@@ -31,7 +32,7 @@ export default function BIPMatrixEditor() {
       setLoading(true);
       setError('');
       try {
-        const res = await fetch('/api/simulation/bip/matrix', {
+        const res = await fetch(`${API_BASE}/api/simulation/bip/matrix`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

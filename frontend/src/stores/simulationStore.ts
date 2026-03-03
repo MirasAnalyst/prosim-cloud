@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { SimulationStatus, type SimulationResult } from '../types';
 import { useFlowsheetStore } from './flowsheetStore';
 import { validateFlowsheet } from '../lib/flowsheet-validator';
+import { API_BASE } from '../lib/api-client';
 
 interface ConvergenceSettings {
   maxIter: number;
@@ -130,7 +131,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
     const { simulationBasis } = useFlowsheetStore.getState();
 
     try {
-      const response = await fetch('/api/simulation/run/stream', {
+      const response = await fetch(`${API_BASE}/api/simulation/run/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -278,7 +279,7 @@ export const useSimulationStore = create<SimulationState>((set, get) => ({
       targetHandle: e.targetHandle ?? '',
     }));
     try {
-      const res = await fetch('/api/simulation/batch', {
+      const res = await fetch(`${API_BASE}/api/simulation/batch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
