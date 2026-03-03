@@ -2778,6 +2778,7 @@ class DWSIMEngine:
                                         feed_stage=int(params.get("feedStage", n_stages // 2)),
                                         reflux_ratio=reflux_ratio,
                                         distillate_rate=dist_molar_rate,
+                                        feed_flow=feed_molar_flow,
                                         pressure_top=P_cond,
                                         property_package=property_package,
                                         condenser_type=condenser_t,
@@ -3485,18 +3486,27 @@ class DWSIMEngine:
                                     constants_g, _props_g = ChemicalConstantsPackage.from_IDs(comp_names_g)
 
                                     # Get formation properties
-                                    Hfgs = constants_g.Hfgs  # J/mol at 298.15 K
-                                    Sfgs = constants_g.Sfgs  # J/(mol*K) at 298.15 K
+                                    Gfgs = constants_g.Gfgs   # J/mol at 298.15 K (standard Gibbs)
+                                    Hfgs = constants_g.Hfgs   # J/mol at 298.15 K
+                                    Sfgs = constants_g.Sfgs   # J/(mol*K) at 298.15 K
 
                                     # Get atomic composition
                                     atomss = constants_g.atomss  # list of dicts, e.g., [{'C': 1, 'H': 4}, ...]
 
-                                    if Hfgs and Sfgs and atomss:
+                                    if atomss and (Gfgs or (Hfgs and Sfgs)):
+                                        T_ref = 298.15
                                         for i in range(n_comps):
-                                            hf = Hfgs[i] if Hfgs[i] is not None else 0.0
-                                            sf = Sfgs[i] if Sfgs[i] is not None else 0.0
-                                            # G_f(T) approx Hf - T * Sf (simplified, ignores Cp correction)
-                                            gf = hf - T_out * sf
+                                            # Prefer Gfgs (standard Gibbs at 298K) over Hf-T*Sf
+                                            if Gfgs and Gfgs[i] is not None:
+                                                gf_298 = Gfgs[i]
+                                            elif Hfgs and Sfgs and Hfgs[i] is not None and Sfgs[i] is not None:
+                                                gf_298 = Hfgs[i] - T_ref * Sfgs[i]
+                                            else:
+                                                gf_298 = 0.0
+                                            # Temperature correction: Gf(T) ≈ Gf(298) + (Hf - Gf_298) * (1 - T/T_ref)
+                                            # This is the Gibbs-Helmholtz approximation
+                                            hf = Hfgs[i] if (Hfgs and Hfgs[i] is not None) else gf_298
+                                            gf = gf_298 + (hf - gf_298) * (1.0 - T_out / T_ref)
                                             Gf_list.append(gf)
                                             atoms_list.append(atomss[i] if atomss[i] is not None else {})
                                         gibbs_from_thermo = True
@@ -3694,6 +3704,12 @@ class DWSIMEngine:
                                 feed2 = inlets[1]
                             if feed1 is None:
                                 feed1 = self._build_feed_from_params(params, property_package)
+                            n_stages = int(params.get("numberOfStages", 10))
+                            P_op_kpa = params.get("pressure")
+                            P_op = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else feed1["pressure"]
+
+                            mf1 = feed1["mass_flow"]
+
                             _reboiled_stripper = False
                             if feed2 is None:
                                 if ntype == "Stripper":
@@ -3717,12 +3733,6 @@ class DWSIMEngine:
                                     logs.append(f"{name}: reboiled stripper — estimated internal G = {reboil_ratio*100:.0f}% of feed ({feed2['mass_flow']:.1f} kg/s)")
                                 else:
                                     feed2 = dict(_DEFAULT_FEED)
-
-                            n_stages = int(params.get("numberOfStages", 10))
-                            P_op_kpa = params.get("pressure")
-                            P_op = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else feed1["pressure"]
-
-                            mf1 = feed1["mass_flow"]
                             mf2 = feed2["mass_flow"]
                             comp1 = feed1.get("composition", {})
                             comp2 = feed2.get("composition", {})
@@ -4707,13 +4717,27 @@ class DWSIMEngine:
                                                     except Exception:
                                                         pass
                                             # Dittus-Boelter: Nu = 0.023 * Re^0.8 * Pr^0.4
-                                            D_tube = 0.019  # 3/4" tube ID
-                                            v_s = side_port.get("mass_flow", 1.0) / max(rho_s, 0.1) / (math.pi * D_tube**2 / 4) if rho_s > 0 else 1.0
-                                            Re = rho_s * abs(v_s) * D_tube / max(mu_s, 1e-8)
+                                            D_tube = 0.019  # 3/4" tube OD → ~0.016 m ID
+                                            D_tube_id = 0.016
+                                            A_tube = math.pi * D_tube_id**2 / 4  # single tube flow area
+                                            # Estimate tube count from target velocity (~1 m/s liquid, ~15 m/s gas)
+                                            v_target = 1.0 if fl_s.get("VF", 0) < 0.5 else 15.0
+                                            vol_flow = side_port.get("mass_flow", 1.0) / max(rho_s, 0.1)
+                                            if side_label == "tube":
+                                                n_tubes = max(1, int(vol_flow / (v_target * A_tube)))
+                                                v_s = vol_flow / (n_tubes * A_tube) if n_tubes > 0 else v_target
+                                            else:
+                                                # Shell side: use equivalent diameter for square pitch
+                                                # D_eq = 4*(P_t^2 - pi*D_o^2/4) / (pi*D_o) for square pitch
+                                                P_t = 0.025  # tube pitch 25mm
+                                                D_eq = 4 * (P_t**2 - math.pi * D_tube**2 / 4) / (math.pi * D_tube)
+                                                D_tube_id = max(D_eq, 0.01)
+                                                v_s = vol_flow / max(math.pi * 0.2**2 / 4, 0.01)  # ~200mm shell ID estimate
+                                            Re = rho_s * abs(v_s) * D_tube_id / max(mu_s, 1e-8)
                                             Pr = Cp_s * mu_s / max(k_s, 1e-6)
                                             if Re > 0 and Pr > 0:
                                                 Nu = 0.023 * max(Re, 100) ** 0.8 * max(Pr, 0.1) ** 0.4
-                                                h_calc = Nu * k_s / D_tube
+                                                h_calc = Nu * k_s / D_tube_id
                                                 if side_label == "tube":
                                                     h_tube = h_calc
                                                 else:

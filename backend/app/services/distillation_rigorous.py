@@ -468,8 +468,9 @@ def _initialize_stages(
             sd.L = L_rect
             sd.V = V_rect
         elif j == n_stages - 1:
-            # Reboiler
-            sd.L = 0.0  # liquid product (bottoms) leaves as B, but no downflow
+            # Reboiler — L leaving as bottoms product = B = F - D
+            B_flow = max(feed_flow - D, 0.01)
+            sd.L = B_flow
             sd.V = V_strip
         else:
             # Stripping section (including feed stage)
@@ -831,6 +832,7 @@ def solve_rigorous_distillation(
     feed_stage: int = 10,
     reflux_ratio: float = 1.5,
     distillate_rate: float = 0.5,
+    feed_flow: float | None = None,
     pressure_top: float = 101325.0,
     pressure_bottom: float | None = None,
     property_package: str = "PengRobinson",
@@ -951,8 +953,12 @@ def solve_rigorous_distillation(
 
     _gas, _liq, flasher, constants, properties = flash_result
 
-    # Feed flow: F = max(2*D, D+0.1) so that B = F - D > 0
-    feed_flow = max(2.0 * distillate_rate, distillate_rate + 0.1)
+    # Feed flow: use caller-supplied value, fallback to D/F=0.5
+    if feed_flow is None or feed_flow <= 0:
+        feed_flow = max(2.0 * distillate_rate, distillate_rate + 0.1)
+    # Ensure B = F - D > 0
+    if feed_flow <= distillate_rate:
+        feed_flow = distillate_rate * 1.1
 
     logger.info(
         "Rigorous distillation: %d stages, feed stage %d, R=%.2f, "
@@ -1056,19 +1062,24 @@ def solve_rigorous_distillation(
     # -----------------------------------------------------------------------
     # Extract results
     # -----------------------------------------------------------------------
-    # Condenser duty (W): Q_c = V_1 * H_V_1 - (L_0 + D) * H_L_0  (total)
+    # Condenser duty (W): Q_c < 0 (heat removed)
+    # Energy balance on condenser: V_1*H_V_1 + Q_c = (L_0 + D)*H_L_0  (total)
+    # => Q_c = (L_0 + D)*H_L_0 - V_1*H_V_1  (negative since condensing)
     Q_c = 0.0
     if n_stages >= 2:
         V_1 = stages[1].V
         H_V_1 = stages[1].H_V
         if condenser_type == "total":
-            Q_c = V_1 * H_V_1 - (stages[0].L + distillate_rate) * stages[0].H_L
+            Q_c = (stages[0].L + distillate_rate) * stages[0].H_L - V_1 * H_V_1
         else:
-            Q_c = V_1 * H_V_1 - stages[0].L * stages[0].H_L - distillate_rate * stages[0].H_V
+            Q_c = stages[0].L * stages[0].H_L + distillate_rate * stages[0].H_V - V_1 * H_V_1
+    # Q_c should be negative (heat removed); enforce sign
+    if Q_c > 0:
+        Q_c = -Q_c
 
-    # Reboiler duty (W): Q_r from overall energy balance
-    # F*H_F + Q_r = D*H_D + B*H_B + Q_c
-    # H_F from flash at feed conditions
+    # Reboiler duty (W): Q_r > 0 (heat added)
+    # Overall energy balance: F*H_F + Q_r + Q_c = D*H_D + B*H_B
+    # => Q_r = D*H_D + B*H_B - Q_c - F*H_F
     H_F = 0.0
     try:
         state_feed = flasher.flash(T=feed_T, P=feed_P, zs=feed_zs_norm)
@@ -1080,7 +1091,7 @@ def solve_rigorous_distillation(
     B_flow = max(feed_flow - distillate_rate, 1e-10)
     H_B = stages[-1].H_L
 
-    Q_r = distillate_rate * H_D + B_flow * H_B + Q_c - feed_flow * H_F
+    Q_r = distillate_rate * H_D + B_flow * H_B - Q_c - feed_flow * H_F
     # Reboiler must add heat
     if Q_r < 0:
         logger.debug("Q_reb=%.1f W (negative from reference state); taking absolute value", Q_r)
