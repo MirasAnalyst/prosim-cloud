@@ -9,7 +9,7 @@ export default function AuthCallback() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) {
         subscription.unsubscribe();
-        navigate('/app', { replace: true });
+        navigate('/', { replace: true });
       }
     });
 
@@ -17,7 +17,7 @@ export default function AuthCallback() {
     const timeout = setTimeout(async () => {
       subscription.unsubscribe();
       const { data: { session } } = await supabase.auth.getSession();
-      navigate(session ? '/app' : '/login', { replace: true });
+      navigate(session ? '/' : '/login', { replace: true });
     }, 5000);
 
     return () => {
