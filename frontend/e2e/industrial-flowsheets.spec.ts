@@ -105,7 +105,7 @@ function collectIssues(res: any) {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 test.beforeEach(async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/app');
   await page.waitForLoadState('load');
 });
 

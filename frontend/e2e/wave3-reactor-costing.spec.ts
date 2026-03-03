@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 3: Reactor Enhancements', () => {
   test('CSTR with Arrhenius kinetics calculates rate constant', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -33,7 +33,7 @@ test.describe('Wave 3: Reactor Enhancements', () => {
   });
 
   test('PFR with Ergun calculates pressure drop', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {

@@ -501,7 +501,8 @@ async def property_advisor(body: dict):
     from app.services.property_advisor import advise_property_package
 
     compounds = body.get("compounds", [])
-    result = advise_property_package(compounds)
+    pressure_bar = body.get("pressure_bar")
+    result = advise_property_package(compounds, pressure_bar=pressure_bar)
     return result
 
 

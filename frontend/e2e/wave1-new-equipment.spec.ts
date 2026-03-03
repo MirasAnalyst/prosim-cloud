@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 1: New Equipment Types', () => {
   test('three-phase separator produces vapor and liquid outlets', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -34,7 +34,7 @@ test.describe('Wave 1: New Equipment Types', () => {
   });
 
   test('crystallizer produces crystal and mother liquor', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -67,7 +67,7 @@ test.describe('Wave 1: New Equipment Types', () => {
   });
 
   test('dryer removes moisture from feed', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -101,7 +101,7 @@ test.describe('Wave 1: New Equipment Types', () => {
   });
 
   test('filter separates filtrate and cake', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {

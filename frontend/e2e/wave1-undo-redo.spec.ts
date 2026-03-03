@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 1: Undo/Redo + Copy/Paste', () => {
   test('undo and redo buttons are visible and respond to state', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     // Verify undo/redo buttons exist

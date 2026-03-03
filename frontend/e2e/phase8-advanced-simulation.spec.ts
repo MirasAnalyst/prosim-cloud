@@ -22,7 +22,7 @@ async function createProj(page: any): Promise<string> {
 test.describe('Phase 8: Advanced Simulation Features', () => {
 
   test('simulation basis: add/remove compounds via API', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -91,7 +91,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('feed stream node: create + simulate + verify results', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -163,7 +163,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('product stream node: receives upstream conditions', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -232,7 +232,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('energy stream: connects compressor power port', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -303,7 +303,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('sensitivity analysis: vary heater temperature, get output array', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -394,7 +394,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('case study: save + list + load case', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -462,7 +462,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('case comparison: compare two cases returns diff', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -539,7 +539,7 @@ test.describe('Phase 8: Advanced Simulation Features', () => {
   });
 
   test('feed stream with global compounds: composition uses basis', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {

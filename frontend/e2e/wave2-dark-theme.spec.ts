@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 test('dark/light theme toggle', async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/app');
   await page.waitForLoadState('networkidle');
 
   // Default should be dark

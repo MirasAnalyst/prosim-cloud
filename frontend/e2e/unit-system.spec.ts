@@ -18,7 +18,7 @@ test.describe.configure({ mode: 'serial' });
 test.setTimeout(120_000);
 
 test.beforeEach(async ({ page }) => {
-  await page.goto('/');
+  await page.goto('/app');
 });
 
 // ---------------------------------------------------------------------------

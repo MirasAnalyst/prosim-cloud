@@ -307,6 +307,26 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 11. **HX Kern sizing assumed all flow through a single 3/4" tube — h overestimated by 10-100×**: Velocity through one tube was 100+ m/s (vs realistic 1-2 m/s), giving Re ~10⁶ and unrealistically high h. Fix: estimate tube count from target velocity (1 m/s liquid, 15 m/s gas), use shell equivalent diameter for shell-side. **Equipment sizing correlations require realistic flow geometry — single-element assumptions produce physically meaningless results.**
 
+12. **Rigorous distillation mass split used MW ratio instead of molar_flow × MW — 4× error for asymmetric splits**: `frac_d = MW_d / (MW_d + MW_b)` computes average molecular weight ratio, not mass fraction. For D/F=0.2 methane/decane, gives 10% instead of correct 2.7%. Fix: `mass_d = dist_molar_rate * MW_d`, `mass_b = B_molar * MW_b`. **Mass splits must multiply molar flow × MW per stream — molecular weight ratios alone have no physical meaning.**
+
+13. **EquilibriumReactor Q ignored (P/P_ref)^delta_nu pressure correction**: `ln(Q) = Σ(nu_i·ln(y_i))` computes Ky but user Keq is Kp. Missing `delta_nu·ln(P/P_ref)` means wrong equilibrium at any pressure ≠ 1 atm — off by (P/P_ref)^delta_nu for reactions with net mole change. Fix: added pressure correction to reaction quotient. **Gas-phase Kp = Ky·(P/P_ref)^Δν — always include the pressure term for reactions where moles change.**
+
+14. **Binary VLE pure-component endpoints fell through to FlashVL without `continue`**: After the pure-endpoint try block, execution continued to `flasher.flash(P=P, VF=0.0, zs=[0.0, 1.0])` — FlashVL on pure compositions produces degenerate K-values or crashes. Fix: added proper boiling-point flash at pure endpoints with `continue` to skip the mixture flash. Applied to both Txy and Pxy functions. **When handling special cases (pure endpoints) in a loop, always `continue` after the special handling to prevent fall-through.**
+
+15. **GibbsReactor SLSQP used finite-difference gradients — slow and fragile near bounds**: Without analytical gradient, SLSQP needs 2N extra function evaluations per iteration. Near bounds (n_i ≈ 1e-15), finite-difference steps cross into log(0) territory. Fix: added `gibbs_gradient()` returning `dG/dn_k = Gf_k + RT·ln(y_k·P/P_ref)` and passed as `jac=gibbs_gradient`. **Always provide analytical gradients to constrained optimizers when the objective is differentiable.**
+
+16. **Distillation feed enthalpy approximated as (H_L + H_V)/2 instead of actual feed flash**: Feed quality `q` determines whether feed is subcooled liquid, saturated, or superheated vapor. Averaging stage enthalpies assumes q=0.5 regardless of actual feed conditions, giving wrong internal L/V flows. Fix: flash feed at (T_feed, P_feed) before iteration loop, pass `feed_H` to `_update_flows()`. **Feed enthalpy must come from actual feed conditions, not from stage enthalpies which reflect a different T/P/composition.**
+
+17. **Equilibrium and Gibbs reactors reported user-supplied duty instead of computed duty**: `eq_res["duty"] = duty_kw` echoed the user's input parameter, not the actual energy change. Fix: compute `actual_duty = mf_out·h_out - mf·h_in` from flash enthalpies. **Equipment duty must be derived from the energy balance, never echoed from user input — the user sets T or Q, the engine computes the other.**
+
+18. **BIP override forced symmetry for asymmetric NRTL/UNIQUAC parameters**: `result[j][i] = value` applied to all property packages, but NRTL/UNIQUAC `tau_ij ≠ tau_ji`. Setting `methanol|water: 200` also set `water|methanol: 200`. Fix: only apply symmetry for cubic EOS (PR/SRK); NRTL/UNIQUAC set only the specified direction. **Cubic EOS kij are symmetric; activity coefficient model parameters (NRTL τij, UNIQUAC τij) are inherently asymmetric.**
+
+19. **Shell-side HTC used Dittus-Boelter (tube-side correlation) — h_shell overestimated 50-200%**: Dittus-Boelter is for turbulent flow inside smooth tubes. Shell-side involves cross-flow over tube banks with baffles. Fix: shell-side now uses Kern correlation `Nu = 0.36·Re^0.55·Pr^(1/3)`. **Tube-side and shell-side heat transfer are fundamentally different flow geometries — always use the correct correlation for each side.**
+
+20. **Rigorous distillation could declare convergence on iteration 1 — premature termination**: If initialization was very good (max|ΔT| ≈ 0 from first bubble-point flash), solver declared convergence before material balance had iterated enough for actual separation. Fix: require `iteration >= 3` before checking convergence. **MESH solvers need multiple outer iterations to converge compositions even if temperatures look converged — enforce a minimum iteration count.**
+
+21. **Condenser duty sign inconsistent between FUG (positive) and Rigorous (negative)**: FUG stores `condenserDuty` as positive (heat removed), rigorous stores as negative (thermodynamic convention). Switching methods flips the sign on the same physical quantity. Fix: use `abs()` for both condenser and reboiler duties in the rigorous integration path. **When integrating multiple solver methods, normalize output conventions (sign, units) at the integration boundary.**
+
 ## Dev Commands
 ```bash
 # Backend

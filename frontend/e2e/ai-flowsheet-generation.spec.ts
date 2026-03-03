@@ -10,7 +10,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('AI Flowsheet Generation', () => {
   test('API returns flowsheet_action with equipment and connections', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     // Call the agent API directly from the browser
@@ -76,7 +76,7 @@ test.describe('AI Flowsheet Generation', () => {
   });
 
   test('plain text question returns no flowsheet_action', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -96,7 +96,7 @@ test.describe('AI Flowsheet Generation', () => {
   });
 
   test('AI-generated flowsheet renders nodes on canvas via UI', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     // Open the AI panel — button has text "AI" with Bot icon in TopNav

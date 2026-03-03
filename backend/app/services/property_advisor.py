@@ -55,11 +55,15 @@ _AMINE_SOLVENTS = {
 _ACID_GASES = {"carbon dioxide", "hydrogen sulfide"}
 
 
-def advise_property_package(compounds: list[str]) -> dict[str, Any]:
+def advise_property_package(
+    compounds: list[str],
+    pressure_bar: float | None = None,
+) -> dict[str, Any]:
     """Recommend a property package based on compound classification.
 
     Args:
         compounds: list of compound names (case-insensitive)
+        pressure_bar: optional operating pressure in bar for pressure-aware advice
 
     Returns:
         {recommended, reason, alternatives, warnings}
@@ -74,6 +78,14 @@ def advise_property_package(compounds: list[str]) -> dict[str, Any]:
 
     names = {c.lower().strip() for c in compounds}
     warnings: list[str] = []
+
+    # High-pressure warning for activity coefficient models
+    if pressure_bar is not None and pressure_bar > 50:
+        warnings.append(
+            f"Operating pressure ({pressure_bar:.0f} bar) is above 50 bar. "
+            "Activity coefficient models (NRTL/UNIQUAC) lose accuracy at high pressure. "
+            "Consider Peng-Robinson or SRK with tuned BIPs."
+        )
 
     has_polar = bool(names & _POLAR_COMPOUNDS)
     has_hbond = bool(names & _HYDROGEN_BONDING)

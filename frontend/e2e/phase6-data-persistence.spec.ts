@@ -17,7 +17,7 @@ async function createProject(name: string): Promise<{ id: string; [k: string]: u
 test.describe('Phase 6: Data & Persistence', () => {
 
   test('version create + list API', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -73,7 +73,7 @@ test.describe('Phase 6: Data & Persistence', () => {
   });
 
   test('export flowsheet as JSON (valid structure)', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -120,7 +120,7 @@ test.describe('Phase 6: Data & Persistence', () => {
   });
 
   test('import endpoint accepts file upload', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -175,7 +175,7 @@ test.describe('Phase 6: Data & Persistence', () => {
   });
 
   test('simulation results export CSV', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -208,7 +208,7 @@ test.describe('Phase 6: Data & Persistence', () => {
   });
 
   test('PFD export buttons exist in UI', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     // Find the Export dropdown button by its title
@@ -225,7 +225,7 @@ test.describe('Phase 6: Data & Persistence', () => {
   });
 
   test('validation catches orphan edges', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -250,7 +250,7 @@ test.describe('Phase 6: Data & Persistence', () => {
   });
 
   test('backup/restore roundtrip', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {

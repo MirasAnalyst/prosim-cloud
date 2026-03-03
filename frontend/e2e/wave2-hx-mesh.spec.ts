@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 2: HX NTU + Costing', () => {
   test('HX NTU method calculates effectiveness', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -33,7 +33,7 @@ test.describe('Wave 2: HX NTU + Costing', () => {
   });
 
   test('equipment costing returns purchase cost for pump', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {

@@ -11,7 +11,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Tier 5: Enhancements', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForSelector('text=Equipment', { timeout: 10_000 });
     await page.waitForTimeout(500);
   });
@@ -151,11 +151,13 @@ test.describe('Tier 5: Enhancements', () => {
   test('Test 4: UNIQUAC property package in dropdown', async ({ page }) => {
     // Property package dropdown is now inside the Simulation Basis panel
     // Click the Basis button to open the panel, then check options
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
     await page.locator('button[title="Simulation Basis"]').click();
     await page.waitForTimeout(500);
-    const options = await page.locator('select').first().locator('option').allTextContents();
+    // The property package select is inside the Simulation Basis panel (not the TopNav unit system select)
+    const ppSelect = page.locator('text=Property Package').locator('..').locator('select');
+    const options = await ppSelect.locator('option').allTextContents();
     expect(options).toContain('UNIQUAC');
     expect(options).toContain('NRTL');
     expect(options).toContain('Peng-Robinson');

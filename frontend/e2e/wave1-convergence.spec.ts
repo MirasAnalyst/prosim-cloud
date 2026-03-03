@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 1: Convergence Settings', () => {
   test('convergence_settings accepted by API', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     // POST with convergence_settings — verify the API accepts and uses them
@@ -31,7 +31,7 @@ test.describe('Wave 1: Convergence Settings', () => {
   });
 
   test('convergence settings gear icon visible in TopNav', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     // The settings gear button should be visible

@@ -31,7 +31,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T3-3: Property Package Advisor
   test('property advisor recommends correct packages', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -75,7 +75,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T3-4: Binary VLE Txy diagram
   test('binary VLE Txy returns bubble and dew curves', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -113,7 +113,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T2-3: BIP Matrix retrieval
   test('BIP matrix returns non-zero values for known pairs', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const result = await page.evaluate(async () => {
@@ -143,7 +143,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T2-7: Equilibrium Reactor
   test('equilibrium reactor computes outlet from Keq', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     // Water-gas shift: CO + H2O ⇌ CO2 + H2
@@ -206,7 +206,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T2-7: Gibbs Reactor
   test('gibbs reactor finds equilibrium composition', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     // Methane steam reforming: CH4 + H2O → CO + 3H2
@@ -261,7 +261,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T1-3: Rigorous Distillation (method = Rigorous)
   test('rigorous distillation produces stage profiles', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     // Benzene/toluene column with rigorous method
@@ -351,7 +351,7 @@ test.describe('Phase 10: HYSYS/DWSIM Parity', () => {
 
   // T2-2: Transport properties in HX sizing
   test('HX sizing includes Kern method U_calculated', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('load');
 
     const nodes = [

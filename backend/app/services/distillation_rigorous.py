@@ -1005,7 +1005,9 @@ def solve_rigorous_distillation(
         state_feed = flasher.flash(T=feed_T, P=feed_P, zs=feed_zs_norm)
         feed_H = state_feed.H()  # J/mol
     except Exception:
-        pass  # will fall back to (H_L+H_V)/2 in _update_flows
+        # Cp-based fallback (typical liquid ~150 J/(mol·K))
+        feed_H = 150.0 * (feed_T - 298.15)
+        logger.warning("Feed flash failed for rigorous distillation; using Cp-based enthalpy estimate")
 
     # -----------------------------------------------------------------------
     # Outer iteration loop

@@ -3698,6 +3698,8 @@ class DWSIMEngine:
                                 actual_duty_g = mf_out * h_out_g - mf * h_in_g  # W
                                 eq_res["duty"] = round(_w_to_kw(actual_duty_g), 3)
                                 eq_res["deltaG_kW"] = round(delta_G / 1000.0, 3)
+                                if total_moles_in > 0:
+                                    eq_res["deltaG_kJ_per_mol"] = round(delta_G / total_moles_in / 1000.0, 3)
                                 eq_res["outletComposition"] = {
                                     k: round(v, 6) for k, v in out_comp_g.items() if v > 1e-10
                                 }
@@ -4745,8 +4747,8 @@ class DWSIMEngine:
                                                     except Exception:
                                                         pass
                                             # Dittus-Boelter: Nu = 0.023 * Re^0.8 * Pr^0.4
-                                            D_tube = 0.019  # 3/4" tube OD → ~0.016 m ID
-                                            D_tube_id = 0.016
+                                            D_tube_od = 0.019  # 3/4" tube OD
+                                            D_tube_id = 0.016  # tube inner diameter
                                             A_tube = math.pi * D_tube_id**2 / 4  # single tube flow area
                                             # Estimate tube count from target velocity (~1 m/s liquid, ~15 m/s gas)
                                             v_target = 1.0 if fl_s.get("VF", 0) < 0.5 else 15.0
@@ -4754,14 +4756,14 @@ class DWSIMEngine:
                                             if side_label == "tube":
                                                 n_tubes = max(1, int(vol_flow / (v_target * A_tube)))
                                                 v_s = vol_flow / (n_tubes * A_tube) if n_tubes > 0 else v_target
+                                                D_h = D_tube_id  # tube hydraulic diameter
                                             else:
                                                 # Shell side: use equivalent diameter for square pitch
                                                 # D_eq = 4*(P_t^2 - pi*D_o^2/4) / (pi*D_o) for square pitch
                                                 P_t = 0.025  # tube pitch 25mm
-                                                D_eq = 4 * (P_t**2 - math.pi * D_tube**2 / 4) / (math.pi * D_tube)
-                                                D_tube_id = max(D_eq, 0.01)
+                                                D_eq = 4 * (P_t**2 - math.pi * D_tube_od**2 / 4) / (math.pi * D_tube_od)
+                                                D_h = max(D_eq, 0.01)  # shell hydraulic diameter
                                                 v_s = vol_flow / max(math.pi * 0.2**2 / 4, 0.01)  # ~200mm shell ID estimate
-                                            D_h = D_tube_id  # hydraulic diameter for this side
                                             Re = rho_s * abs(v_s) * D_h / max(mu_s, 1e-8)
                                             Pr = Cp_s * mu_s / max(k_s, 1e-6)
                                             if Re > 0 and Pr > 0:

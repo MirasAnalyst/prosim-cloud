@@ -11,7 +11,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Tier 4: Core Simulation', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForSelector('text=Equipment', { timeout: 10_000 });
     await page.waitForTimeout(500);
   });

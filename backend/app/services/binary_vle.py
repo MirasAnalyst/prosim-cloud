@@ -43,6 +43,13 @@ def _build_binary_flasher(
         comp_names = [comp_a, comp_b]
         constants, properties = ChemicalConstantsPackage.from_IDs(comp_names)
 
+        if property_package in ("NRTL", "UNIQUAC"):
+            logger.warning(
+                "Binary VLE diagram using Peng-Robinson instead of %s — "
+                "activity coefficient VLE diagrams not yet supported",
+                property_package,
+            )
+
         bip_source = "ChemSep SRK" if property_package == "SRK" else "ChemSep PR"
         try:
             kijs = IPDB.get_ip_asymmetric_matrix(bip_source, constants.CASs, "kij")

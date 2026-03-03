@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 2: Pump Curves, Multi-Stage Compressor, Valve Cv', () => {
   test('pump with NPSH check warns on low NPSH', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -42,7 +42,7 @@ test.describe('Wave 2: Pump Curves, Multi-Stage Compressor, Valve Cv', () => {
   });
 
   test('multi-stage compressor splits work across stages', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -81,7 +81,7 @@ test.describe('Wave 2: Pump Curves, Multi-Stage Compressor, Valve Cv', () => {
   });
 
   test('valve Cv calculation with choked flow check', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {

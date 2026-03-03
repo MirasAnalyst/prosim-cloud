@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Wave 2: SSE + Batch Simulation', () => {
   test('SSE stream endpoint returns complete event', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {
@@ -27,7 +27,7 @@ test.describe('Wave 2: SSE + Batch Simulation', () => {
   });
 
   test('batch simulation returns multiple results', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/app');
     await page.waitForLoadState('networkidle');
 
     const result = await page.evaluate(async () => {

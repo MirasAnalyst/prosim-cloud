@@ -84,7 +84,7 @@ test.describe('Phase 3: Engine Accuracy', () => {
 
   test.beforeEach(async ({ page }) => {
     // Navigate and wait for React app to mount
-    await page.goto('/');
+    await page.goto('/app');
     // Wait for the Equipment palette to confirm app is loaded
     await page.waitForSelector('text=Equipment', { timeout: 10_000 });
     // Small delay for stores to initialize
