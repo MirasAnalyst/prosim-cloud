@@ -1,8 +1,10 @@
 import { Fragment, useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { ChevronUp, ChevronDown, ChevronRight, AlertTriangle, CheckCircle2, ArrowUp, ArrowDown, Download, ChevronDown as ChevronDownSmall } from 'lucide-react';
 import { toast } from 'sonner';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
+import { useUnitStore } from '../../stores/unitStore';
 import { SimulationStatus } from '../../types';
 import { exportSimulationResults } from '../../lib/api-client';
 import { downloadBlob } from '../../lib/download-utils';
@@ -21,6 +23,9 @@ export default function BottomPanel() {
   const error = useSimulationStore((s) => s.error);
   const nodes = useFlowsheetStore((s) => s.nodes);
   const edges = useFlowsheetStore((s) => s.edges);
+  const us = useUnitStore((s) => s.unitSystem);
+  const u = us.units;
+  const c = us.fromSI;
 
   const prevStatus = useRef(status);
   useEffect(() => {
@@ -109,11 +114,11 @@ export default function BottomPanel() {
 
   const exportCsv = useCallback(() => {
     if (sortedStreamEntries.length === 0) return;
-    const header = 'Stream,Temperature (C),Pressure (kPa),Flow (kg/s),VF,Enthalpy (kJ/kg),MW (g/mol),Molar Flow (mol/s),Composition,Component,Mole Frac,Mass Frac,Comp Molar Flow (mol/s),Comp Mass Flow (kg/s)';
+    const header = `Stream,Temperature (${u.temperature}),Pressure (${u.pressure}),Flow (${u.massFlow}),VF,Enthalpy (${u.enthalpy}),Entropy (${u.entropy}),MW (g/mol),Molar Flow (${u.molarFlow}),Density (${u.density}),Cp (${u.heatCapacity}),Viscosity (${u.viscosity}),Therm Cond (${u.thermalConductivity}),Surf Tension (${u.surfaceTension}),Z Factor,Vol Flow (${u.volumetricFlow}),Composition,Component,Mole Frac,Mass Frac,Comp Molar Flow (mol/s),Comp Mass Flow (kg/s)`;
     const rows: string[] = [];
     for (const e of sortedStreamEntries) {
       rows.push(
-        `"${e.streamName}",${e.temperature.toFixed(1)},${e.pressure.toFixed(1)},${e.flowRate.toFixed(3)},${e.vapor_fraction?.toFixed(3) ?? ''},${e.enthalpy?.toFixed(2) ?? ''},${e.molecular_weight?.toFixed(2) ?? ''},${e.molar_flow?.toFixed(4) ?? ''},"${formatComposition(e.composition)}",,,,, `
+        `"${e.streamName}",${c.temperature(e.temperature).toFixed(1)},${c.pressure(e.pressure).toFixed(1)},${c.massFlow(e.flowRate).toFixed(3)},${e.vapor_fraction?.toFixed(3) ?? ''},${e.enthalpy != null ? c.enthalpy(e.enthalpy).toFixed(2) : ''},${e.entropy != null ? c.entropy(e.entropy).toFixed(4) : ''},${e.molecular_weight?.toFixed(2) ?? ''},${e.molar_flow != null ? c.molarFlow(e.molar_flow).toFixed(4) : ''},${e.density != null ? c.density(e.density).toFixed(2) : ''},${e.Cp_mass != null ? c.heatCapacity(e.Cp_mass).toFixed(1) : ''},${e.viscosity != null ? c.viscosity(e.viscosity).toFixed(6) : ''},${e.thermal_conductivity != null ? c.thermalConductivity(e.thermal_conductivity).toFixed(6) : ''},${e.surface_tension != null ? c.surfaceTension(e.surface_tension).toFixed(4) : ''},${e.Z_factor ?? ''},${e.volumetric_flow != null ? c.volumetricFlow(e.volumetric_flow).toFixed(6) : ''},"${formatComposition(e.composition)}",,,,, `
       );
       if (e.component_molar_flows && Object.keys(e.component_molar_flows).length > 0) {
         const comps = Object.keys(e.component_molar_flows);
@@ -160,7 +165,7 @@ export default function BottomPanel() {
   return (
     <div
       className={`bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 transition-all ${
-        expanded ? 'h-64' : 'h-10'
+        expanded ? (expandedStreams.size > 0 ? 'h-[50vh]' : 'h-64') : 'h-10'
       }`}
     >
       <button
@@ -248,6 +253,24 @@ export default function BottomPanel() {
             </div>
           )}
 
+          {/* Convergence History Chart (T2-5) */}
+          {results?.convergenceInfo?.history && results.convergenceInfo.history.length > 1 && (
+            <div className="mt-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg p-3">
+              <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">
+                Convergence History ({results.convergenceInfo.history.length} iterations)
+              </h3>
+              <ResponsiveContainer width="100%" height={120}>
+                <LineChart data={results.convergenceInfo.history} margin={{ top: 5, right: 10, bottom: 5, left: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+                  <XAxis dataKey="iteration" tick={{ fontSize: 9 }} label={{ value: 'Iteration', position: 'bottom', offset: -2, style: { fontSize: 9 } }} />
+                  <YAxis scale="log" domain={['auto', 'auto']} tick={{ fontSize: 9 }} label={{ value: 'Error', angle: -90, position: 'left', offset: -5, style: { fontSize: 9 } }} />
+                  <Tooltip contentStyle={{ fontSize: 10, backgroundColor: '#1f2937', border: '1px solid #374151' }} />
+                  <Line type="monotone" dataKey="max_error" stroke="#ef4444" dot={false} strokeWidth={2} name="Max Error" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
           {sortedStreamEntries.length > 0 && (
             <div className="mt-3">
               <div className="flex items-center justify-between mb-2">
@@ -276,9 +299,9 @@ export default function BottomPanel() {
                   <tr className="text-gray-500 border-b border-gray-200 dark:border-gray-800">
                     {([
                       ['stream', 'text-left', 'Stream'],
-                      ['temperature', 'text-right', 'Temp (\u00B0C)'],
-                      ['pressure', 'text-right', 'Pressure (kPa)'],
-                      ['flowRate', 'text-right', 'Flow (kg/s)'],
+                      ['temperature', 'text-right', `Temp (${u.temperature})`],
+                      ['pressure', 'text-right', `Pressure (${u.pressure})`],
+                      ['flowRate', 'text-right', `Flow (${u.massFlow})`],
                       ['vapor_fraction', 'text-right', 'VF'],
                       ['composition', 'text-left', 'Composition'],
                     ] as [SortCol, string, string][]).map(([col, align, label]) => (
@@ -320,9 +343,9 @@ export default function BottomPanel() {
                               {entry.streamName}
                             </span>
                           </td>
-                          <td className="text-right py-1 pr-4">{entry.temperature.toFixed(1)}</td>
-                          <td className="text-right py-1 pr-4">{entry.pressure.toFixed(1)}</td>
-                          <td className="text-right py-1 pr-4">{entry.flowRate.toFixed(3)}</td>
+                          <td className="text-right py-1 pr-4">{c.temperature(entry.temperature).toFixed(1)}</td>
+                          <td className="text-right py-1 pr-4">{c.pressure(entry.pressure).toFixed(1)}</td>
+                          <td className="text-right py-1 pr-4">{c.massFlow(entry.flowRate).toFixed(3)}</td>
                           <td className="text-right py-1 pr-4">{entry.vapor_fraction?.toFixed(3) ?? '\u2014'}</td>
                           <td className="py-1 max-w-[300px] truncate text-gray-500 dark:text-gray-400" title={compStr}>
                             {compStr}
@@ -331,17 +354,54 @@ export default function BottomPanel() {
                         {isExpanded && hasComponents && (
                           <tr key={`${entry.id}-details`} className="bg-gray-50/50 dark:bg-gray-800/30">
                             <td colSpan={6} className="px-4 py-2">
-                              <div className="text-[11px] text-gray-500 dark:text-gray-400 mb-1.5">
-                                MW: {entry.molecular_weight?.toFixed(2) ?? '—'} g/mol | Molar Flow: {entry.molar_flow?.toFixed(4) ?? '—'} mol/s | Enthalpy: {entry.enthalpy?.toFixed(2) ?? '—'} kJ/kg
+                              {/* Bulk stream properties */}
+                              <div className="text-[11px] text-gray-500 dark:text-gray-400 mb-1.5 flex flex-wrap gap-x-3">
+                                <span>MW: {entry.molecular_weight?.toFixed(2) ?? '—'} g/mol</span>
+                                <span>Molar Flow: {entry.molar_flow != null ? c.molarFlow(entry.molar_flow).toFixed(4) : '—'} {u.molarFlow}</span>
+                                <span>H: {entry.enthalpy != null ? c.enthalpy(entry.enthalpy).toFixed(2) : '—'} {u.enthalpy}</span>
+                                <span>S: {entry.entropy != null ? c.entropy(entry.entropy).toFixed(4) : '—'} {u.entropy}</span>
+                                {entry.density != null && <span>ρ: {c.density(entry.density).toFixed(2)} {u.density}</span>}
+                                {entry.Cp_mass != null && <span>Cp: {c.heatCapacity(entry.Cp_mass).toFixed(1)} {u.heatCapacity}</span>}
+                                {entry.Cv_mass != null && <span>Cv: {c.heatCapacity(entry.Cv_mass).toFixed(1)} {u.heatCapacity}</span>}
+                                {entry.Z_factor != null && <span>Z: {entry.Z_factor.toFixed(4)}</span>}
+                                {entry.viscosity != null && <span>μ: {c.viscosity(entry.viscosity).toFixed(4)} {u.viscosity}</span>}
+                                {entry.thermal_conductivity != null && <span>k: {c.thermalConductivity(entry.thermal_conductivity).toFixed(4)} {u.thermalConductivity}</span>}
+                                {entry.surface_tension != null && <span>σ: {c.surfaceTension(entry.surface_tension).toFixed(2)} {u.surfaceTension}</span>}
+                                {entry.volumetric_flow != null && <span>Q: {(() => { const qv = c.volumetricFlow(entry.volumetric_flow!); return qv < 0.01 ? qv.toExponential(3) : qv.toFixed(4); })()} {u.volumetricFlow}</span>}
                               </div>
+                              {/* Phase-specific properties */}
+                              {entry.phase_properties && (
+                                <div className="flex gap-6 text-[11px] text-gray-400 dark:text-gray-500 mb-2">
+                                  {entry.vapor_fraction > 0.001 && entry.phase_properties.vapor && (
+                                    <div>
+                                      <span className="font-medium text-red-400">Vapor:</span>
+                                      {entry.phase_properties.vapor.density != null && <span className="ml-2">ρ={c.density(entry.phase_properties.vapor.density).toFixed(3)} {u.density}</span>}
+                                      {entry.phase_properties.vapor.viscosity != null && <span className="ml-2">μ={c.viscosity(entry.phase_properties.vapor.viscosity).toFixed(4)} {u.viscosity}</span>}
+                                      {entry.phase_properties.vapor.Cp != null && <span className="ml-2">Cp={c.heatCapacity(entry.phase_properties.vapor.Cp).toFixed(1)} {u.heatCapacity}</span>}
+                                      {entry.phase_properties.vapor.Z != null && <span className="ml-2">Z={entry.phase_properties.vapor.Z.toFixed(4)}</span>}
+                                    </div>
+                                  )}
+                                  {entry.vapor_fraction < 0.999 && entry.phase_properties.liquid && (
+                                    <div>
+                                      <span className="font-medium text-blue-400">Liquid:</span>
+                                      {entry.phase_properties.liquid.density != null && <span className="ml-2">ρ={c.density(entry.phase_properties.liquid.density).toFixed(1)} {u.density}</span>}
+                                      {entry.phase_properties.liquid.viscosity != null && <span className="ml-2">μ={c.viscosity(entry.phase_properties.liquid.viscosity).toFixed(4)} {u.viscosity}</span>}
+                                      {entry.phase_properties.liquid.Cp != null && <span className="ml-2">Cp={c.heatCapacity(entry.phase_properties.liquid.Cp).toFixed(1)} {u.heatCapacity}</span>}
+                                      {entry.phase_properties.liquid.thermal_conductivity != null && <span className="ml-2">k={c.thermalConductivity(entry.phase_properties.liquid.thermal_conductivity).toFixed(4)} {u.thermalConductivity}</span>}
+                                      {entry.surface_tension != null && <span className="ml-2">σ={c.surfaceTension(entry.surface_tension).toFixed(2)} {u.surfaceTension}</span>}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                              {/* Component table */}
                               <table className="w-full text-[11px]">
                                 <thead>
                                   <tr className="text-gray-400 dark:text-gray-500">
                                     <th className="text-left py-0.5 pr-4 font-medium">Component</th>
                                     <th className="text-right py-0.5 pr-4 font-medium">Mole Frac</th>
                                     <th className="text-right py-0.5 pr-4 font-medium">Mass Frac</th>
-                                    <th className="text-right py-0.5 pr-4 font-medium">Molar Flow (mol/s)</th>
-                                    <th className="text-right py-0.5 font-medium">Mass Flow (kg/s)</th>
+                                    <th className="text-right py-0.5 pr-4 font-medium">Molar Flow ({u.molarFlow})</th>
+                                    <th className="text-right py-0.5 font-medium">Mass Flow ({u.massFlow})</th>
                                   </tr>
                                 </thead>
                                 <tbody>
@@ -350,8 +410,8 @@ export default function BottomPanel() {
                                       <td className="py-0.5 pr-4">{comp}</td>
                                       <td className="text-right py-0.5 pr-4">{(entry.composition?.[comp] ?? 0).toFixed(4)}</td>
                                       <td className="text-right py-0.5 pr-4">{(entry.mass_fractions?.[comp] ?? 0).toFixed(4)}</td>
-                                      <td className="text-right py-0.5 pr-4">{(entry.component_molar_flows![comp]).toFixed(4)}</td>
-                                      <td className="text-right py-0.5">{(entry.component_mass_flows?.[comp] ?? 0).toFixed(4)}</td>
+                                      <td className="text-right py-0.5 pr-4">{c.molarFlow(entry.component_molar_flows![comp]).toFixed(4)}</td>
+                                      <td className="text-right py-0.5">{c.massFlow(entry.component_mass_flows?.[comp] ?? 0).toFixed(4)}</td>
                                     </tr>
                                   ))}
                                 </tbody>

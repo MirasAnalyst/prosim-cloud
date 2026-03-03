@@ -10,6 +10,8 @@ import { useAgentStore } from '../../stores/agentStore';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { useVersionStore } from '../../stores/versionStore';
+import { useUnitStore } from '../../stores/unitStore';
+import { UNIT_SYSTEMS, type UnitSystemName } from '../../lib/unit-systems';
 import { SimulationStatus } from '../../types';
 import {
   exportFlowsheet,
@@ -35,6 +37,8 @@ export default function TopNav({
   onToggleReliefValve,
   onToggleHydraulics,
   onToggleControlValve,
+  onTogglePhaseEnvelope,
+  onToggleInsights,
 }: {
   onToggleSidebar?: () => void;
   onToggleBasis?: () => void;
@@ -50,6 +54,8 @@ export default function TopNav({
   onToggleReliefValve?: () => void;
   onToggleHydraulics?: () => void;
   onToggleControlValve?: () => void;
+  onTogglePhaseEnvelope?: () => void;
+  onToggleInsights?: () => void;
 }) {
   const simulationStatus = useSimulationStore((s) => s.status);
   const runSimulation = useSimulationStore((s) => s.runSimulation);
@@ -72,6 +78,8 @@ export default function TopNav({
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const toggleVersionPanel = useVersionStore((s) => s.togglePanel);
   const versionPanelOpen = useVersionStore((s) => s.panelOpen);
+  const unitSystemName = useUnitStore((s) => s.unitSystemName);
+  const setUnitSystem = useUnitStore((s) => s.setUnitSystem);
 
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(projectName);
@@ -268,6 +276,18 @@ export default function TopNav({
           <FlaskConical size={14} />
         </button>
 
+        {/* Unit System */}
+        <select
+          value={unitSystemName}
+          onChange={(e) => setUnitSystem(e.target.value as UnitSystemName)}
+          className="text-xs bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-gray-700 rounded px-1.5 py-1 focus:outline-none focus:border-blue-500 cursor-pointer"
+          title="Unit System"
+        >
+          {Object.values(UNIT_SYSTEMS).map((us) => (
+            <option key={us.name} value={us.name}>{us.label}</option>
+          ))}
+        </select>
+
         {/* Convergence Settings */}
         <div className="relative" ref={settingsRef}>
           <button
@@ -334,6 +354,9 @@ export default function TopNav({
               <button onClick={() => { setAnalysisOpen(false); onToggleDynamic?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Dynamic Simulation
               </button>
+              <button onClick={() => { setAnalysisOpen(false); onToggleInsights?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Optimization Insights
+              </button>
             </div>
           )}
         </div>
@@ -367,6 +390,10 @@ export default function TopNav({
               </button>
               <button onClick={() => { setToolsOpen(false); onToggleControlValve?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                 Control Valve Sizing
+              </button>
+              <div className="border-t border-gray-200 dark:border-gray-700 my-1" />
+              <button onClick={() => { setToolsOpen(false); onTogglePhaseEnvelope?.(); }} className="w-full text-left px-3 py-1.5 text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                Phase Envelope
               </button>
             </div>
           )}

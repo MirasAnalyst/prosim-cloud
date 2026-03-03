@@ -8,7 +8,8 @@
 > - Phase 5: Complete (undo/redo, copy/paste, dark/light theme, equipment grouping, PFD annotations, responsive design, loading skeletons)
 > - Phase 6: Complete (versioning, export JSON/XML/DWSIM, import, results CSV/Excel, PFD SVG/PNG/PDF, validation, backup/restore)
 > - Phase 8: ~36% (5 of 14 items: global component list, material streams, energy streams, sensitivity analysis, case studies)
-> - Phase 7, 9–11: Not started
+> - Phase 10: In Progress (HYSYS/DWSIM Parity — stream properties, compounds, flash expansion, rigorous distillation)
+> - Phase 7, 9, 11–12: Not started
 > - **62 E2E tests passing** (7 Phase 3 + 3 AI + 5 Tier 2 + 4 Tier 3 + 6 Tier 4 + 4 Tier 5 + 18 wave + 7 Phase 6 + 8 Phase 8)
 
 ## Phase 1: Foundation (Complete)
@@ -168,7 +169,42 @@
 - [ ] Real-time data trending (for dynamic simulations)
 - [ ] Comparison charts across case studies
 
-## Phase 10: Deployment & DevOps
+## Phase 10: HYSYS/DWSIM Parity
+
+### Tier 1 — Critical (blocks professional use)
+- [x] T1-1: Complete stream properties (viscosity, conductivity, surface tension, density, S, Cp, Cv, Z, MW, phase-specific) *(30+ properties from flash, per-phase liquid/vapor, volumetric flow)*
+- [x] T1-2: Full compound database (expose thermo's 4000+ compounds, keep 42 as favorites) *(80 curated + chemicals.search_chemical, /info endpoint, /favorites endpoint)*
+- [ ] T1-3: Rigorous distillation (BP or inside-out method, stage-by-stage MESH equations)
+- [x] T1-4: Phase envelope & property diagrams (PT envelope, bubble/dew curves) *(POST /phase-envelope, PhaseEnvelopePanel with recharts, cricondentherm/bar/critical)*
+- [x] T1-5: Flash type expansion (PH, PS, PVF, TVF flashes in _flash_tp helpers) *(_flash_ph, _flash_ps, _flash_pvf, _flash_tvf helpers)*
+
+### Tier 2 — Important (limits accuracy/usability)
+- [x] T2-1: Proper reaction stoichiometry (stoichiometric matrix, heat of reaction) *(reactions array with reactants/products/coefficients/heatOfReaction, proper mole balance)*
+- [ ] T2-2: Transport properties in equipment sizing (Kern, Ergun, settling)
+- [ ] T2-3: BIP management & validation (UI editor, missing BIP warnings)
+- [x] T2-4: Configurable unit system (SI, Field, CGS, custom) *(unitStore with localStorage, SI/Field/CGS selector in TopNav, conversions in BottomPanel/StreamEdge/EquipmentNode/StreamInspector/PropertyInspector)*
+- [x] T2-5: Convergence diagnostics (variable tracking, error plots) *(convergence_history per iteration, error/T/P/flow tracking, recharts log-scale plot in BottomPanel)*
+- [ ] T2-6: Multi-feed/side-draw columns (requires T1-3)
+- [ ] T2-7: Equilibrium reactor & Gibbs minimization
+
+### Tier 3 — Engineering Features (professional polish)
+- [ ] T3-1: Petroleum characterization (pseudo-components from assay data)
+- [ ] T3-2: Equipment rating mode (geometry → performance)
+- [ ] T3-3: Property package advisor (decision tree)
+- [ ] T3-4: Txy/Pxy binary VLE diagrams
+- [ ] T3-5: Equipment datasheets (API/TEMA format PDF)
+- [ ] T3-6: Stream property tables (per-phase properties)
+
+### Tier 4 — Nice-to-Have
+- [ ] Column internals design
+- [ ] HEN synthesis from pinch analysis
+- [ ] Compressor performance maps
+- [ ] Custom unit operations (user Python blocks)
+- [ ] CAPE-OPEN interoperability
+- [ ] Integrated cost estimation
+- [ ] Scripting/automation API
+
+## Phase 12: Deployment & DevOps
 
 - [ ] CI/CD pipeline (GitHub Actions)
 - [~] Automated testing (unit, integration, e2e with Playwright) *(62 E2E tests, unit tests not yet)*
@@ -186,7 +222,7 @@
 - [ ] API documentation (auto-generated OpenAPI/Swagger)
 - [ ] User documentation and tutorials
 
-## Phase 11: Enterprise Features
+## Phase 13: Enterprise Features
 
 - [ ] On-premise deployment option
 - [ ] LDAP/Active Directory integration

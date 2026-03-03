@@ -5,6 +5,7 @@ import {
   type EdgeProps,
 } from '@xyflow/react';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { useUnitStore } from '../../stores/unitStore';
 import { SimulationStatus } from '../../types';
 
 export default function StreamEdge({
@@ -21,6 +22,7 @@ export default function StreamEdge({
 }: EdgeProps) {
   const results = useSimulationStore((s) => s.results);
   const status = useSimulationStore((s) => s.status);
+  const us = useUnitStore((s) => s.unitSystem);
 
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
@@ -38,7 +40,7 @@ export default function StreamEdge({
       : null;
 
   const displayLabel = streamResult
-    ? `${streamResult.temperature.toFixed(1)}°C | ${streamResult.pressure.toFixed(1)} kPa | ${streamResult.flowRate.toFixed(2)} kg/s`
+    ? `${us.fromSI.temperature(streamResult.temperature).toFixed(1)} ${us.units.temperature} | ${us.fromSI.pressure(streamResult.pressure).toFixed(1)} ${us.units.pressure} | ${us.fromSI.massFlow(streamResult.flowRate).toFixed(2)} ${us.units.massFlow}`
     : label;
 
   return (

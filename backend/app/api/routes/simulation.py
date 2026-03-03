@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from itertools import product
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,8 @@ from app.schemas.emissions import EmissionsRequest, EmissionsResult
 from app.schemas.relief_valve import ReliefValveRequest, ReliefValveResult
 from app.schemas.hydraulics import HydraulicsRequest, HydraulicsResult
 from app.schemas.control_valve import ControlValveRequest, ControlValveResult
+from app.schemas.insights import InsightsRequest, InsightsResult, InsightsSummary
+from app.services.phase_envelope import compute_phase_envelope
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -355,4 +357,162 @@ async def size_control_valve(body: ControlValveRequest):
     from app.services.control_valve_engine import size_control_valve as _size
 
     result = _size(**body.model_dump())
+    return result
+
+
+@router.post("/insights", response_model=InsightsResult)
+async def run_insights(body: InsightsRequest):
+    """Run AI-powered optimization insights analysis."""
+    from app.services.insights_engine import analyze_insights
+
+    try:
+        result = await analyze_insights(
+            simulation_results=body.simulation_results,
+            nodes=body.nodes,
+            edges=body.edges,
+            property_package=body.property_package,
+            economic_params=body.economic_params.model_dump(),
+        )
+        return result
+    except Exception as e:
+        logger.error("Insights analysis failed: %s", e)
+        return InsightsResult(
+            insights=[],
+            summary=InsightsSummary(
+                total_annual_savings=0,
+                total_co2_reduction=0,
+                insight_count=0,
+                top_quick_wins=[],
+                top_high_impact=[],
+            ),
+            status="error",
+            error=str(e),
+        )
+
+
+_MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB
+_MAX_RAW_CONTEXT_TOKENS = 25_000  # ~100K characters — leave room for system + tool defs
+
+
+async def _read_upload_chunked(file: UploadFile) -> bytes:
+    """Read upload in chunks with early abort if too large (R7 fix)."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)  # 64 KB chunks
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=400, detail="File exceeds 10 MB limit.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post("/insights/parse")
+async def parse_insights_file_preview(file: UploadFile = File(...)):
+    """Parse an uploaded file and return a preview (no AI call)."""
+    from app.services.insights_file_parser import parse_insights_file
+
+    contents = await _read_upload_chunked(file)
+    parsed = parse_insights_file(contents, file.filename or "unknown.csv")
+    sim_res = parsed.get("simulation_results", {})
+    return {
+        "stream_count": len(sim_res.get("stream_results", {})),
+        "equipment_count": len(sim_res.get("equipment_results", {})),
+        "node_count": len(parsed.get("nodes", [])),
+        "warnings": parsed.get("warnings", []),
+        "raw_context_preview": (parsed.get("raw_context", ""))[:2000],
+        "simulation_results": sim_res,
+        "nodes": parsed.get("nodes", []),
+        "detected_unit_system": parsed.get("detected_unit_system", "unknown"),
+        "detected_property_package": parsed.get("detected_property_package"),
+    }
+
+
+@router.post("/insights/upload", response_model=InsightsResult)
+async def run_insights_from_file(
+    file: UploadFile = File(...),
+    economic_params_json: str = Form("{}"),
+    property_package: str = Form("PengRobinson"),
+):
+    """Parse an uploaded file then run AI insights analysis."""
+    from app.services.insights_file_parser import parse_insights_file
+    from app.services.insights_engine import analyze_insights
+
+    contents = await _read_upload_chunked(file)
+    parsed = parse_insights_file(contents, file.filename or "unknown.csv")
+
+    try:
+        econ = json.loads(economic_params_json)
+    except json.JSONDecodeError:
+        econ = {}
+
+    economic_params = {
+        "steam_cost": econ.get("steam_cost", econ.get("steamCost", 15.0)),
+        "cooling_water_cost": econ.get("cooling_water_cost", econ.get("coolingWaterCost", econ.get("cwCost", 3.0))),
+        "electricity_cost": econ.get("electricity_cost", econ.get("electricityCost", econ.get("elecCost", 0.08))),
+        "fuel_gas_cost": econ.get("fuel_gas_cost", econ.get("fuelGasCost", econ.get("fuelCost", 8.0))),
+        "carbon_price": econ.get("carbon_price", econ.get("carbonPrice", 50.0)),
+        "hours_per_year": econ.get("hours_per_year", econ.get("hoursPerYear", 8000)),
+    }
+
+    # R3 fix: use user-selected property package, fall back to detected or PR
+    pp = property_package
+    if pp == "PengRobinson" and parsed.get("detected_property_package"):
+        pp = parsed["detected_property_package"]
+
+    # E1 fix: truncate raw_context to token budget (~4 chars per token)
+    raw_ctx = parsed.get("raw_context", "")
+    max_chars = _MAX_RAW_CONTEXT_TOKENS * 4
+    if len(raw_ctx) > max_chars:
+        raw_ctx = raw_ctx[:max_chars] + "\n... (context truncated for token limit)"
+        logger.warning("raw_context truncated from %d to %d chars", len(parsed.get("raw_context", "")), max_chars)
+
+    try:
+        result = await analyze_insights(
+            simulation_results=parsed.get("simulation_results", {}),
+            nodes=parsed.get("nodes", []),
+            edges=parsed.get("edges", []),
+            property_package=pp,
+            economic_params=economic_params,
+            raw_context=raw_ctx,
+        )
+        return result
+    except Exception as e:
+        logger.error("File insights analysis failed: %s", e)
+        return InsightsResult(
+            insights=[],
+            summary=InsightsSummary(
+                total_annual_savings=0,
+                total_co2_reduction=0,
+                insight_count=0,
+                top_quick_wins=[],
+                top_high_impact=[],
+            ),
+            status="error",
+            error=str(e),
+        )
+
+
+@router.post("/phase-envelope")
+async def phase_envelope(body: dict):
+    """Compute PT phase envelope (bubble/dew curves) for a mixture.
+
+    Body: {compounds: ["methane","ethane",...], composition: [0.7,0.3,...],
+           property_package: "PengRobinson", n_points: 50}
+    """
+    compounds = body.get("compounds", [])
+    composition = body.get("composition", [])
+    property_package = body.get("property_package", "PengRobinson")
+    n_points = min(int(body.get("n_points", 50)), 200)
+
+    if not compounds or not composition:
+        raise HTTPException(status_code=400, detail="compounds and composition are required")
+    if len(compounds) != len(composition):
+        raise HTTPException(status_code=400, detail="compounds and composition must have same length")
+
+    result = compute_phase_envelope(compounds, composition, property_package, n_points)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
     return result

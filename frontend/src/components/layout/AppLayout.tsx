@@ -5,6 +5,7 @@ import BottomPanel from './BottomPanel';
 import EquipmentPalette from '../equipment/EquipmentPalette';
 import FlowsheetCanvas from '../canvas/FlowsheetCanvas';
 import PropertyInspector from '../inspector/PropertyInspector';
+import StreamInspector from '../inspector/StreamInspector';
 import AgentPanel from '../agent/AgentPanel';
 import VersionPanel from '../version/VersionPanel';
 import SimulationBasisPanel from '../basis/SimulationBasisPanel';
@@ -18,6 +19,8 @@ import EmissionsPanel from '../tools/EmissionsPanel';
 import ReliefValvePanel from '../tools/ReliefValvePanel';
 import HydraulicsPanel from '../tools/HydraulicsPanel';
 import ControlValvePanel from '../tools/ControlValvePanel';
+import PhaseEnvelopePanel from '../tools/PhaseEnvelopePanel';
+import InsightsPanel from '../analysis/InsightsPanel';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
 import { useSimulationStore } from '../../stores/simulationStore';
 import { useAgentStore } from '../../stores/agentStore';
@@ -36,6 +39,8 @@ export default function AppLayout() {
   const [reliefValveOpen, setReliefValveOpen] = useState(false);
   const [hydraulicsOpen, setHydraulicsOpen] = useState(false);
   const [controlValveOpen, setControlValveOpen] = useState(false);
+  const [phaseEnvelopeOpen, setPhaseEnvelopeOpen] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
   const initProject = useFlowsheetStore((s) => s.initProject);
   const theme = useThemeStore((s) => s.theme);
 
@@ -80,6 +85,7 @@ export default function AppLayout() {
 
       if (e.key === 'Escape') {
         useFlowsheetStore.getState().setSelectedNode(null);
+        useFlowsheetStore.getState().setSelectedEdge(null);
       }
 
       // Undo/Redo/Copy/Paste — skip when focused on input elements
@@ -111,7 +117,9 @@ export default function AppLayout() {
   }, []);
 
   const selectedNodeId = useFlowsheetStore((s) => s.selectedNodeId);
+  const selectedEdgeId = useFlowsheetStore((s) => s.selectedEdgeId);
   const setSelectedNode = useFlowsheetStore((s) => s.setSelectedNode);
+  const setSelectedEdge = useFlowsheetStore((s) => s.setSelectedEdge);
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100">
@@ -131,6 +139,8 @@ export default function AppLayout() {
         onToggleReliefValve={() => setReliefValveOpen(prev => !prev)}
         onToggleHydraulics={() => setHydraulicsOpen(prev => !prev)}
         onToggleControlValve={() => setControlValveOpen(prev => !prev)}
+        onTogglePhaseEnvelope={() => setPhaseEnvelopeOpen(prev => !prev)}
+        onToggleInsights={() => setInsightsOpen(prev => !prev)}
       />
       <div className="flex flex-1 overflow-hidden">
         <div className={`${sidebarOpen ? 'block' : 'hidden'} lg:block`}>
@@ -138,14 +148,14 @@ export default function AppLayout() {
         </div>
         <FlowsheetCanvas />
         <div className="hidden lg:block">
-          <PropertyInspector />
+          {selectedEdgeId ? <StreamInspector /> : <PropertyInspector />}
         </div>
-        {/* Mobile property inspector overlay */}
-        {selectedNodeId && (
+        {/* Mobile property/stream inspector overlay */}
+        {(selectedNodeId || selectedEdgeId) && (
           <div className="lg:hidden fixed inset-0 z-40">
-            <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedNode(null)} />
+            <div className="absolute inset-0 bg-black/40" onClick={() => { setSelectedNode(null); setSelectedEdge(null); }} />
             <div className="absolute right-0 top-0 bottom-0 w-72 max-w-[85vw] z-50">
-              <PropertyInspector />
+              {selectedEdgeId ? <StreamInspector /> : <PropertyInspector />}
             </div>
           </div>
         )}
@@ -164,6 +174,8 @@ export default function AppLayout() {
       <ReliefValvePanel open={reliefValveOpen} onClose={() => setReliefValveOpen(false)} />
       <HydraulicsPanel open={hydraulicsOpen} onClose={() => setHydraulicsOpen(false)} />
       <ControlValvePanel open={controlValveOpen} onClose={() => setControlValveOpen(false)} />
+      <PhaseEnvelopePanel open={phaseEnvelopeOpen} onClose={() => setPhaseEnvelopeOpen(false)} />
+      <InsightsPanel open={insightsOpen} onClose={() => setInsightsOpen(false)} />
     </div>
   );
 }

@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useFlowsheetStore } from '../../stores/flowsheetStore';
+import { useSimulationStore } from '../../stores/simulationStore';
+import { useUnitStore } from '../../stores/unitStore';
 import { equipmentLibrary } from '../../lib/equipment-library';
 import { searchCompounds, type CompoundResult } from '../../lib/api-client';
-import { EquipmentType } from '../../types';
-import { X, Search, Trash2, RefreshCw } from 'lucide-react';
+import { EquipmentType, SimulationStatus } from '../../types';
+import { X, Search, Trash2, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import DesignSpecInspector from './DesignSpecInspector';
 
 const FEED_PARAM_KEYS = ['feedTemperature', 'feedPressure', 'feedFlowRate'];
@@ -17,12 +19,16 @@ export default function PropertyInspector() {
   const getUpstreamNodes = useFlowsheetStore((s) => s.getUpstreamNodes);
   const globalCompounds = useFlowsheetStore((s) => s.simulationBasis.compounds);
 
+  const results = useSimulationStore((s) => s.results);
+  const simStatus = useSimulationStore((s) => s.status);
+
   const node = nodes.find((n) => n.id === selectedNodeId);
   if (!node) return null;
 
   const def = equipmentLibrary[node.data.equipmentType];
   const upstreamNodes = getUpstreamNodes(node.id);
   const isFeedNode = upstreamNodes.length === 0 || node.data.equipmentType === EquipmentType.FeedStream;
+  const isStreamNode = node.data.equipmentType === EquipmentType.FeedStream || node.data.equipmentType === EquipmentType.ProductStream;
   // Filter out feed params from regular display
   const regularParams = Object.entries(def.parameters).filter(
     ([key]) => !FEED_PARAM_KEYS.includes(key)
@@ -171,6 +177,11 @@ export default function PropertyInspector() {
           </div>
         </div>
 
+        {/* Simulation Results for FeedStream/ProductStream */}
+        {isStreamNode && simStatus === SimulationStatus.Completed && results && (
+          <SimResultsSection nodeId={node.id} equipmentType={node.data.equipmentType} results={results} />
+        )}
+
         <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
           <button
             onClick={() => {
@@ -183,6 +194,139 @@ export default function PropertyInspector() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Simulation Results Section for FeedStream/ProductStream ──
+
+function fmt(v: number | undefined | null, decimals = 4): string {
+  if (v == null || isNaN(v)) return '-';
+  return v.toFixed(decimals);
+}
+
+function SimResultsSection({ nodeId, equipmentType, results }: {
+  nodeId: string;
+  equipmentType: EquipmentType;
+  results: import('../../types').SimulationResult;
+}) {
+  const [compExpanded, setCompExpanded] = useState(false);
+  const us = useUnitStore((s) => s.unitSystem);
+  const cv = us.fromSI;
+  const un = us.units;
+
+  const eqResult = results.equipmentResults[nodeId] as Record<string, unknown> | undefined;
+  if (!eqResult) return null;
+
+  // Engine returns camelCase keys: outletTemperature, outletPressure, massFlow, vaporFraction
+  // Also has nested inlet_streams/outlet_streams with standard keys
+  const streamKey = equipmentType === EquipmentType.FeedStream ? 'outlet_streams' : 'inlet_streams';
+  const portKey = equipmentType === EquipmentType.FeedStream ? 'out-1' : 'in-1';
+  const nested = (eqResult[streamKey] as Record<string, Record<string, unknown>> | undefined)?.[portKey];
+
+  // Prefer nested stream dict (has standard keys), fall back to top-level camelCase
+  const temp = (nested?.temperature ?? eqResult.outletTemperature) as number | undefined;
+  const pres = (nested?.pressure ?? eqResult.outletPressure) as number | undefined;
+  const flow = (nested?.flowRate ?? eqResult.massFlow) as number | undefined;
+  const vf = (nested?.vapor_fraction ?? eqResult.vaporFraction) as number | undefined;
+  const enthalpy = (nested?.enthalpy ?? eqResult.enthalpy) as number | undefined;
+  const mw = (nested?.molecular_weight ?? eqResult.molecular_weight) as number | undefined;
+  const molarFlow = (nested?.molar_flow ?? eqResult.molar_flow) as number | undefined;
+  const massFracs = (nested?.mass_fractions ?? eqResult.mass_fractions) as Record<string, number> | undefined;
+  const compMolarFlows = (nested?.component_molar_flows ?? eqResult.component_molar_flows) as Record<string, number> | undefined;
+  const compMassFlows = (nested?.component_mass_flows ?? eqResult.component_mass_flows) as Record<string, number> | undefined;
+
+  const hasAnyData = temp != null || pres != null || flow != null;
+  if (!hasAnyData) return null;
+
+  const hasComponents = compMolarFlows && Object.keys(compMolarFlows).length > 0;
+
+  return (
+    <div className="border-t border-gray-200 dark:border-gray-800 pt-4">
+      <h3 className="text-xs font-semibold text-green-400 uppercase tracking-wider mb-3">
+        {equipmentType === EquipmentType.FeedStream ? 'Outlet Conditions' : 'Inlet Conditions'}
+      </h3>
+      <div className="space-y-1.5">
+        {temp != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">Temperature</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(cv.temperature(temp), 2)} <span className="text-gray-500 text-[10px]">{un.temperature}</span></span>
+          </div>
+        )}
+        {pres != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">Pressure</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(cv.pressure(pres), 2)} <span className="text-gray-500 text-[10px]">{un.pressure}</span></span>
+          </div>
+        )}
+        {flow != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">Mass Flow</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(cv.massFlow(flow), 4)} <span className="text-gray-500 text-[10px]">{un.massFlow}</span></span>
+          </div>
+        )}
+        {vf != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">Vapor Fraction</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(vf, 4)}</span>
+          </div>
+        )}
+        {enthalpy != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">Enthalpy</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(cv.enthalpy(enthalpy), 2)} <span className="text-gray-500 text-[10px]">{un.enthalpy}</span></span>
+          </div>
+        )}
+        {mw != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">MW (mix)</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(mw, 2)} <span className="text-gray-500 text-[10px]">g/mol</span></span>
+          </div>
+        )}
+        {molarFlow != null && (
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500 dark:text-gray-400">Molar Flow</span>
+            <span className="text-gray-900 dark:text-gray-100 font-mono">{fmt(cv.molarFlow(molarFlow), 4)} <span className="text-gray-500 text-[10px]">{un.molarFlow}</span></span>
+          </div>
+        )}
+      </div>
+
+      {/* Component properties expandable */}
+      {hasComponents && (
+        <div className="mt-3 pt-2 border-t border-gray-100 dark:border-gray-800/50">
+          <button
+            onClick={() => setCompExpanded(!compExpanded)}
+            className="flex items-center gap-1 text-xs font-semibold text-blue-400 uppercase tracking-wider mb-2 hover:text-blue-300 transition-colors w-full"
+          >
+            {compExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            Component Properties
+          </button>
+          {compExpanded && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[10px]">
+                <thead>
+                  <tr className="text-gray-500 dark:text-gray-400 border-b border-gray-200 dark:border-gray-800">
+                    <th className="text-left py-1 pr-1">Component</th>
+                    <th className="text-right py-1 px-1">Mass Frac</th>
+                    <th className="text-right py-1 px-1">mol/s</th>
+                    <th className="text-right py-1 pl-1">kg/s</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.keys(compMolarFlows!).map((name) => (
+                    <tr key={name} className="border-b border-gray-100 dark:border-gray-800/50">
+                      <td className="py-1 pr-1 text-gray-600 dark:text-gray-400 truncate max-w-[70px]" title={name}>{name}</td>
+                      <td className="py-1 px-1 text-right font-mono text-gray-900 dark:text-gray-100">{fmt(massFracs?.[name], 4)}</td>
+                      <td className="py-1 px-1 text-right font-mono text-gray-900 dark:text-gray-100">{fmt(compMolarFlows?.[name], 4)}</td>
+                      <td className="py-1 pl-1 text-right font-mono text-gray-900 dark:text-gray-100">{fmt(compMassFlows?.[name], 4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

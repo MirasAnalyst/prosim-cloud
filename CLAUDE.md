@@ -267,6 +267,28 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 1. **CSV export column mismatch — component rows had 11 columns but header had 8**: Component detail sub-rows used offset commas starting at column 7, exceeding the 8-column header. Excel showed 3 unnamed columns. Fix: unified header to 14 columns covering both stream-level and component-level data, with component rows aligning to columns 10-14. **When CSV has parent/child rows, define a single header spanning all columns so both row types align.**
 
+### Insights File Upload: Mistakes and Resolutions
+
+1. **ProSim CSV headers didn't map to engine context builder keys**: Headers like `"Temperature (°C)"` were lowercased to `"temperature (°c)"` but `_build_simulation_context()` looks for `"temperature"`. All parsed stream data showed as `T=? P=? flow=?` in the AI prompt. Fix: added `_PROSIM_HEADER_MAP` to normalize CSV headers to engine key names during parsing. **When parsing external file formats, always normalize column names to match the internal key convention used by downstream consumers.**
+
+2. **DWSIM JSON parser created spurious stream entries from equipment objects**: `SimulationObjects` contains ALL objects (streams + equipment) mixed together. The stream extraction loop iterated the same dict without filtering by `ObjectType`, so Heaters/Compressors with `Temperature`/`Pressure` properties were parsed as streams. Fix: single iteration with `ObjectType` classification — only `"MaterialStream"` → streams, skip `"EnergyStream"`, everything else → equipment. **When a JSON dict mixes object types, always filter by type discriminator before extraction.**
+
+3. **Generic CSV `"type"` column misclassified streams as equipment**: `_EQUIPMENT_KEYWORDS` included `"type"`, but stream tables commonly have a `"type"` column (values like "Vapor", "Liquid", "Two-phase"). Any HMB table with a type column had all rows classified as equipment. Fix: removed `"type"` from equipment keywords; created `_STRONG_EQUIPMENT_MARKERS` set (`duty`, `work`, `power`, `head`, `stages`, `reflux`) that unambiguously indicate equipment. **Ambiguous keywords like "type" should not be used for classification — use domain-specific markers that only appear in one context.**
+
+### Stress Test Round 2: Mistakes and Resolutions
+
+1. **Supercritical VF override placed in Separator only, not `_flash_tp()`**: H2/N2 at -10°C/15MPa (both above Tc) returned VF=0 from thermo flash. Override in Separator set VF=1 locally, but compressor re-flashed and got VF=0 again, rejecting feed as "liquid". Separator also produced zero enthalpy on vapor outlet (gas_phase=None after supercritical override). Fix: moved override into `_flash_tp()` so all equipment benefits; added mixture-enthalpy fallback when per-phase enthalpy unavailable. **Phase corrections must be applied at the flash level, not per-equipment — otherwise every consumer re-flashes and gets the original wrong answer.**
+
+4. **No unit system detection — DWSIM K/Pa data labeled as °C/kPa in AI prompt**: `_build_simulation_context()` hardcodes `°C` and `kPa` labels. DWSIM stores T=373.15 K and P=101325 Pa, so the AI saw `T=373.15°C` (extremely hot) instead of 100°C, producing quantitatively wrong optimization recommendations. Fix: added `_detect_unit_system()` heuristic (high T + high P → DWSIM SI; high T + low P → Field units) with unit annotation in raw_context. **When accepting data from multiple simulators, never hardcode unit labels — detect or let users specify the unit system.**
+
+5. **Property package hardcoded to PengRobinson for all file uploads**: Upload endpoint passed `property_package="PengRobinson"` regardless of source simulator. A DWSIM file simulated with SRK would get AI advice like "switch from PR to SRK" when the user already IS using SRK. Fix: added `property_package` Form parameter + auto-detection from DWSIM JSON `FlowsheetOptions.PropertyPackage` + user-selectable dropdown on InsightsPage. **User-facing parameters should never be silently hardcoded — always provide a selector or auto-detect from the data.**
+
+### Phase 10: Mistakes and Resolutions
+
+1. **LMTD used absolute temperature conversion instead of temperature-difference conversion**: HX badge applied `°C→°F` formula (`T*9/5+32`) to LMTD, but LMTD is a ΔT — adding the +32 offset is wrong (20°C LMTD would show as 68°F instead of correct 36°F). Also, velocity/area/length had unit labels but no conversion functions, silently displaying m/s as "ft/s". Fix: added `temperatureDelta` converter (scale only, no offset) and `velocity`/`area`/`length` converters to all 3 unit systems. **Temperature differences (LMTD, ΔT, approach) need a separate converter from absolute temperatures — scale factor only, no offset.**
+
+2. **E2E `findStream` searched by node ID but stream result keys are edge IDs**: `findStream(data.stream_results, 'h1')` looked for keys starting with `'h1'`, but stream results are keyed by edge ID (e.g., `'e2'`), so every lookup returned `undefined`. Fix: store the edges array via `setEdges()` inside `runSim()`, then `findStream` matches by `edge.source === sourceId` to find the correct edge ID. **Stream result keys are edge IDs, not node IDs — always look up streams through the edges array.**
+
 ## Dev Commands
 ```bash
 # Backend

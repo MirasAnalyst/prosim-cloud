@@ -600,27 +600,70 @@ class DWSIMEngine:
             gas_zs = list(gas_phase.zs) if gas_phase else zs_norm
             liquid_zs = list(liquid_phase.zs) if liquid_phase else zs_norm
 
-            # Liquid density (kg/m³) — only meaningful if liquid phase exists
-            rho_liquid = None
-            if liquid_phase is not None:
+            # --- Per-phase property extraction (HYSYS/DWSIM-style) ---
+            def _safe(obj: Any, method: str) -> float | None:
+                """Safely call a phase property method, return None on failure."""
+                fn = getattr(obj, method, None)
+                if fn is None:
+                    return None
                 try:
-                    rho_liquid = liquid_phase.rho_mass()
+                    val = fn()
+                    if val is not None and math.isfinite(val):
+                        return val
                 except Exception:
                     pass
+                return None
 
-            # Viscosity (Pa·s)
-            mu_liquid = None
-            mu_gas = None
-            if liquid_phase is not None:
-                try:
-                    mu_liquid = liquid_phase.mu()
-                except Exception:
-                    pass
-            if gas_phase is not None:
-                try:
-                    mu_gas = gas_phase.mu()
-                except Exception:
-                    pass
+            # Liquid properties
+            rho_liquid = _safe(liquid_phase, 'rho_mass') if liquid_phase else None
+            mu_liquid = _safe(liquid_phase, 'mu') if liquid_phase else None
+            k_liquid = _safe(liquid_phase, 'k') if liquid_phase else None  # W/(m·K)
+            sigma = _safe(liquid_phase, 'sigma') if liquid_phase else None  # N/m
+            Cp_liquid = _safe(liquid_phase, 'Cp_mass') if liquid_phase else None  # J/(kg·K)
+            Cv_liquid = _safe(liquid_phase, 'Cv_mass') if liquid_phase else None  # J/(kg·K)
+            H_liquid = _safe(liquid_phase, 'H') if liquid_phase else None  # J/mol
+            S_liquid = _safe(liquid_phase, 'S') if liquid_phase else None  # J/(mol·K)
+            Z_liquid = _safe(liquid_phase, 'Z') if liquid_phase else None
+
+            # Gas properties
+            rho_gas = _safe(gas_phase, 'rho_mass') if gas_phase else None
+            mu_gas = _safe(gas_phase, 'mu') if gas_phase else None
+            k_gas = _safe(gas_phase, 'k') if gas_phase else None  # W/(m·K)
+            Cp_gas = _safe(gas_phase, 'Cp_mass') if gas_phase else None  # J/(kg·K)
+            Cv_gas = _safe(gas_phase, 'Cv_mass') if gas_phase else None  # J/(kg·K)
+            H_gas = _safe(gas_phase, 'H') if gas_phase else None  # J/mol
+            S_gas = _safe(gas_phase, 'S') if gas_phase else None  # J/(mol·K)
+            Z_gas = _safe(gas_phase, 'Z') if gas_phase else None
+
+            # Mixture-level Cv and Z
+            Cv_mix = None
+            try:
+                Cv_mix = state.Cv() if callable(getattr(state, 'Cv', None)) else None
+            except Exception:
+                pass
+
+            Z_mix = None
+            try:
+                Z_mix = state.Z() if callable(getattr(state, 'Z', None)) else None
+            except Exception:
+                pass
+
+            # Mixture density (kg/m³) — phase-fraction weighted
+            rho_mix = None
+            if vf >= 0.999 and rho_gas is not None:
+                rho_mix = rho_gas
+            elif vf <= 0.001 and rho_liquid is not None:
+                rho_mix = rho_liquid
+            elif rho_gas is not None and rho_liquid is not None and rho_liquid > 0 and rho_gas > 0:
+                # Two-phase: 1/rho = VF/rho_gas + (1-VF)/rho_liquid
+                rho_mix = 1.0 / (vf / rho_gas + (1.0 - vf) / rho_liquid)
+            elif rho_liquid is not None:
+                rho_mix = rho_liquid
+
+            # Mixture Cp in mass basis J/(kg·K)
+            Cp_mass_mix = None
+            if Cp is not None and MW_mix > 0:
+                Cp_mass_mix = Cp * 1000.0 / MW_mix  # J/mol/K * 1000 g/kg / (g/mol) = J/(kg·K)
 
             return {
                 "T": T,
@@ -629,11 +672,29 @@ class DWSIMEngine:
                 "S": S,             # J/(mol·K)
                 "VF": vf,
                 "Cp": Cp,           # J/mol/K (may be None)
+                "Cv": Cv_mix,       # J/mol/K (may be None)
+                "Z": Z_mix,         # compressibility factor (dimensionless)
                 "MW_mix": MW_mix,    # g/mol
                 "MWs": list(constants.MWs),
                 "rho_liquid": rho_liquid,  # kg/m³ or None
+                "rho_gas": rho_gas,        # kg/m³ or None
+                "rho_mix": rho_mix,        # kg/m³ or None
                 "mu_liquid": mu_liquid,    # Pa·s or None
                 "mu_gas": mu_gas,          # Pa·s or None
+                "k_liquid": k_liquid,      # W/(m·K) or None
+                "k_gas": k_gas,            # W/(m·K) or None
+                "sigma": sigma,            # N/m (surface tension) or None
+                "Cp_mass_mix": Cp_mass_mix,  # J/(kg·K) or None
+                "Cp_liquid": Cp_liquid,    # J/(kg·K) or None
+                "Cp_gas": Cp_gas,          # J/(kg·K) or None
+                "Cv_liquid": Cv_liquid,    # J/(kg·K) or None
+                "Cv_gas": Cv_gas,          # J/(kg·K) or None
+                "H_liquid": H_liquid,      # J/mol or None
+                "H_gas": H_gas,            # J/mol or None
+                "S_liquid": S_liquid,      # J/(mol·K) or None
+                "S_gas": S_gas,            # J/(mol·K) or None
+                "Z_liquid": Z_liquid,      # dimensionless or None
+                "Z_gas": Z_gas,            # dimensionless or None
                 "gas_zs": gas_zs,
                 "liquid_zs": liquid_zs,
                 "comp_names": comp_names,
@@ -644,6 +705,144 @@ class DWSIMEngine:
             }
         except Exception as exc:
             logger.warning("_flash_tp failed for %s: %s", comp_names, exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Additional flash helpers (T1-5: Flash Type Expansion)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _flash_ph(
+        comp_names: list[str],
+        zs: list[float],
+        P: float,
+        H: float,
+        property_package: str = "PengRobinson",
+    ) -> dict[str, Any] | None:
+        """PH flash (isenthalpic) — given pressure and molar enthalpy (J/mol).
+
+        Used for: valves (isenthalpic expansion), adiabatic mixing.
+        Returns same dict format as _flash_tp with resolved T and VF.
+        """
+        if not _thermo_available or not comp_names or not zs:
+            return None
+        try:
+            total = sum(zs)
+            if total <= 0:
+                return None
+            zs_norm = [z / total for z in zs]
+
+            # Build flasher using a dummy TP flash first for infrastructure
+            tp_flash = DWSIMEngine._flash_tp(comp_names, zs_norm, 300.0, P, property_package)
+            if not tp_flash or not tp_flash.get("flasher"):
+                return None
+
+            flasher = tp_flash["flasher"]
+            state = flasher.flash(P=P, H=H, zs=zs_norm)
+            T_result = state.T
+            # Now do a full TP flash at the resolved T to get all properties
+            return DWSIMEngine._flash_tp(comp_names, zs_norm, T_result, P, property_package)
+        except Exception as exc:
+            logger.warning("_flash_ph failed for %s: %s", comp_names, exc)
+            return None
+
+    @staticmethod
+    def _flash_ps(
+        comp_names: list[str],
+        zs: list[float],
+        P: float,
+        S: float,
+        property_package: str = "PengRobinson",
+    ) -> dict[str, Any] | None:
+        """PS flash (isentropic) — given pressure and molar entropy (J/mol/K).
+
+        Used for: isentropic compressor/turbine outlet calculation.
+        Returns same dict format as _flash_tp with resolved T and VF.
+        """
+        if not _thermo_available or not comp_names or not zs:
+            return None
+        try:
+            total = sum(zs)
+            if total <= 0:
+                return None
+            zs_norm = [z / total for z in zs]
+
+            tp_flash = DWSIMEngine._flash_tp(comp_names, zs_norm, 300.0, P, property_package)
+            if not tp_flash or not tp_flash.get("flasher"):
+                return None
+
+            flasher = tp_flash["flasher"]
+            state = flasher.flash(P=P, S=S, zs=zs_norm)
+            T_result = state.T
+            return DWSIMEngine._flash_tp(comp_names, zs_norm, T_result, P, property_package)
+        except Exception as exc:
+            logger.warning("_flash_ps failed for %s: %s", comp_names, exc)
+            return None
+
+    @staticmethod
+    def _flash_pvf(
+        comp_names: list[str],
+        zs: list[float],
+        P: float,
+        VF: float,
+        property_package: str = "PengRobinson",
+    ) -> dict[str, Any] | None:
+        """PVF flash — given pressure and vapor fraction (0=bubble, 1=dew).
+
+        Used for: bubble/dew point calculations, condenser/reboiler specs.
+        Returns same dict format as _flash_tp with resolved T.
+        """
+        if not _thermo_available or not comp_names or not zs:
+            return None
+        try:
+            total = sum(zs)
+            if total <= 0:
+                return None
+            zs_norm = [z / total for z in zs]
+
+            tp_flash = DWSIMEngine._flash_tp(comp_names, zs_norm, 300.0, P, property_package)
+            if not tp_flash or not tp_flash.get("flasher"):
+                return None
+
+            flasher = tp_flash["flasher"]
+            state = flasher.flash(P=P, VF=VF, zs=zs_norm)
+            T_result = state.T
+            return DWSIMEngine._flash_tp(comp_names, zs_norm, T_result, P, property_package)
+        except Exception as exc:
+            logger.warning("_flash_pvf failed for %s: %s", comp_names, exc)
+            return None
+
+    @staticmethod
+    def _flash_tvf(
+        comp_names: list[str],
+        zs: list[float],
+        T: float,
+        VF: float,
+        property_package: str = "PengRobinson",
+    ) -> dict[str, Any] | None:
+        """TVF flash — given temperature and vapor fraction.
+
+        Used for: bubble/dew pressure at given T.
+        Returns same dict format as _flash_tp with resolved P.
+        """
+        if not _thermo_available or not comp_names or not zs:
+            return None
+        try:
+            total = sum(zs)
+            if total <= 0:
+                return None
+            zs_norm = [z / total for z in zs]
+
+            tp_flash = DWSIMEngine._flash_tp(comp_names, zs_norm, T, 101325.0, property_package)
+            if not tp_flash or not tp_flash.get("flasher"):
+                return None
+
+            flasher = tp_flash["flasher"]
+            state = flasher.flash(T=T, VF=VF, zs=zs_norm)
+            P_result = state.P
+            return DWSIMEngine._flash_tp(comp_names, zs_norm, T, P_result, property_package)
+        except Exception as exc:
+            logger.warning("_flash_tvf failed for %s: %s", comp_names, exc)
             return None
 
     # ------------------------------------------------------------------
@@ -774,6 +973,8 @@ class DWSIMEngine:
         if flash and flash.get("MW_mix", 0) > 0:
             mw_kg = flash["MW_mix"] / 1000.0  # kg/mol
             feed["enthalpy"] = flash["H"] / mw_kg  # J/kg
+            if flash.get("S") is not None:
+                feed["entropy"] = flash["S"] / mw_kg  # J/(kg·K)
         else:
             cp_est = _estimate_cp(comp)
             feed["enthalpy"] = cp_est * (feed["temperature"] - _T_REF)
@@ -1000,6 +1201,9 @@ class DWSIMEngine:
 
             # Wegstein acceleration state: stores previous two iterates per tear edge key
             wegstein_prev: dict[str, list[float]] = {}  # key → [x_prev, g_prev]
+
+            # T2-5: Convergence diagnostics — track variable history per iteration
+            convergence_history: list[dict[str, Any]] = []
 
             # Initialize tear stream conditions with default feed for first pass
             tear_stream_conditions: dict[str, dict[str, Any]] = {}
@@ -2823,39 +3027,96 @@ class DWSIMEngine:
                             T_out = _c_to_k(float(T_op_c)) if T_op_c is not None else T_in
                             P_out = _kpa_to_pa(float(P_op_kpa)) if P_op_kpa is not None else P_in
 
-                            # Apply conversion to key reactant (T2-02b)
+                            # Parse reactions array (T2-1: stoichiometric conversion)
+                            reactions_json = params.get("reactions", "[]")
+                            reactions: list[dict] = []
+                            if reactions_json and reactions_json != "[]":
+                                try:
+                                    reactions = json.loads(reactions_json) if isinstance(reactions_json, str) else reactions_json
+                                except Exception:
+                                    pass
+
                             out_comp = dict(in_comp)
-                            if out_comp:
-                                key_reactant_param = params.get("keyReactant", "")
-                                if key_reactant_param and key_reactant_param in out_comp:
-                                    key_reactant = key_reactant_param
-                                else:
-                                    key_reactant = list(out_comp.keys())[0]
-                                z_before = out_comp[key_reactant]
-                                consumed = z_before * conversion
-                                out_comp[key_reactant] = z_before - consumed
-                                # Add consumed moles to "products" pseudo-component
-                                out_comp["products"] = out_comp.get("products", 0.0) + consumed
-                                # Renormalize
-                                total_z = sum(out_comp.values())
-                                if total_z > 0:
-                                    out_comp = {k: v / total_z for k, v in out_comp.items()}
-                                logs.append(f"{name}: key reactant '{key_reactant}' z={z_before:.4f} → {out_comp.get(key_reactant, 0):.4f}")
-                                if consumed > 1e-6:
+                            heat_of_reaction_w = 0.0  # Total heat of reaction in W
+
+                            if reactions:
+                                # Stoichiometric conversion with proper product formation
+                                for rxn_idx, rxn in enumerate(reactions[:10]):
+                                    reactant = rxn.get("reactant", "")
+                                    conv_r = float(rxn.get("conversion", conversion))
+                                    stoich_products = rxn.get("products", {})
+                                    stoich_reactants = rxn.get("reactants", {})
+                                    dH_rxn = float(rxn.get("heatOfReaction", 0))  # kJ/mol of key reactant
+
+                                    if reactant not in out_comp or out_comp[reactant] <= 0:
+                                        continue
+
+                                    # Moles of key reactant consumed
+                                    z_before = out_comp[reactant]
+                                    consumed = z_before * conv_r
+                                    out_comp[reactant] = max(0, z_before - consumed)
+
+                                    # Consume other reactants per stoichiometry
+                                    for r_name, r_coeff in stoich_reactants.items():
+                                        if r_name != reactant and r_name in out_comp:
+                                            out_comp[r_name] = max(0, out_comp[r_name] - consumed * float(r_coeff))
+
+                                    # Produce products per stoichiometry
+                                    for p_name, p_coeff in stoich_products.items():
+                                        out_comp[p_name] = out_comp.get(p_name, 0) + consumed * float(p_coeff)
+
+                                    # Heat of reaction (if specified): Q = n_consumed × ΔH_rxn
+                                    if abs(dH_rxn) > 0 and mf > 0:
+                                        mw_key = _get_mw(reactant)
+                                        # consumed is in mole fraction; convert to mol/s
+                                        mw_mix = sum(z * _get_mw(c) for c, z in in_comp.items())
+                                        if mw_mix > 0:
+                                            total_moles = mf / (mw_mix / 1000.0)  # mol/s
+                                            n_consumed = consumed * total_moles  # mol/s of key reactant
+                                            heat_of_reaction_w += n_consumed * dH_rxn * 1000.0  # W (kJ/mol → J/mol)
+
                                     logs.append(
-                                        f"WARNING: {name} uses 'products' pseudo-component — energy balance will be "
-                                        f"approximate (missing heat of reaction). Specify real product species for accuracy."
+                                        f"  Reaction {rxn_idx + 1}: {reactant} z={z_before:.4f}→{out_comp.get(reactant, 0):.4f}, "
+                                        f"X={conv_r:.0%}, products: {list(stoich_products.keys())}"
                                     )
 
-                            # Flash outlet for enthalpy (T3-07: filter pseudo-components)
+                                eq_res["reactionCount"] = len(reactions)
+                            else:
+                                # Legacy single-reaction mode (fallback to pseudo-component if no products defined)
+                                if out_comp:
+                                    key_reactant_param = params.get("keyReactant", "")
+                                    if key_reactant_param and key_reactant_param in out_comp:
+                                        key_reactant = key_reactant_param
+                                    else:
+                                        key_reactant = list(out_comp.keys())[0]
+                                    z_before = out_comp[key_reactant]
+                                    consumed = z_before * conversion
+                                    out_comp[key_reactant] = z_before - consumed
+                                    out_comp["products"] = out_comp.get("products", 0.0) + consumed
+                                    logs.append(f"{name}: key reactant '{key_reactant}' z={z_before:.4f} → {out_comp.get(key_reactant, 0):.4f}")
+                                    if consumed > 1e-6:
+                                        logs.append(
+                                            f"WARNING: {name} uses 'products' pseudo-component — define reactions with products "
+                                            f"for stoichiometric conversion and heat of reaction."
+                                        )
+
+                            # Renormalize composition
+                            total_z = sum(out_comp.values())
+                            if total_z > 0:
+                                out_comp = {k: v / total_z for k, v in out_comp.items()}
+
+                            # Flash outlet for enthalpy (filter pseudo-components)
                             clean_comp = _clean_composition(out_comp)
                             out_comp_names = list(clean_comp.keys())
                             out_zs = [float(v) for v in clean_comp.values()]
                             flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
 
+                            total_duty = float(duty_kw) * 1000.0 + heat_of_reaction_w  # W
                             eq_res["conversion"] = round(conversion * 100, 1)
                             eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
-                            eq_res["duty"] = round(float(duty_kw), 3)
+                            eq_res["duty"] = round(_w_to_kw(total_duty), 3)
+                            if abs(heat_of_reaction_w) > 0:
+                                eq_res["heatOfReaction_kW"] = round(_w_to_kw(heat_of_reaction_w), 3)
 
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
@@ -2866,31 +3127,6 @@ class DWSIMEngine:
                             else:
                                 outlet["enthalpy"] = _estimate_cp(out_comp) * (T_out - _T_REF)
                             outlet["composition"] = out_comp
-
-                            # Multi-reaction support
-                            reaction_count = int(params.get("reactionCount", 1))
-                            reactions_json = params.get("reactions", "[]")
-                            if reaction_count > 1 and reactions_json and reactions_json != "[]":
-                                try:
-                                    reactions = json.loads(reactions_json) if isinstance(reactions_json, str) else reactions_json
-                                    current_zs = dict(out_comp)
-                                    for rxn in reactions[:5]:
-                                        reactant = rxn.get("reactant", "")
-                                        conv_r = float(rxn.get("conversion", 0))
-                                        if reactant in current_zs:
-                                            reacted = current_zs[reactant] * conv_r
-                                            current_zs[reactant] = max(0, current_zs[reactant] - reacted)
-                                            products = rxn.get("products", {})
-                                            for prod, stoich in products.items():
-                                                current_zs[prod] = current_zs.get(prod, 0) + reacted * float(stoich)
-                                    total_z = sum(current_zs.values())
-                                    if total_z > 0:
-                                        current_zs = {k: v / total_z for k, v in current_zs.items()}
-                                    outlet["composition"] = current_zs
-                                    eq_res["reactionCount"] = len(reactions)
-                                    logs.append(f"  Multi-reaction: {len(reactions)} reactions applied")
-                                except Exception as e:
-                                    logs.append(f"WARNING: Multi-reaction parse error: {e}")
 
                             outlets["out-1"] = outlet
                             logs.append(f"{name}: X = {conversion:.0%}")
@@ -3740,6 +3976,21 @@ class DWSIMEngine:
 
                 tear_stream_conditions = new_tear_conditions
 
+                # T2-5: Record convergence diagnostics for this iteration
+                iter_data: dict[str, Any] = {
+                    "iteration": iteration,
+                    "max_error": max_error,
+                }
+                for te in tear_edges:
+                    te_src = te.get("source", "")
+                    te_sh = te.get("sourceHandle", "out-1")
+                    te_key2 = f"{te_src}_{te_sh}"
+                    tc = new_tear_conditions.get(te_key2, {})
+                    iter_data[f"{te_key2}_T"] = round(tc.get("temperature", 0), 2)
+                    iter_data[f"{te_key2}_P"] = round(tc.get("pressure", 0), 1)
+                    iter_data[f"{te_key2}_mf"] = round(tc.get("mass_flow", 0), 6)
+                convergence_history.append(iter_data)
+
                 if max_error < tolerance:
                     converged_recycle = True
                     logs.append(f"Tear-stream converged in {iteration} iterations (max error: {max_error:.2e})")
@@ -4189,15 +4440,63 @@ class DWSIMEngine:
                     _edge_mf = cond["mass_flow"]
                     _edge_cp = _compute_component_properties(_edge_comp, _edge_mf)
                     _edge_h_kj = round(cond.get("enthalpy", 0.0) / 1000.0, 4)  # J/kg → kJ/kg
-                    stream_results[edge_id] = {
+                    _edge_s_kj = round(cond.get("entropy", 0.0) / 1000.0, 6)  # J/(kg·K) → kJ/(kg·K)
+                    _sr: dict[str, Any] = {
                         "temperature": round(_k_to_c(cond["temperature"]), 2),
                         "pressure": round(_pa_to_kpa(cond["pressure"]), 3),
                         "flowRate": round(_edge_mf, 4),
                         "vapor_fraction": round(cond.get("vapor_fraction", 0.0), 4),
                         "composition": _edge_comp,
                         "enthalpy": _edge_h_kj,
+                        "entropy": _edge_s_kj,
                         **_edge_cp,
                     }
+                    # Flash for extended transport/thermo properties
+                    _sr_flash = self._flash_tp(
+                        list(_edge_comp.keys()), [float(v) for v in _edge_comp.values()],
+                        cond["temperature"], cond["pressure"], property_package
+                    ) if _edge_comp and _edge_mf > 0 else None
+                    if _sr_flash:
+                        mw = _sr_flash.get("MW_mix", 0)
+                        _sr["density"] = round(_sr_flash["rho_mix"], 4) if _sr_flash.get("rho_mix") is not None else None
+                        _sr["viscosity"] = _sr_flash.get("mu_liquid") if _sr_flash.get("VF", 0) < 0.5 else _sr_flash.get("mu_gas")
+                        _sr["thermal_conductivity"] = _sr_flash.get("k_liquid") if _sr_flash.get("VF", 0) < 0.5 else _sr_flash.get("k_gas")
+                        _sr["surface_tension"] = _sr_flash.get("sigma")
+                        _sr["Cp_mass"] = round(_sr_flash["Cp_mass_mix"], 2) if _sr_flash.get("Cp_mass_mix") is not None else None
+                        _sr["Cv_mass"] = round(_sr_flash["Cv"], 2) if _sr_flash.get("Cv") is not None and mw > 0 else None
+                        if _sr["Cv_mass"] is not None and mw > 0:
+                            # Convert Cv from J/(mol·K) to J/(kg·K)
+                            _sr["Cv_mass"] = round(_sr_flash["Cv"] * 1000.0 / mw, 2)
+                        _sr["Z_factor"] = round(_sr_flash["Z"], 6) if _sr_flash.get("Z") is not None else None
+                        # Phase-specific properties
+                        _sr["phase_properties"] = {
+                            "liquid": {
+                                "density": round(_sr_flash["rho_liquid"], 2) if _sr_flash.get("rho_liquid") is not None else None,
+                                "viscosity": _sr_flash.get("mu_liquid"),
+                                "thermal_conductivity": _sr_flash.get("k_liquid"),
+                                "Cp": round(_sr_flash["Cp_liquid"], 2) if _sr_flash.get("Cp_liquid") is not None else None,
+                                "Cv": round(_sr_flash["Cv_liquid"], 2) if _sr_flash.get("Cv_liquid") is not None else None,
+                                "enthalpy": round(_sr_flash["H_liquid"] * 1000.0 / mw / 1000.0, 4) if _sr_flash.get("H_liquid") is not None and mw > 0 else None,
+                                "entropy": round(_sr_flash["S_liquid"] * 1000.0 / mw / 1000.0, 6) if _sr_flash.get("S_liquid") is not None and mw > 0 else None,
+                                "Z": round(_sr_flash["Z_liquid"], 6) if _sr_flash.get("Z_liquid") is not None else None,
+                                "composition": {k: round(v, 6) for k, v in zip(_sr_flash["comp_names"], _sr_flash["liquid_zs"])},
+                            },
+                            "vapor": {
+                                "density": round(_sr_flash["rho_gas"], 4) if _sr_flash.get("rho_gas") is not None else None,
+                                "viscosity": _sr_flash.get("mu_gas"),
+                                "thermal_conductivity": _sr_flash.get("k_gas"),
+                                "Cp": round(_sr_flash["Cp_gas"], 2) if _sr_flash.get("Cp_gas") is not None else None,
+                                "Cv": round(_sr_flash["Cv_gas"], 2) if _sr_flash.get("Cv_gas") is not None else None,
+                                "enthalpy": round(_sr_flash["H_gas"] * 1000.0 / mw / 1000.0, 4) if _sr_flash.get("H_gas") is not None and mw > 0 else None,
+                                "entropy": round(_sr_flash["S_gas"] * 1000.0 / mw / 1000.0, 6) if _sr_flash.get("S_gas") is not None and mw > 0 else None,
+                                "Z": round(_sr_flash["Z_gas"], 6) if _sr_flash.get("Z_gas") is not None else None,
+                                "composition": {k: round(v, 6) for k, v in zip(_sr_flash["comp_names"], _sr_flash["gas_zs"])},
+                            },
+                        }
+                        # Volumetric flows
+                        if _sr.get("density") and _sr["density"] > 0:
+                            _sr["volumetric_flow"] = round(_edge_mf / _sr["density"], 6)  # m³/s
+                    stream_results[edge_id] = _sr
 
             engine_name = "basic"
             if _thermo_available:
@@ -4217,6 +4516,8 @@ class DWSIMEngine:
             if tear_edges:
                 convergence_info["recycle_detected"] = True
                 convergence_info["tear_streams"] = len(tear_edges)
+            if convergence_history:
+                convergence_info["history"] = convergence_history
 
             return {
                 "status": status,

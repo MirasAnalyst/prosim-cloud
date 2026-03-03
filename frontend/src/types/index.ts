@@ -69,6 +69,18 @@ export interface EquipmentData {
   position: { x: number; y: number };
 }
 
+export interface PhaseProperties {
+  density?: number | null;
+  viscosity?: number | null;
+  thermal_conductivity?: number | null;
+  Cp?: number | null;
+  Cv?: number | null;
+  enthalpy?: number | null;
+  entropy?: number | null;
+  Z?: number | null;
+  composition?: Record<string, number>;
+}
+
 export interface StreamConditions {
   temperature: number;
   pressure: number;
@@ -76,11 +88,26 @@ export interface StreamConditions {
   vapor_fraction: number;
   composition: Record<string, number>;
   enthalpy?: number;
+  entropy?: number;
   molecular_weight?: number;
   molar_flow?: number;
   mass_fractions?: Record<string, number>;
   component_molar_flows?: Record<string, number>;
   component_mass_flows?: Record<string, number>;
+  // Transport properties
+  density?: number | null;
+  viscosity?: number | null;
+  thermal_conductivity?: number | null;
+  surface_tension?: number | null;
+  Cp_mass?: number | null;
+  Cv_mass?: number | null;
+  Z_factor?: number | null;
+  volumetric_flow?: number | null;
+  // Phase-specific properties
+  phase_properties?: {
+    liquid: PhaseProperties;
+    vapor: PhaseProperties;
+  };
 }
 
 export interface StreamData {
@@ -107,6 +134,11 @@ export interface SimulationResult {
     iterations: number;
     converged: boolean;
     error: number;
+    history?: Array<{ iteration: number; max_error: number; [key: string]: number }>;
+    mass_balance_ok?: boolean;
+    energy_balance_ok?: boolean;
+    recycle_detected?: boolean;
+    tear_streams?: number;
   };
   logs: string[];
 }

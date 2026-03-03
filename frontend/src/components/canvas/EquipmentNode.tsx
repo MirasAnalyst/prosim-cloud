@@ -4,21 +4,36 @@ import type { EquipmentNodeData } from '../../stores/flowsheetStore';
 import { equipmentLibrary } from '../../lib/equipment-library';
 import { EquipmentIcon, getNodeDimensions } from './EquipmentIcons';
 import { useSimulationStore } from '../../stores/simulationStore';
+import { useUnitStore } from '../../stores/unitStore';
 import { SimulationStatus, EquipmentType } from '../../types';
+import type { UnitSystem } from '../../lib/unit-systems';
 
 function getResultBadge(
   equipmentType: EquipmentType,
-  eqResult: Record<string, number | string>
+  eqResult: Record<string, number | string>,
+  us: UnitSystem
 ): string | null {
+  const cT = us.fromSI.temperature;
+  const cDT = us.fromSI.temperatureDelta;
+  const cP = us.fromSI.pressure;
+  const cF = us.fromSI.massFlow;
+  const cW = us.fromSI.power;
+  const cV = us.fromSI.velocity;
+  const uT = us.units.temperature;
+  const uP = us.units.pressure;
+  const uF = us.units.massFlow;
+  const uW = us.units.power;
+  const uV = us.units.velocity;
+
   switch (equipmentType) {
     case EquipmentType.Heater:
     case EquipmentType.Cooler:
     case EquipmentType.HeatExchanger: {
       const duty = eqResult.duty;
       if (duty == null) return null;
-      const label = `Q: ${Number(duty).toFixed(1)} kW`;
+      const label = `Q: ${cW(Number(duty)).toFixed(1)} ${uW}`;
       if (equipmentType === EquipmentType.HeatExchanger && eqResult.LMTD != null) {
-        return `${label} | LMTD: ${Number(eqResult.LMTD).toFixed(1)}°C`;
+        return `${label} | LMTD: ${cDT(Number(eqResult.LMTD)).toFixed(1)}${uT}`;
       }
       return label;
     }
@@ -26,7 +41,7 @@ function getResultBadge(
     case EquipmentType.Compressor: {
       const work = eqResult.work;
       if (work == null) return null;
-      return `W: ${Number(work).toFixed(1)} kW`;
+      return `W: ${cW(Number(work)).toFixed(1)} ${uW}`;
     }
     case EquipmentType.Separator: {
       const vf = eqResult.vaporFraction ?? eqResult.vapor_fraction;
@@ -54,7 +69,7 @@ function getResultBadge(
     case EquipmentType.Mixer: {
       const flow = eqResult.totalMassFlow;
       if (flow == null) return null;
-      return `${Number(flow).toFixed(2)} kg/s`;
+      return `${cF(Number(flow)).toFixed(2)} ${uF}`;
     }
     case EquipmentType.Valve: {
       const cv = eqResult.calculatedCv;
@@ -63,7 +78,7 @@ function getResultBadge(
       }
       const dp = eqResult.pressureDrop;
       if (dp == null) return null;
-      return `ΔP: ${Number(dp).toFixed(1)} kPa`;
+      return `ΔP: ${cP(Number(dp)).toFixed(1)} ${uP}`;
     }
     case EquipmentType.Absorber:
     case EquipmentType.Stripper: {
@@ -74,7 +89,7 @@ function getResultBadge(
     case EquipmentType.Cyclone: {
       const dp = eqResult.pressureDrop;
       if (dp == null) return null;
-      return `ΔP: ${Number(dp).toFixed(1)} kPa`;
+      return `ΔP: ${cP(Number(dp)).toFixed(1)} ${uP}`;
     }
     case EquipmentType.ThreePhaseSeparator: {
       const vf = eqResult.vaporFraction;
@@ -109,8 +124,8 @@ function getResultBadge(
       const dpPipe = eqResult.pressureDrop;
       const vel = eqResult.velocity;
       if (dpPipe == null) return null;
-      const parts = [`ΔP: ${Number(dpPipe).toFixed(2)} kPa`];
-      if (vel != null) parts.push(`V: ${Number(vel).toFixed(2)} m/s`);
+      const parts = [`ΔP: ${cP(Number(dpPipe)).toFixed(2)} ${uP}`];
+      if (vel != null) parts.push(`V: ${cV(Number(vel)).toFixed(2)} ${uV}`);
       return parts.join(' | ');
     }
     case EquipmentType.FeedStream: {
@@ -119,9 +134,9 @@ function getResultBadge(
       const f = eqResult.massFlow;
       if (t == null && p == null && f == null) return null;
       const parts: string[] = [];
-      if (t != null) parts.push(`${Number(t).toFixed(1)}°C`);
-      if (p != null) parts.push(`${Number(p).toFixed(1)} kPa`);
-      if (f != null) parts.push(`${Number(f).toFixed(3)} kg/s`);
+      if (t != null) parts.push(`${cT(Number(t)).toFixed(1)}${uT}`);
+      if (p != null) parts.push(`${cP(Number(p)).toFixed(1)} ${uP}`);
+      if (f != null) parts.push(`${cF(Number(f)).toFixed(3)} ${uF}`);
       return parts.join(' | ');
     }
     case EquipmentType.ProductStream: {
@@ -131,9 +146,9 @@ function getResultBadge(
       const vf = eqResult.vaporFraction;
       if (t == null && p == null && f == null) return null;
       const parts: string[] = [];
-      if (t != null) parts.push(`${Number(t).toFixed(1)}°C`);
-      if (p != null) parts.push(`${Number(p).toFixed(1)} kPa`);
-      if (f != null) parts.push(`${Number(f).toFixed(3)} kg/s`);
+      if (t != null) parts.push(`${cT(Number(t)).toFixed(1)}${uT}`);
+      if (p != null) parts.push(`${cP(Number(p)).toFixed(1)} ${uP}`);
+      if (f != null) parts.push(`${cF(Number(f)).toFixed(3)} ${uF}`);
       if (vf != null) parts.push(`VF: ${Number(vf).toFixed(3)}`);
       return parts.join(' | ');
     }
@@ -149,6 +164,7 @@ function EquipmentNode({ id, data, selected }: NodeProps) {
 
   const results = useSimulationStore((s) => s.results);
   const status = useSimulationStore((s) => s.status);
+  const unitSystem = useUnitStore((s) => s.unitSystem);
 
   const eqResult =
     status === SimulationStatus.Completed && results?.equipmentResults
@@ -156,7 +172,7 @@ function EquipmentNode({ id, data, selected }: NodeProps) {
       : null;
 
   const badge = eqResult
-    ? getResultBadge(nodeData.equipmentType, eqResult)
+    ? getResultBadge(nodeData.equipmentType, eqResult, unitSystem)
     : null;
 
   const isEnergy = (portId: string) => portId.startsWith('energy');
