@@ -115,13 +115,20 @@ def compute_txy(
         x_b = 1.0 - x_a
         zs = [x_a, x_b]
 
-        # Skip pure endpoints to avoid numerical issues
+        # Skip pure endpoints to avoid numerical issues with FlashVL
         if x_a < 1e-8 or x_a > 1.0 - 1e-8:
-            # Pure component: bubble = dew
+            # Pure component: bubble = dew at boiling point
             try:
-                state = flasher.flash(T=300.0, VF=0.0, zs=zs if x_a > 0.5 else [1e-8, 1.0 - 1e-8])
+                pure_zs = [1.0 - 1e-10, 1e-10] if x_a > 0.5 else [1e-10, 1.0 - 1e-10]
+                state = flasher.flash(P=P, VF=0.0, zs=pure_zs)
+                if state.T and math.isfinite(state.T):
+                    T_C = state.T - 273.15
+                    bubble_curve.append({"x_a": round(x_a, 6), "T_C": round(T_C, 4), "T_K": round(state.T, 4)})
+                    dew_curve.append({"x_a": round(x_a, 6), "T_C": round(T_C, 4), "T_K": round(state.T, 4)})
+                    xy_curve.append({"x_a": round(x_a, 6), "y_a": round(x_a, 6)})
             except Exception:
-                continue
+                pass
+            continue
 
         # Bubble point (VF=0)
         try:
@@ -204,6 +211,20 @@ def compute_pxy(
         x_a = i / (n_points - 1)
         x_b = 1.0 - x_a
         zs = [x_a, x_b]
+
+        # Pure endpoints: bubble = dew at vapor pressure
+        if x_a < 1e-8 or x_a > 1.0 - 1e-8:
+            try:
+                pure_zs = [1.0 - 1e-10, 1e-10] if x_a > 0.5 else [1e-10, 1.0 - 1e-10]
+                state = flasher.flash(T=T, VF=0.0, zs=pure_zs)
+                if state.P and math.isfinite(state.P) and state.P > 0:
+                    P_kPa = state.P / 1000.0
+                    bubble_curve.append({"x_a": round(x_a, 6), "P_kPa": round(P_kPa, 4), "P_Pa": round(state.P, 1)})
+                    dew_curve.append({"x_a": round(x_a, 6), "P_kPa": round(P_kPa, 4), "P_Pa": round(state.P, 1)})
+                    xy_curve.append({"x_a": round(x_a, 6), "y_a": round(x_a, 6)})
+            except Exception:
+                pass
+            continue
 
         # Bubble point (VF=0) → gives bubble pressure
         try:

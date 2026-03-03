@@ -2806,12 +2806,15 @@ class DWSIMEngine:
                                         if flash_br and flash_br.get("MW_mix", 0) > 0:
                                             h_bott_r = flash_br["H"] / (flash_br["MW_mix"] / 1000.0)
 
-                                        # Mass splits from molar splits
+                                        # Mass splits from molar flows × molecular weight
                                         MWs_r = [_get_mw(cn) for cn in comp_names]
-                                        mass_d = sum(d_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
-                                        mass_b = sum(b_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
-                                        mass_tot = mass_d + mass_b or 1.0
-                                        frac_d = mass_d / mass_tot
+                                        MW_d = sum(d_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
+                                        MW_b = sum(b_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
+                                        B_molar = feed_molar_flow - dist_molar_rate
+                                        mass_d_actual = dist_molar_rate * (MW_d / 1000.0)  # kg/s
+                                        mass_b_actual = B_molar * (MW_b / 1000.0)  # kg/s
+                                        mass_tot = mass_d_actual + mass_b_actual or mf
+                                        frac_d = mass_d_actual / mass_tot
                                         frac_b = 1.0 - frac_d
 
                                         dist_vf_r = 0.0
@@ -2839,8 +2842,8 @@ class DWSIMEngine:
                                         eq_res["numberOfStages"] = n_stages
                                         eq_res["refluxRatio"] = reflux_ratio
                                         eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
-                                        eq_res["condenserDuty"] = round(_w_to_kw(Q_cond_r), 1)
-                                        eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb_r), 1)
+                                        eq_res["condenserDuty"] = round(_w_to_kw(abs(Q_cond_r)), 1)
+                                        eq_res["reboilerDuty"] = round(_w_to_kw(abs(Q_reb_r)), 1)
                                         eq_res["distillateTemperature"] = round(_k_to_c(T_dist_r), 1)
                                         eq_res["bottomsTemperature"] = round(_k_to_c(T_bott_r), 1)
                                         eq_res["converged"] = rig_result.get("converged", False)
@@ -3332,17 +3335,20 @@ class DWSIMEngine:
                                 if n_total <= 0:
                                     return -1.0
 
-                                # Q = product((n_i / n_total) ^ nu_i) for species with nu != 0
-                                ln_Q = 0.0
+                                # Ky = product((n_i / n_total) ^ nu_i) for species with nu != 0
+                                ln_Ky = 0.0
                                 for sp, coeff in nu.items():
                                     if abs(coeff) > 1e-15:
                                         y_i = n_i.get(sp, 1e-30) / n_total
                                         y_i = max(y_i, 1e-30)
-                                        ln_Q += coeff * math.log(y_i)
+                                        ln_Ky += coeff * math.log(y_i)
 
-                                # Return Q - Keq (log-space: ln(Q) - ln(Keq))
+                                # Kp = Ky * (P/P_ref)^delta_nu; solve Kp = Keq
+                                delta_nu = sum(nu.values())  # net change in moles
+                                P_ref = 101325.0
+                                ln_Kp = ln_Ky + delta_nu * math.log(max(P_out / P_ref, 1e-30))
                                 ln_Keq = math.log(max(Keq, 1e-30))
-                                return ln_Q - ln_Keq
+                                return ln_Kp - ln_Keq
 
                             xi_eq = 0.0
                             if max_extent > 0 and nu:
@@ -3435,7 +3441,11 @@ class DWSIMEngine:
                             eq_res["Keq"] = round(Keq, 6)
                             eq_res["equilibriumExtent"] = round(xi_eq, 6)
                             eq_res["conversion"] = round(conversion_eq * 100, 1)
-                            eq_res["duty"] = round(duty_kw, 3)
+                            # Compute actual duty from energy balance
+                            h_in_eq = inlet.get("enthalpy", 0.0)
+                            h_out_eq = outlet.get("enthalpy", 0.0)
+                            actual_duty_eq = mf_out * h_out_eq - mf * h_in_eq  # W
+                            eq_res["duty"] = round(_w_to_kw(actual_duty_eq), 3)
                             eq_res["limitingReactant"] = limiting_reactant
                             eq_res["outletComposition"] = {
                                 k: round(v, 6) for k, v in out_comp.items() if v > 1e-10
@@ -3582,6 +3592,19 @@ class DWSIMEngine:
                                         "fun": make_constraint(j),
                                     })
 
+                                # Analytical gradient: dG/dn_k = Gf_k + R*T*ln(y_k * P/P_ref)
+                                def gibbs_gradient(n_vec: list[float]) -> list[float]:
+                                    n_total = sum(n_vec)
+                                    if n_total <= 0:
+                                        return [0.0] * n_comps
+                                    grad = []
+                                    for k in range(n_comps):
+                                        nk = max(n_vec[k], 1e-30)
+                                        yk = nk / n_total
+                                        yk = max(yk, 1e-30)
+                                        grad.append(Gf_list[k] + R_gas * T_out * math.log(yk * P_out / P_ref))
+                                    return grad
+
                                 # Bounds: n_i >= 1e-15 (avoid log(0))
                                 bounds = [(1e-15, None) for _ in range(n_comps)]
 
@@ -3595,6 +3618,7 @@ class DWSIMEngine:
                                         gibbs_objective,
                                         n0_guess,
                                         method="SLSQP",
+                                        jac=gibbs_gradient,
                                         bounds=bounds,
                                         constraints=constraints,
                                         options={"maxiter": 500, "ftol": 1e-12},
@@ -3668,7 +3692,11 @@ class DWSIMEngine:
 
                                 eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
                                 eq_res["outletPressure"] = round(_pa_to_kpa(P_out), 2)
-                                eq_res["duty"] = round(duty_kw, 3)
+                                # Compute actual duty from energy balance
+                                h_in_g = inlet.get("enthalpy", 0.0)
+                                h_out_g = outlet.get("enthalpy", 0.0)
+                                actual_duty_g = mf_out * h_out_g - mf * h_in_g  # W
+                                eq_res["duty"] = round(_w_to_kw(actual_duty_g), 3)
                                 eq_res["deltaG_kW"] = round(delta_G / 1000.0, 3)
                                 eq_res["outletComposition"] = {
                                     k: round(v, 6) for k, v in out_comp_g.items() if v > 1e-10
@@ -4733,15 +4761,18 @@ class DWSIMEngine:
                                                 D_eq = 4 * (P_t**2 - math.pi * D_tube**2 / 4) / (math.pi * D_tube)
                                                 D_tube_id = max(D_eq, 0.01)
                                                 v_s = vol_flow / max(math.pi * 0.2**2 / 4, 0.01)  # ~200mm shell ID estimate
-                                            Re = rho_s * abs(v_s) * D_tube_id / max(mu_s, 1e-8)
+                                            D_h = D_tube_id  # hydraulic diameter for this side
+                                            Re = rho_s * abs(v_s) * D_h / max(mu_s, 1e-8)
                                             Pr = Cp_s * mu_s / max(k_s, 1e-6)
                                             if Re > 0 and Pr > 0:
-                                                Nu = 0.023 * max(Re, 100) ** 0.8 * max(Pr, 0.1) ** 0.4
-                                                h_calc = Nu * k_s / D_tube_id
                                                 if side_label == "tube":
-                                                    h_tube = h_calc
+                                                    # Dittus-Boelter for tube-side turbulent flow
+                                                    Nu = 0.023 * max(Re, 100) ** 0.8 * max(Pr, 0.1) ** 0.4
+                                                    h_tube = Nu * k_s / D_h
                                                 else:
-                                                    h_shell = h_calc
+                                                    # Kern method for shell-side cross-flow
+                                                    Nu = 0.36 * max(Re, 10) ** 0.55 * max(Pr, 0.1) ** (1.0 / 3.0)
+                                                    h_shell = Nu * k_s / D_h
                                 R_f = 0.0003  # fouling resistance m²·K/W
                                 if h_tube > 0 and h_shell > 0:
                                     U = 1.0 / (1.0 / h_tube + 1.0 / h_shell + R_f)

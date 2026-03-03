@@ -742,6 +742,7 @@ def _update_flows(
     nc: int,
     distillate_rate: float,
     condenser_type: str,
+    feed_enthalpy: float | None = None,
 ) -> None:
     """Update liquid and vapor flows from energy balance corrections.
 
@@ -782,7 +783,7 @@ def _update_flows(
             L_jm1 = stages[j - 1].L if j > 0 else 0.0
             H_L_jm1 = stages[j - 1].H_L if j > 0 else 0.0
 
-            H_F_j = (sj.H_L + sj.H_V) / 2.0 if sj.is_feed_stage else 0.0
+            H_F_j = (feed_enthalpy if feed_enthalpy is not None else (sj.H_L + sj.H_V) / 2.0) if sj.is_feed_stage else 0.0
             F_j = sj.feed_flow
 
             numerator = (V_j1 * (H_V_j1 - sj.H_V)
@@ -997,6 +998,16 @@ def solve_rigorous_distillation(
     )
 
     # -----------------------------------------------------------------------
+    # Compute actual feed enthalpy for energy balance (not avg of stage H_L/H_V)
+    # -----------------------------------------------------------------------
+    feed_H: float | None = None
+    try:
+        state_feed = flasher.flash(T=feed_T, P=feed_P, zs=feed_zs_norm)
+        feed_H = state_feed.H()  # J/mol
+    except Exception:
+        pass  # will fall back to (H_L+H_V)/2 in _update_flows
+
+    # -----------------------------------------------------------------------
     # Outer iteration loop
     # -----------------------------------------------------------------------
     temperature_history: list[list[float]] = []
@@ -1033,13 +1044,13 @@ def solve_rigorous_distillation(
 
         # Step 4: Update flows from energy balance
         try:
-            _update_flows(stages, nc, distillate_rate, condenser_type)
+            _update_flows(stages, nc, distillate_rate, condenser_type, feed_enthalpy=feed_H)
         except Exception as exc:
             logger.warning("Flow update failed at iteration %d: %s", iteration, exc)
             # Non-fatal: continue with CMO flows
 
-        # Step 5: Check convergence
-        if max_dT < tol:
+        # Step 5: Check convergence (require minimum 3 iterations)
+        if max_dT is not None and max_dT < tol and iteration >= 3:
             converged = True
             logger.info(
                 "Rigorous distillation converged in %d iterations (max|dT|=%.2e K)",

@@ -107,6 +107,7 @@ def apply_bip_overrides(
     matrix: list[list[float]],
     comp_names: list[str],
     overrides: dict[str, float],
+    property_package: str = "PengRobinson",
 ) -> list[list[float]]:
     """Apply user BIP overrides to a matrix.
 
@@ -114,12 +115,15 @@ def apply_bip_overrides(
         matrix: NxN BIP matrix
         comp_names: compound names (order matches matrix indices)
         overrides: dict with keys "comp_a|comp_b" → kij value
+        property_package: "PengRobinson"/"SRK" (symmetric) or "NRTL"/"UNIQUAC" (asymmetric)
 
     Returns:
         Updated NxN matrix
     """
     result = [row[:] for row in matrix]  # shallow copy
     name_to_idx = {name: i for i, name in enumerate(comp_names)}
+    # Cubic EOS kij are symmetric; activity coefficient models (NRTL/UNIQUAC) are asymmetric
+    is_symmetric = property_package in ("PengRobinson", "SRK")
 
     for key, value in overrides.items():
         parts = key.split("|")
@@ -130,7 +134,8 @@ def apply_bip_overrides(
         j = name_to_idx.get(comp_b)
         if i is not None and j is not None:
             result[i][j] = value
-            result[j][i] = value  # symmetric
+            if is_symmetric:
+                result[j][i] = value
 
     return result
 
