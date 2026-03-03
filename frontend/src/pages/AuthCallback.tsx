@@ -6,16 +6,24 @@ export default function AuthCallback() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    // Supabase appends tokens to the URL hash on email confirmation.
-    // The client library picks them up via onAuthStateChange() automatically.
-    // We just wait for the session to be established, then redirect.
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (session) {
-        navigate('/', { replace: true });
-      } else {
-        navigate('/login', { replace: true });
+        subscription.unsubscribe();
+        navigate('/app', { replace: true });
       }
     });
+
+    // Fallback: if auth state doesn't fire within 5s, check session directly
+    const timeout = setTimeout(async () => {
+      subscription.unsubscribe();
+      const { data: { session } } = await supabase.auth.getSession();
+      navigate(session ? '/app' : '/login', { replace: true });
+    }, 5000);
+
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(timeout);
+    };
   }, [navigate]);
 
   return (
