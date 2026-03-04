@@ -11,7 +11,8 @@
 > - Phase 9: Complete (Unit Op Correctness Audit — 27 engine fixes across 3 waves)
 > - Phase 10: ~79% (Tier 1: 100%, Tier 2: 100%, Tier 3: ~33%, Tier 4: 0%)
 > - Phase 7, 11–12: Not started
-> - **130 E2E tests** across 26 spec files (complex-industrial 16, industrial-flowsheets 16, stress-20 20, unit-system 20, equipment-coverage 10, phase8-remaining 9, insights 4, dark-theme 1, + 34 legacy)
+> - Phase 14: Complete (validation-suite 25 tests)
+> - **155 E2E tests** across 27 spec files (complex-industrial 16, industrial-flowsheets 16, stress-20 20, unit-system 20, equipment-coverage 10, phase8-remaining 9, insights 4, dark-theme 1, validation-suite 25, + 34 legacy)
 
 ## Phase 1: Foundation (Complete)
 
@@ -243,3 +244,44 @@
 - [ ] Usage analytics and metering
 - [ ] SLA monitoring
 - [ ] White-labeling support
+
+## Phase 14: Industrial Flowsheet Validation Suite
+
+25 manually-crafted flowsheets across 11 industries, validating quantitative accuracy against HYSYS/DWSIM references. All 24 equipment types and all 4 property packages (PR, SRK, NRTL, UNIQUAC) covered.
+
+### Oil & Gas (4 tests)
+- [x] V01: Gas Dehydration with methanol solvent (SRK) — Absorber, Separator, Valve, Heater
+- [x] V04: Wellhead Production Facility (PR) — ThreePhaseSeparator, Valve, Compressor, Splitter
+- [x] V15: Gas Gathering & Compression (SRK) — parallel trains, Valve, Compressor, Separator
+- [x] V23: Offshore FPSO Production (PR) — 2-stage separation, ThreePhaseSep, sequential compression
+
+### Refining (3 tests)
+- [x] V02: Crude Preflash & Fractionation (PR) — Pump, Heater, Separator, DistillationColumn
+- [x] V14: FCC Product Recovery (PR) — PFRReactor, Cyclone, Separator, high-temperature
+- [x] V20: Crude Stabilization & Pipeline (SRK) — ConversionReactor, PipeSegment, Pump
+
+### Petrochemical (5 tests)
+- [x] V05: PFR Reactor System (PR) — PFR Ergun pressure drop, gas-phase reaction
+- [x] V12: Steam Methane Reforming (PR) — GibbsReactor, Mixer, partial condenser Column
+- [x] V18: Water-Gas Shift (PR) — EquilibriumReactor, HeatExchanger, equilibrium chemistry
+- [x] V22: Ammonia Synthesis Loop (SRK) — ConversionReactor, Cyclone, Compressor, cryogenic
+- [x] V24: Ethylene Glycol Production (NRTL) — EO-water-EG ternary, Column
+
+### Chemical (4 tests)
+- [x] V06: IPA-Water Azeotropic Distillation (NRTL) — azeotrope validation
+- [x] V13: BTX Extractive Distillation (UNIQUAC) — cyclohexane-benzene, phenol solvent
+- [x] V16: Acetone-Water Distillation (UNIQUAC) — no azeotrope, high purity achievable
+- [x] V19: Acetic Acid-Water Separation (NRTL) — H-bonding, low relative volatility
+
+### Gas Processing (2 tests)
+- [x] V09: LPG Fractionation Train (SRK) — Depropanizer + Debutanizer, C2-C5 VLE
+- [x] V11: DEA Sour Gas Sweetening (PR) — reactive K-values, H2S/CO2 removal
+
+### Power/Energy, Utilities, Pharma, Minerals, Carbon Capture, Logical (5 tests)
+- [x] V07: Flue Gas Desulfurization (PR) — SO2 reactive absorption, Absorber+Stripper
+- [x] V10: Cooling Water Circuit (PR) — PipeSegment, HX, Pump, pipe hydraulics
+- [x] V03: Ethanol Fermentation CSTR (NRTL) — Arrhenius kinetics, polar liquid
+- [x] V08: Pharma Solvent Recovery DCM-MeOH (NRTL) — non-ideal distillation, HX
+- [x] V17: NaCl Crystallization Plant (PR) — Crystallizer, Filter, Dryer solids chain
+- [x] V21: MEA CO₂ Capture Loop (PR) — Absorber+Stripper, reactive amine system
+- [x] V25: DesignSpec Temperature Control (PR) — DesignSpec convergence, logical node

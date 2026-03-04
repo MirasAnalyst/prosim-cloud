@@ -413,6 +413,10 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 6. **Additional feed molar flow conversion used primary feed MW**: `extra_molar = extra_mf / (feed_mw / 1000.0)` where `feed_mw` is primary feed's molecular weight. For stripping steam (MW=18) vs hydrocarbon (MW=100), molar flow off by ~5.5×. Fix: compute `extra_mw` from extra feed's own composition. **Each feed stream has its own molecular weight — never use one stream's MW to convert another stream's mass flow.**
 
+### Phase 14: Mistakes and Resolutions
+
+1. **E2E distillation temperature bounds assumed atmospheric boiling points at elevated column pressure**: V02 column fed at 1500 kPa had hexane distillate at 152.8°C, but test bound was <120°C (based on atmospheric bp 69°C). Same error in V09 depropanizer (<50°C) and debutanizer (<80°C). Fix: use pressure-corrected bp ranges (e.g., hexane at 1500 kPa bp ~170°C). **When writing distillation E2E assertions, always account for the column operating pressure — bp scales roughly as Antoine equation, not fixed at atmospheric values.**
+
 ## Dev Commands
 ```bash
 # Backend
