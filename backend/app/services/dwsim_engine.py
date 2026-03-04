@@ -2466,6 +2466,8 @@ class DWSIMEngine:
 
                             n_stages = int(params.get("numberOfStages", 10))
                             reflux_ratio = float(params.get("refluxRatio", 1.5))
+                            lk_recovery = max(0.5, min(0.9999, float(params.get("lkRecovery", 99)) / 100.0))
+                            hk_recovery = max(0.5, min(0.9999, float(params.get("hkRecovery", 99)) / 100.0))
                             P_cond = _kpa_to_pa(float(params.get("condenserPressure", _pa_to_kpa(P_feed))))
 
                             comp_names = list(comp.keys())
@@ -2588,11 +2590,10 @@ class DWSIMEngine:
 
                                         if alpha_lk_hk > 1.01:
                                             # Fenske: N_min
-                                            # Using 99% recovery for LK and HK
-                                            N_min = math.log((0.99 / 0.01) ** 2) / math.log(alpha_lk_hk)
+                                            N_min = math.log((lk_recovery / (1 - lk_recovery)) * (hk_recovery / (1 - hk_recovery))) / math.log(alpha_lk_hk)
 
                                             # Preliminary component split using N_min (for Underwood R_min calc)
-                                            d_hk_over_b_hk_pre = 0.01 / 0.99
+                                            d_hk_over_b_hk_pre = (1 - hk_recovery) / hk_recovery
                                             d_fracs_pre: list[float] = []
                                             for i in range(len(comp_names)):
                                                 alpha_Nmin = alphas[i] ** N_min if N_min < 200 else 1e6
@@ -2648,8 +2649,7 @@ class DWSIMEngine:
                                             N_eff = (N_min + Y) / (1.0 - Y) if Y < 1.0 else n_stages
 
                                             # Component recovery: d_i/b_i = (d_hk/b_hk) * alpha_i^N_eff
-                                            # Assume 99% HK recovery in bottoms
-                                            d_hk_over_b_hk = 0.01 / 0.99
+                                            d_hk_over_b_hk = (1 - hk_recovery) / hk_recovery
                                             d_fracs: list[float] = []
                                             b_fracs: list[float] = []
                                             for i in range(len(comp_names)):
@@ -2674,8 +2674,9 @@ class DWSIMEngine:
                                             frac_dist = mass_dist / mass_total if mass_total > 0 else 0.5
                                             frac_bott = 1.0 - frac_dist
 
-                                            # Flash distillate and bottoms for temperatures
-                                            P_bott = P_cond + N_eff * 1000.0  # ~1 kPa per stage
+                                            # Reboiler pressure: user-specified or auto (condenser P + column ΔP)
+                                            P_reb_kpa = float(params.get("reboilerPressure", 0))
+                                            P_bott = _kpa_to_pa(P_reb_kpa) if P_reb_kpa > 0 else P_cond + n_stages * 700.0  # ~0.7 kPa/tray
                                             d_names = list(distillate_comp.keys())
                                             d_zs = [float(v) for v in distillate_comp.values()]
                                             b_names = list(bottoms_comp.keys())
@@ -2735,35 +2736,6 @@ class DWSIMEngine:
                                                         h_vap_dist = state_dew.H() / mw_d_kg
                                                 except Exception:
                                                     pass  # keep _estimate_hvap fallback
-                                            # Q_cond = V_top * (h_vap - h_dist), V_top = D * (R + 1)
-                                            Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
-                                            # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
-                                            Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
-                                            # Reboiler must add heat — enforce Q_reb >= 0
-                                            if Q_reb < 0:
-                                                logs.append(
-                                                    f"WARNING: {name} computed Q_reb={_w_to_kw(Q_reb):.1f} kW (negative) "
-                                                    f"— using hvap-based estimate"
-                                                )
-                                                Q_reb = B * _estimate_hvap(bottoms_comp)
-
-                                            # LK purity in distillate
-                                            lk_purity = distillate_comp.get(comp_names[lk_idx], 0.0)
-
-                                            eq_res["numberOfStages"] = n_stages
-                                            eq_res["refluxRatio"] = reflux_ratio
-                                            eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
-                                            eq_res["N_min"] = round(N_min, 1)
-                                            eq_res["R_min"] = round(R_min, 3)
-                                            eq_res["N_eff"] = round(N_eff, 1)
-                                            eq_res["lightKeyPurity"] = round(lk_purity * 100, 1)
-                                            eq_res["lightKey"] = comp_names[lk_idx]
-                                            eq_res["heavyKey"] = comp_names[hk_idx]
-                                            eq_res["condenserDuty"] = round(_w_to_kw(Q_cond), 1)
-                                            eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb), 1)
-                                            eq_res["distillateTemperature"] = round(_k_to_c(T_dist), 1)
-                                            eq_res["bottomsTemperature"] = round(_k_to_c(T_bott), 1)
-
                                             # M6: Partial condenser support
                                             condenser_type = str(params.get("condenserType", "total")).lower()
 
@@ -2796,6 +2768,75 @@ class DWSIMEngine:
                                                 eq_res["condenserType"] = "partial"
                                             else:
                                                 eq_res["condenserType"] = "total"
+                                                # Condenser subcooling (total condenser only) — apply before duty calc
+                                                subcooling = float(params.get("condenserSubcooling", 0))
+                                                if subcooling > 0:
+                                                    if subcooling > 30:
+                                                        logs.append(
+                                                            f"WARNING: {name} subcooling {subcooling:.1f}°C is unusually high "
+                                                            f"(typical: 5-15°C)"
+                                                        )
+                                                    T_dist -= subcooling  # subcooling in °C = ΔK
+                                                    eq_res["condenserSubcooling"] = subcooling
+                                                    # Re-flash distillate at subcooled temperature
+                                                    flash_sc = self._flash_tp(d_names, d_zs, T_dist, P_cond, property_package)
+                                                    if flash_sc and flash_sc.get("MW_mix", 0) > 0:
+                                                        h_dist = flash_sc["H"] / (flash_sc["MW_mix"] / 1000.0)
+                                                    logs.append(f"{name}: condenser subcooling {subcooling:.1f}°C applied")
+
+                                            # Q_cond = V_top * (h_vap - h_dist), V_top = D * (R + 1)
+                                            # h_dist now includes subcooling if applied
+                                            Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
+
+                                            # Condenser duty spec: user-provided non-zero overrides calculation
+                                            cond_duty_spec = float(params.get("condenserDuty", 0))
+                                            if cond_duty_spec > 0:
+                                                Q_cond = cond_duty_spec * 1000.0  # kW → W
+                                                logs.append(f"{name}: using specified condenser duty {cond_duty_spec:.1f} kW")
+
+                                            # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
+                                            # Uses potentially overridden Q_cond for consistency
+                                            Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
+                                            # Reboiler must add heat — enforce Q_reb >= 0
+                                            if Q_reb < 0:
+                                                logs.append(
+                                                    f"WARNING: {name} computed Q_reb={_w_to_kw(Q_reb):.1f} kW (negative) "
+                                                    f"— using hvap-based estimate"
+                                                )
+                                                Q_reb = B * _estimate_hvap(bottoms_comp)
+
+                                            # Reboiler duty spec: user-provided non-zero overrides energy balance
+                                            reb_duty_spec = float(params.get("reboilerDuty", 0))
+                                            if reb_duty_spec > 0:
+                                                Q_reb = reb_duty_spec * 1000.0  # kW → W
+                                                logs.append(f"{name}: using specified reboiler duty {reb_duty_spec:.1f} kW")
+                                            if cond_duty_spec > 0 and reb_duty_spec > 0:
+                                                logs.append(
+                                                    f"WARNING: {name} both condenser and reboiler duties specified — "
+                                                    f"column energy balance may not close"
+                                                )
+
+                                            # LK purity in distillate
+                                            lk_purity = distillate_comp.get(comp_names[lk_idx], 0.0)
+
+                                            eq_res["numberOfStages"] = n_stages
+                                            eq_res["refluxRatio"] = reflux_ratio
+                                            eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
+                                            eq_res["N_min"] = round(N_min, 1)
+                                            eq_res["R_min"] = round(R_min, 3)
+                                            eq_res["N_eff"] = round(N_eff, 1)
+                                            eq_res["lightKeyPurity"] = round(lk_purity * 100, 1)
+                                            eq_res["lkRecovery"] = round(lk_recovery * 100, 2)
+                                            eq_res["hkRecovery"] = round(hk_recovery * 100, 2)
+                                            eq_res["lightKey"] = comp_names[lk_idx]
+                                            eq_res["heavyKey"] = comp_names[hk_idx]
+                                            eq_res["condenserDuty"] = round(_w_to_kw(Q_cond), 1)
+                                            eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb), 1)
+                                            eq_res["distillateTemperature"] = round(_k_to_c(T_dist), 1)
+                                            eq_res["bottomsTemperature"] = round(_k_to_c(T_bott), 1)
+                                            eq_res["reboilerPressure"] = round(_pa_to_kpa(P_bott), 3)
+                                            eq_res["reboilerTemperature"] = round(_k_to_c(T_bott), 1)
+                                            eq_res["reboilerType"] = str(params.get("reboilerType", "kettle"))
 
                                             outlets["out-1"] = {
                                                 "temperature": T_dist,
@@ -2889,6 +2930,9 @@ class DWSIMEngine:
                                         }]
                                         logs.append(f"{name}: Side draw at stage {sd_stage} ({sd_type}, {sd_frac:.0%})")
 
+                                    P_reb_kpa_rig = float(params.get("reboilerPressure", 0))
+                                    P_bott_rig = _kpa_to_pa(P_reb_kpa_rig) if P_reb_kpa_rig > 0 else None
+
                                     rig_result = solve_rigorous_distillation(
                                         feed_comp_names=comp_names,
                                         feed_zs=zs,
@@ -2900,6 +2944,7 @@ class DWSIMEngine:
                                         distillate_rate=dist_molar_rate,
                                         feed_flow=feed_molar_flow,
                                         pressure_top=P_cond,
+                                        pressure_bottom=P_bott_rig,
                                         property_package=property_package,
                                         condenser_type=condenser_t,
                                         additional_feeds=add_feeds_rig,
@@ -2914,7 +2959,8 @@ class DWSIMEngine:
                                         T_bott_r = rig_result.get("reboiler_temperature", T_feed + 20)
                                         Q_cond_r = rig_result.get("condenser_duty", 0.0)
                                         Q_reb_r = rig_result.get("reboiler_duty", 0.0)
-                                        P_bott_r = P_cond + n_stages * 1000.0
+                                        P_reb_kpa_r = float(params.get("reboilerPressure", 0))
+                                        P_bott_r = _kpa_to_pa(P_reb_kpa_r) if P_reb_kpa_r > 0 else P_cond + n_stages * 700.0
 
                                         # Flash outlets for enthalpies
                                         d_zs_r = [float(v) for v in rig_dist_comp.values()]
@@ -2968,6 +3014,9 @@ class DWSIMEngine:
                                         eq_res["reboilerDuty"] = round(_w_to_kw(abs(Q_reb_r)), 1)
                                         eq_res["distillateTemperature"] = round(_k_to_c(T_dist_r), 1)
                                         eq_res["bottomsTemperature"] = round(_k_to_c(T_bott_r), 1)
+                                        eq_res["reboilerPressure"] = round(_pa_to_kpa(P_bott_r), 3)
+                                        eq_res["reboilerTemperature"] = round(_k_to_c(T_bott_r), 1)
+                                        eq_res["reboilerType"] = str(params.get("reboilerType", "kettle"))
                                         eq_res["converged"] = rig_result.get("converged", False)
                                         eq_res["iterations"] = rig_result.get("iterations", 0)
                                         eq_res["stage_profiles"] = rig_result.get("stage_profiles", [])
@@ -3056,6 +3105,10 @@ class DWSIMEngine:
                                 T_dist = T_feed - 20
                                 T_bott = T_feed + 20
 
+                                # Reboiler pressure for fallback path
+                                P_reb_kpa_fb = float(params.get("reboilerPressure", 0))
+                                P_bott_fb = _kpa_to_pa(P_reb_kpa_fb) if P_reb_kpa_fb > 0 else P_cond + n_stages * 700.0
+
                                 # Flash outlets for real enthalpies (was enthalpy=0.0, cascading downstream)
                                 h_dist_fb = 0.0
                                 h_bott_fb = 0.0
@@ -3066,13 +3119,15 @@ class DWSIMEngine:
                                 flash_d_fb = self._flash_tp(d_names_fb, d_zs_fb, T_dist, P_cond, property_package)
                                 if flash_d_fb and flash_d_fb.get("MW_mix", 0) > 0:
                                     h_dist_fb = flash_d_fb["H"] / (flash_d_fb["MW_mix"] / 1000.0)
-                                flash_b_fb = self._flash_tp(b_names_fb, b_zs_fb, T_bott, P_cond + 10000, property_package)
+                                flash_b_fb = self._flash_tp(b_names_fb, b_zs_fb, T_bott, P_bott_fb, property_package)
                                 if flash_b_fb and flash_b_fb.get("MW_mix", 0) > 0:
                                     h_bott_fb = flash_b_fb["H"] / (flash_b_fb["MW_mix"] / 1000.0)
 
                                 eq_res["numberOfStages"] = n_stages
                                 eq_res["refluxRatio"] = reflux_ratio
                                 eq_res["condenserPressure"] = round(_pa_to_kpa(P_cond), 3)
+                                eq_res["reboilerPressure"] = round(_pa_to_kpa(P_bott_fb), 3)
+                                eq_res["reboilerType"] = str(params.get("reboilerType", "kettle"))
 
                                 outlets["out-1"] = {
                                     "temperature": T_dist,
@@ -3084,7 +3139,7 @@ class DWSIMEngine:
                                 }
                                 outlets["out-2"] = {
                                     "temperature": T_bott,
-                                    "pressure": P_cond + 10000,
+                                    "pressure": P_bott_fb,
                                     "mass_flow": mf * 0.5,
                                     "vapor_fraction": 0.0,
                                     "enthalpy": h_bott_fb,
