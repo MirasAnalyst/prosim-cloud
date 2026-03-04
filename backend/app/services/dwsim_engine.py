@@ -2453,7 +2453,12 @@ class DWSIMEngine:
                                 logs.append(f"WARNING: {name}: flash failed, estimated VF = {vf_est:.1%}")
 
                         elif ntype == "DistillationColumn":
-                            inlet = inlets[0]
+                            # Collect all material inlets (skip energy handles)
+                            material_inlets = [
+                                inp for inp in inlets
+                                if inp.get("mass_flow", 0) > 0
+                            ]
+                            inlet = material_inlets[0] if material_inlets else inlets[0]
                             mf = inlet["mass_flow"]
                             T_feed = inlet["temperature"]
                             P_feed = inlet["pressure"]
@@ -2466,6 +2471,43 @@ class DWSIMEngine:
                             comp_names = list(comp.keys())
                             zs = [float(v) for v in comp.values()]
                             fug_ok = False
+
+                            # Multi-feed: merge additional feeds into equivalent single feed for FUG
+                            # Use molar basis for composition merge (not mass-weighted mole fractions)
+                            if len(material_inlets) > 1:
+                                # Convert primary feed to molar flow
+                                primary_mw_fug = sum(zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
+                                primary_molar = mf / (primary_mw_fug / 1000.0) if primary_mw_fug > 0 else mf / 0.1
+                                total_molar_all = primary_molar
+                                molar_weighted_zs = [z * primary_molar for z in zs]
+                                # Compute enthalpy-weighted T via HP flash later; for now track enthalpy rate
+                                total_mf_all = mf
+                                h_rate_total = mf * inlet.get("enthalpy", 0.0)
+                                for extra_in in material_inlets[1:]:
+                                    extra_mf = extra_in.get("mass_flow", 0)
+                                    extra_comp = extra_in.get("composition", {})
+                                    extra_zs_fug = [float(extra_comp.get(cn, 0.0)) for cn in comp_names]
+                                    ezs_sum = sum(extra_zs_fug) or 1.0
+                                    extra_zs_fug = [z / ezs_sum for z in extra_zs_fug]
+                                    extra_mw_fug = sum(extra_zs_fug[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
+                                    extra_molar_fug = extra_mf / (extra_mw_fug / 1000.0) if extra_mw_fug > 0 else extra_mf / 0.1
+                                    total_molar_all += extra_molar_fug
+                                    total_mf_all += extra_mf
+                                    for ci in range(len(comp_names)):
+                                        molar_weighted_zs[ci] += extra_zs_fug[ci] * extra_molar_fug
+                                    h_rate_total += extra_mf * extra_in.get("enthalpy", inlet.get("enthalpy", 0.0))
+                                if total_molar_all > 0:
+                                    mf = total_mf_all
+                                    zs_sum = sum(molar_weighted_zs) or 1.0
+                                    zs = [z / zs_sum for z in molar_weighted_zs]
+                                    # Use column operating pressure for merged feed
+                                    P_feed = P_cond
+                                    # Estimate T_feed: use enthalpy-weighted average as initial guess
+                                    # (HP flash would be better but TP flash at average is reasonable for FUG)
+                                    T_feed_sum = mf * T_feed
+                                    for extra_in in material_inlets[1:]:
+                                        T_feed_sum += extra_in.get("mass_flow", 0) * extra_in.get("temperature", T_feed)
+                                    T_feed = T_feed_sum / total_mf_all if total_mf_all > 0 else T_feed
 
                             # Fenske-Underwood-Gilliland shortcut method (T2-01)
                             if len(comp_names) >= 2 and _thermo_available:
@@ -2784,12 +2826,68 @@ class DWSIMEngine:
                             dist_method = str(params.get("method", "FUG")).upper()
                             if dist_method == "RIGOROUS" and len(comp_names) >= 2 and _thermo_available:
                                 try:
-                                    # Compute feed molar flow from mass flow
-                                    feed_mw = sum(zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
-                                    feed_molar_flow = mf / (feed_mw / 1000.0) if feed_mw > 0 else 10.0
+                                    # Compute primary feed molar flow from primary feed mass flow
+                                    # Use primary inlet (not merged mf) to avoid double-counting with additional_feeds
+                                    primary_mf = material_inlets[0].get("mass_flow", mf)
+                                    primary_comp = material_inlets[0].get("composition", comp)
+                                    primary_zs = [float(primary_comp.get(cn, 0.0)) for cn in comp_names]
+                                    pzs_sum = sum(primary_zs) or 1.0
+                                    primary_zs = [z / pzs_sum for z in primary_zs]
+                                    feed_mw = sum(primary_zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
+                                    feed_molar_flow = primary_mf / (feed_mw / 1000.0) if feed_mw > 0 else 10.0
                                     df_ratio = float(params.get("distillateToFeedRatio", 0.5))
-                                    dist_molar_rate = feed_molar_flow * df_ratio
+                                    # Total mf includes all feeds for D/F ratio
+                                    total_mf = sum(inp.get("mass_flow", 0) for inp in material_inlets)
+                                    total_feed_mw = feed_mw  # use primary feed MW for conversion
+                                    total_molar = total_mf / (total_feed_mw / 1000.0) if total_feed_mw > 0 else 10.0
+                                    dist_molar_rate = total_molar * df_ratio
                                     condenser_t = str(params.get("condenserType", "total")).lower()
+
+                                    # Build additional feeds for multi-feed columns
+                                    add_feeds_rig: list[dict] | None = None
+                                    if len(material_inlets) > 1:
+                                        add_feeds_rig = []
+                                        for fi, extra_in in enumerate(material_inlets[1:], start=2):
+                                            extra_comp = extra_in.get("composition", {})
+                                            # Merge composition bases: use primary comp_names
+                                            extra_zs_l = []
+                                            for cn in comp_names:
+                                                extra_zs_l.append(float(extra_comp.get(cn, 0.0)))
+                                            zs_sum = sum(extra_zs_l) or 1.0
+                                            extra_zs_norm = [z / zs_sum for z in extra_zs_l]
+                                            extra_mf = extra_in["mass_flow"]
+                                            # Use extra feed's own MW for molar flow conversion (not primary feed MW)
+                                            extra_mw_rig = sum(extra_zs_norm[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
+                                            extra_molar = extra_mf / (extra_mw_rig / 1000.0) if extra_mw_rig > 0 else 1.0
+                                            extra_stage = int(params.get(f"feed{fi}Stage", n_stages // 3))
+                                            # Flash for enthalpy
+                                            extra_H = None
+                                            try:
+                                                fl_extra = self._flash_tp(comp_names, extra_zs_norm, extra_in["temperature"], extra_in["pressure"], property_package)
+                                                if fl_extra:
+                                                    extra_H = fl_extra["H"]
+                                            except Exception:
+                                                pass
+                                            add_feeds_rig.append({
+                                                "stage": extra_stage,
+                                                "flow": extra_molar,
+                                                "zs": extra_zs_norm,
+                                                "enthalpy": extra_H,
+                                            })
+                                        logs.append(f"{name}: Multi-feed column with {len(material_inlets)} feeds")
+
+                                    # Build side draws
+                                    side_draws_rig: list[dict] | None = None
+                                    sd_stage = int(params.get("sideDrawStage", 0))
+                                    if sd_stage > 0:
+                                        sd_type = str(params.get("sideDrawType", "liquid")).lower()
+                                        sd_frac = float(params.get("sideDrawFlowFraction", 0.1))
+                                        side_draws_rig = [{
+                                            "stage": sd_stage,
+                                            "type": sd_type,
+                                            "flow_fraction": sd_frac,
+                                        }]
+                                        logs.append(f"{name}: Side draw at stage {sd_stage} ({sd_type}, {sd_frac:.0%})")
 
                                     rig_result = solve_rigorous_distillation(
                                         feed_comp_names=comp_names,
@@ -2804,6 +2902,8 @@ class DWSIMEngine:
                                         pressure_top=P_cond,
                                         property_package=property_package,
                                         condenser_type=condenser_t,
+                                        additional_feeds=add_feeds_rig,
+                                        side_draws=side_draws_rig,
                                     )
 
                                     if rig_result.get("converged") or (rig_result.get("iterations", 0) > 0 and not rig_result.get("error")):
@@ -2875,6 +2975,37 @@ class DWSIMEngine:
 
                                         lk_r = comp_names[lk_idx] if lk_idx < len(comp_names) else comp_names[0]
                                         eq_res["lightKeyPurity"] = round(rig_dist_comp.get(lk_r, 0) * 100, 1)
+
+                                        # Create side draw outlet streams
+                                        rig_side_draws = rig_result.get("side_draws", [])
+                                        for sd_idx, sd_res in enumerate(rig_side_draws):
+                                            sd_comp = sd_res.get("composition", {})
+                                            sd_molar = sd_res.get("molar_flow", 0.0)
+                                            sd_T_k = sd_res.get("temperature", T_feed)
+                                            sd_vf = sd_res.get("vapor_fraction", 0.0)
+                                            sd_H = sd_res.get("enthalpy", 0.0)
+                                            # Convert molar flow to mass flow
+                                            sd_zs_l = [float(sd_comp.get(cn, 0.0)) for cn in comp_names]
+                                            sd_mw = sum(sd_zs_l[i] * MWs_r[i] for i in range(len(comp_names)))
+                                            sd_mass = sd_molar * (sd_mw / 1000.0)
+                                            # Use P at the draw stage
+                                            sd_stage_idx = sd_res.get("stage", n_stages // 2)
+                                            sd_P = P_cond + sd_stage_idx * 1000.0
+                                            port_id = f"out-{3 + sd_idx}"
+                                            outlets[port_id] = {
+                                                "temperature": sd_T_k,
+                                                "pressure": sd_P,
+                                                "mass_flow": sd_mass,
+                                                "vapor_fraction": sd_vf,
+                                                "enthalpy": sd_H,
+                                                "composition": sd_comp,
+                                            }
+                                            eq_res[f"sideDrawStage_{sd_idx}"] = sd_res.get("stage")
+                                            eq_res[f"sideDrawFlow_{sd_idx}"] = round(sd_mass, 4)
+                                            eq_res[f"sideDrawType_{sd_idx}"] = sd_res.get("type")
+
+                                        if len(material_inlets) > 1:
+                                            eq_res["feedCount"] = len(material_inlets)
 
                                         fug_ok = True
                                         logs.append(
@@ -4834,11 +4965,264 @@ class DWSIMEngine:
                                 rho_L = max(self._get_density(cn, zs_l, liq_port["temperature"], liq_port["pressure"], property_package), 1.0)
                         V_max = K_sb * math.sqrt(max((rho_L - rho_V) / max(rho_V, 0.01), 0))
                         if V_max > 0:
-                            A_min = mf / (rho_V * V_max) if rho_V > 0 else 1.0
+                            # Use gas mass flow (not total) for Souders-Brown area
+                            mf_gas = mf  # fallback to total
+                            if vap_port:
+                                mf_gas = vap_port.get("mass_flow", mf * 0.5)
+                            A_min = mf_gas / (rho_V * V_max) if rho_V > 0 else 1.0
                             D_min = math.sqrt(4 * A_min / math.pi)
                             sizing["diameter_m"] = round(D_min, 3)
                             sizing["K_sb"] = K_sb
                             sizing["V_max_m_s"] = round(V_max, 3)
+
+                    # Stokes' law settling velocity for droplet separation (API 12J)
+                    # v_t = d_p² · g · (ρ_L - ρ_V) / (18 · μ_gas)
+                    sz_params = node.get("parameters", {})
+                    d_p = float(sz_params.get("dropletDiameter", 150)) * 1e-6  # μm → m
+                    mu_gas = 1.8e-5  # Pa·s fallback (air viscosity)
+                    # Try flash for gas viscosity
+                    mu_gas_from_flash = False
+                    try:
+                        vap_port_s = port_conditions.get((nid, "out-1"))
+                        if vap_port_s:
+                            cn_vs = list(vap_port_s.get("composition", {}).keys())
+                            zs_vs = list(vap_port_s.get("composition", {}).values())
+                            if cn_vs:
+                                fl_vs = self._flash_tp(cn_vs, zs_vs, vap_port_s["temperature"], vap_port_s["pressure"], property_package)
+                                if fl_vs and fl_vs.get("state"):
+                                    gas_ph = getattr(fl_vs["state"], 'gas', None)
+                                    if gas_ph and hasattr(gas_ph, 'mu'):
+                                        try:
+                                            mu_gas = max(gas_ph.mu(), 1e-7)
+                                            mu_gas_from_flash = True
+                                        except Exception:
+                                            logger.warning("Separator settling: gas viscosity extraction failed; using air fallback 1.8e-5 Pa·s")
+                                    else:
+                                        logger.warning("Separator settling: no gas phase in flash result; using air fallback 1.8e-5 Pa·s")
+                            else:
+                                logger.warning("Separator settling: vapor port has no composition; using air viscosity fallback 1.8e-5 Pa·s")
+                        else:
+                            logger.warning("Separator settling: no vapor port conditions; using air viscosity fallback 1.8e-5 Pa·s")
+                    except Exception:
+                        logger.warning("Separator settling: gas viscosity flash failed; using air fallback 1.8e-5 Pa·s")
+                    if rho_L > rho_V and mu_gas > 0:
+                        g = 9.81
+                        v_settling = d_p ** 2 * g * (rho_L - rho_V) / (18.0 * mu_gas)
+                        # Check Stokes regime; apply Oseen correction for Re_p > 1
+                        Re_p = rho_V * v_settling * d_p / max(mu_gas, 1e-10)
+                        if Re_p > 1.0:
+                            # Oseen first-order correction: v_corrected = v_stokes / (1 + 3/16 * Re_p)
+                            v_settling = v_settling / (1.0 + 3.0 / 16.0 * Re_p)
+                            Re_p = rho_V * v_settling * d_p / max(mu_gas, 1e-10)  # recompute
+                            logger.info("Separator settling: Oseen correction applied (Re_p=%.1f)", Re_p)
+                        # Vertical separator: L/D = 3-5 (API 12J); settling time = D/v_t
+                        D_ref = sizing.get("diameter_m", 1.0)
+                        t_settling = D_ref / max(v_settling, 1e-10)
+                        L_D = 4.0  # typical vertical separator L/D
+                        vessel_length = L_D * D_ref
+                        vessel_length = max(vessel_length, 1.5)  # minimum 1.5m
+                        sizing["v_settling_m_s"] = round(v_settling, 6)
+                        sizing["t_settling_s"] = round(t_settling, 1)
+                        sizing["vessel_length_m"] = round(vessel_length, 2)
+                        sizing["L_D_ratio"] = round(L_D, 2)
+                        sizing["droplet_diameter_um"] = round(d_p * 1e6, 0)
+                        sizing["mu_gas_Pa_s"] = round(mu_gas, 7)
+                        sizing["Re_particle"] = round(Re_p, 2)
+
+                elif ntype == "ThreePhaseSeparator":
+                    # Gas-liquid: Souders-Brown (same as Separator)
+                    sz_params = node.get("parameters", {})
+                    mf_3p = 0.0
+                    for _src, _sh, _th in upstream.get(nid, []):
+                        for _tgt, sh2, _th2 in downstream.get(_src, []):
+                            if _tgt == nid:
+                                c = port_conditions.get((_src, sh2))
+                                if c:
+                                    mf_3p = c.get("mass_flow", 0.0)
+                                break
+                    if mf_3p > 0:
+                        rho_V_3p = 5.0
+                        rho_L_light = 750.0
+                        rho_L_heavy = 1000.0
+                        mu_gas_3p = 1.8e-5
+                        mu_heavy = 0.001  # Pa·s fallback
+                        sigma_ll = 0.025  # N/m fallback
+                        vap_port_3p = port_conditions.get((nid, "out-1"))
+                        light_port = port_conditions.get((nid, "out-2"))
+                        heavy_port = port_conditions.get((nid, "out-3"))
+                        if vap_port_3p:
+                            cn_v3 = list(vap_port_3p.get("composition", {}).keys())
+                            zs_v3 = list(vap_port_3p.get("composition", {}).values())
+                            if cn_v3:
+                                rho_V_3p = max(self._get_density(cn_v3, zs_v3, vap_port_3p["temperature"], vap_port_3p["pressure"], property_package), 0.1)
+                                try:
+                                    fl_v3 = self._flash_tp(cn_v3, zs_v3, vap_port_3p["temperature"], vap_port_3p["pressure"], property_package)
+                                    if fl_v3 and fl_v3.get("state"):
+                                        gp = getattr(fl_v3["state"], 'gas', None)
+                                        if gp and hasattr(gp, 'mu'):
+                                            mu_gas_3p = max(gp.mu(), 1e-7)
+                                        else:
+                                            logger.warning("3-Phase Sep sizing: no gas phase for viscosity; using air fallback")
+                                except Exception:
+                                    logger.warning("3-Phase Sep sizing: gas viscosity flash failed; using air fallback 1.8e-5 Pa·s")
+                        if light_port:
+                            cn_ll = list(light_port.get("composition", {}).keys())
+                            zs_ll = list(light_port.get("composition", {}).values())
+                            if cn_ll:
+                                rho_L_light = max(self._get_density(cn_ll, zs_ll, light_port["temperature"], light_port["pressure"], property_package), 1.0)
+                        if heavy_port:
+                            cn_hl = list(heavy_port.get("composition", {}).keys())
+                            zs_hl = list(heavy_port.get("composition", {}).values())
+                            if cn_hl:
+                                rho_L_heavy = max(self._get_density(cn_hl, zs_hl, heavy_port["temperature"], heavy_port["pressure"], property_package), 1.0)
+                                try:
+                                    fl_hl = self._flash_tp(cn_hl, zs_hl, heavy_port["temperature"], heavy_port["pressure"], property_package)
+                                    if fl_hl and fl_hl.get("state"):
+                                        liq_ph = getattr(fl_hl["state"], 'liquid0', None)
+                                        if liq_ph:
+                                            if hasattr(liq_ph, 'mu'):
+                                                try:
+                                                    mu_heavy = max(liq_ph.mu(), 1e-6)
+                                                except Exception:
+                                                    pass
+                                            if hasattr(liq_ph, 'sigma'):
+                                                try:
+                                                    sigma_ll = max(liq_ph.sigma(), 1e-4)
+                                                except Exception:
+                                                    pass
+                                except Exception:
+                                    pass
+                        # Gas-liquid Souders-Brown
+                        K_sb_3p = 0.07
+                        V_max_3p = K_sb_3p * math.sqrt(max((rho_L_light - rho_V_3p) / max(rho_V_3p, 0.01), 0))
+                        if V_max_3p > 0:
+                            # Use gas mass flow (not total) for Souders-Brown area
+                            mf_gas_3p = mf_3p  # fallback
+                            if vap_port_3p:
+                                mf_gas_3p = vap_port_3p.get("mass_flow", mf_3p * 0.3)
+                            A_3p = mf_gas_3p / (rho_V_3p * V_max_3p) if rho_V_3p > 0 else 1.0
+                            D_3p = math.sqrt(4 * A_3p / math.pi)
+                            sizing["diameter_m"] = round(D_3p, 3)
+                            sizing["V_max_m_s"] = round(V_max_3p, 3)
+                        # Liquid-liquid Stokes settling (light droplets rising through heavy phase)
+                        d_p_ll = float(sz_params.get("liquidDropletDiameter", 500)) * 1e-6  # μm → m
+                        delta_rho_ll = abs(rho_L_heavy - rho_L_light)
+                        if delta_rho_ll > 1.0 and mu_heavy > 0:
+                            g = 9.81
+                            v_settle_ll = d_p_ll ** 2 * g * delta_rho_ll / (18.0 * mu_heavy)
+                            # Oseen correction for Re_p > 1 (same pattern as gas-liquid Separator)
+                            Re_p_ll = rho_L_heavy * v_settle_ll * d_p_ll / max(mu_heavy, 1e-10)
+                            if Re_p_ll > 1.0:
+                                v_settle_ll = v_settle_ll / (1.0 + 3.0 / 16.0 * Re_p_ll)
+                                Re_p_ll = rho_L_heavy * v_settle_ll * d_p_ll / max(mu_heavy, 1e-10)
+                                logger.info("3-Phase Sep LL settling: Oseen correction applied (Re_p=%.1f)", Re_p_ll)
+                            sizing["v_settle_liquid_liquid_m_s"] = round(v_settle_ll, 6)
+                            sizing["rho_light_liquid"] = round(rho_L_light, 1)
+                            sizing["rho_heavy_liquid"] = round(rho_L_heavy, 1)
+                            sizing["mu_heavy_Pa_s"] = round(mu_heavy, 6)
+                            # Retention time heuristic (API 12J):
+                            # Light oil (Δρ > 300): 180s, medium (Δρ 100-300): 300s, heavy/emulsion: 600s
+                            if delta_rho_ll > 300:
+                                t_retention = 180.0  # 3 min — light oil
+                            elif delta_rho_ll > 100:
+                                t_retention = 300.0  # 5 min — medium oil
+                            else:
+                                t_retention = 600.0  # 10 min — heavy/emulsion
+                            sizing["retention_time_s"] = round(t_retention, 0)
+                            # Vessel sizing: retention time drives liquid compartment volume
+                            D_3p_ref = sizing.get("diameter_m", 1.5)
+                            A_cross = math.pi * D_3p_ref ** 2 / 4.0
+                            # Liquid occupies ~60% of cross-section in horizontal 3-phase sep
+                            A_liquid = 0.6 * A_cross
+                            # Estimate total liquid volumetric flow from outlet mass flows
+                            mf_light = 0.0
+                            mf_heavy = 0.0
+                            if light_port:
+                                mf_light = light_port.get("mass_flow", 0.0)
+                            if heavy_port:
+                                mf_heavy = heavy_port.get("mass_flow", 0.0)
+                            Q_liquid = 0.0
+                            if mf_light > 0 and rho_L_light > 1:
+                                Q_liquid += mf_light / rho_L_light
+                            if mf_heavy > 0 and rho_L_heavy > 1:
+                                Q_liquid += mf_heavy / rho_L_heavy
+                            if Q_liquid <= 0:
+                                # Fallback: assume 50% of inlet goes to liquid
+                                Q_liquid = 0.5 * mf_3p / max(rho_L_light, 500.0)
+                            # V_liquid = Q_liquid * t_retention → L_liquid = V / A_liquid
+                            V_liquid = Q_liquid * t_retention
+                            L_retention = V_liquid / max(A_liquid, 0.01)
+                            # Also compute L/D = 4 minimum
+                            L_LD = 4.0 * D_3p_ref
+                            vessel_len_3p = max(L_retention, L_LD, 2.5)  # take the larger
+                            L_D_3p = vessel_len_3p / max(D_3p_ref, 0.1)
+                            sizing["vessel_length_m"] = round(vessel_len_3p, 2)
+                            sizing["L_D_ratio"] = round(L_D_3p, 2)
+                            sizing["V_liquid_m3"] = round(V_liquid, 3)
+                            sizing["liquid_droplet_diameter_um"] = round(d_p_ll * 1e6, 0)
+
+                elif ntype == "Cyclone":
+                    # Lapple d50 cut point: d50 = sqrt(9·μ·W / (π·N·V_in·(ρ_p - ρ_g)))
+                    # W = inlet width (~ inletDiameter), N = effective turns, V_in = inlet velocity
+                    sz_params = node.get("parameters", {})
+                    mf_cyc = 0.0
+                    rho_g_cyc = 1.2
+                    mu_g_cyc = 1.8e-5
+                    for _src, _sh, _th in upstream.get(nid, []):
+                        for _tgt, sh2, _th2 in downstream.get(_src, []):
+                            if _tgt == nid:
+                                c = port_conditions.get((_src, sh2))
+                                if c:
+                                    mf_cyc = c.get("mass_flow", 0.0)
+                                break
+                    if mf_cyc > 0:
+                        # Standard Lapple cyclone: rectangular tangential inlet
+                        # a = D_c/2 (height), b = D_c/4 (width), A_inlet = a*b = D_c²/8
+                        D_cyclone = float(sz_params.get("cycloneDiameter", sz_params.get("inletDiameter", 0.3) * 4))
+                        inlet_width = D_cyclone / 4.0  # Lapple b = D_c/4
+                        inlet_height = D_cyclone / 2.0  # Lapple a = D_c/2
+                        N_turns = float(sz_params.get("effectiveTurns", 5))
+                        rho_particle = float(sz_params.get("particleDensity", 2500))
+                        # Flash inlet for gas properties
+                        try:
+                            in_port_cyc = None
+                            for _src, _sh, _th in upstream.get(nid, []):
+                                for _tgt, sh2, _th2 in downstream.get(_src, []):
+                                    if _tgt == nid:
+                                        in_port_cyc = port_conditions.get((_src, sh2))
+                                        break
+                            if in_port_cyc:
+                                cn_cyc = list(in_port_cyc.get("composition", {}).keys())
+                                zs_cyc = list(in_port_cyc.get("composition", {}).values())
+                                if cn_cyc:
+                                    rho_g_cyc = max(self._get_density(cn_cyc, zs_cyc, in_port_cyc["temperature"], in_port_cyc["pressure"], property_package), 0.1)
+                                    fl_cyc = self._flash_tp(cn_cyc, zs_cyc, in_port_cyc["temperature"], in_port_cyc["pressure"], property_package)
+                                    if fl_cyc and fl_cyc.get("state"):
+                                        gp_cyc = getattr(fl_cyc["state"], 'gas', None)
+                                        if gp_cyc and hasattr(gp_cyc, 'mu'):
+                                            try:
+                                                mu_g_cyc = max(gp_cyc.mu(), 1e-7)
+                                            except Exception:
+                                                pass
+                        except Exception:
+                            pass
+                        A_inlet = inlet_width * inlet_height  # rectangular inlet
+                        V_in = mf_cyc / (rho_g_cyc * A_inlet) if rho_g_cyc > 0 and A_inlet > 0 else 15.0
+                        # Lapple model: d50 = sqrt(9·μ·W / (π·N·V_in·(ρ_p - ρ_g)))
+                        # W = inlet width (perpendicular to cyclone axis)
+                        delta_rho_cyc = max(rho_particle - rho_g_cyc, 1.0)
+                        d50_sq = 9.0 * mu_g_cyc * inlet_width / (math.pi * max(N_turns, 1) * max(V_in, 0.1) * delta_rho_cyc)
+                        d50 = math.sqrt(max(d50_sq, 0)) * 1e6  # m → μm
+                        # Terminal velocity at d50 as sanity check
+                        d50_m = d50 * 1e-6
+                        v_t_d50 = d50_m ** 2 * 9.81 * delta_rho_cyc / (18.0 * mu_g_cyc)
+                        sizing["d50_cut_point_um"] = round(d50, 2)
+                        sizing["inlet_velocity_m_s"] = round(V_in, 2)
+                        sizing["N_turns"] = N_turns
+                        sizing["rho_particle"] = rho_particle
+                        sizing["rho_gas"] = round(rho_g_cyc, 3)
+                        sizing["mu_gas_Pa_s"] = round(mu_g_cyc, 7)
+                        sizing["v_terminal_d50_m_s"] = round(v_t_d50, 6)
 
                 elif ntype == "HeatExchanger":
                     duty_kw = eq_r.get("duty", 0)

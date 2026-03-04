@@ -66,9 +66,8 @@ class StageData:
         K: equilibrium K-values at stage conditions [nc]
         H_L: liquid molar enthalpy [J/mol]
         H_V: vapor molar enthalpy [J/mol]
-        feed_flow: feed molar flow to this stage [mol/s] (0 if not a feed stage)
-        feed_zs: feed composition (mole fractions) if this is a feed stage
-        is_feed_stage: whether this stage receives a feed
+        feeds: list of feed dicts to this stage, each {flow, zs, enthalpy}
+        side_draw: side product withdrawal, {type: "liquid"|"vapor", flow_fraction}
     """
     T: float = 300.0
     P: float = 101325.0
@@ -79,9 +78,36 @@ class StageData:
     K: list[float] = field(default_factory=list)
     H_L: float = 0.0
     H_V: float = 0.0
-    feed_flow: float = 0.0
-    feed_zs: list[float] = field(default_factory=list)
-    is_feed_stage: bool = False
+    feeds: list[dict] = field(default_factory=list)
+    side_draw: dict | None = None
+
+    # Backward-compatible accessors for single-feed code paths
+    @property
+    def feed_flow(self) -> float:
+        return sum(f.get("flow", 0.0) for f in self.feeds)
+
+    @property
+    def feed_zs(self) -> list[float]:
+        if not self.feeds:
+            return []
+        if len(self.feeds) == 1:
+            return self.feeds[0].get("zs", [])
+        # Weighted average for multiple feeds
+        total = sum(f.get("flow", 0.0) for f in self.feeds)
+        if total <= 0:
+            return self.feeds[0].get("zs", [])
+        nc = len(self.feeds[0].get("zs", []))
+        merged = [0.0] * nc
+        for f in self.feeds:
+            fzs = f.get("zs", [])
+            ff = f.get("flow", 0.0)
+            for i in range(min(nc, len(fzs))):
+                merged[i] += fzs[i] * ff
+        return [z / total for z in merged]
+
+    @property
+    def is_feed_stage(self) -> bool:
+        return len(self.feeds) > 0 and self.feed_flow > 0
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +411,8 @@ def _initialize_stages(
     pressure_bottom: float,
     flasher: Any,
     condenser_type: str,
+    additional_feeds: list[dict] | None = None,
+    side_draws: list[dict] | None = None,
 ) -> list[StageData]:
     """Initialize stage profiles using FUG-like estimates.
 
@@ -394,11 +422,30 @@ def _initialize_stages(
     - K-values from Wilson correlation at estimated stage conditions.
 
     Stage 0 = condenser, stage n_stages-1 = reboiler.
+
+    additional_feeds: list of {stage, flow, zs, enthalpy} for extra feed points.
+    side_draws: list of {stage, type: "liquid"|"vapor", flow_fraction} for side products.
     """
     stages: list[StageData] = []
 
     # Clamp feed_stage to valid range (1 to n_stages-2, between condenser and reboiler)
     feed_stage = max(1, min(feed_stage, n_stages - 2))
+
+    # Build complete feeds list
+    all_feeds: list[dict] = [
+        {"stage": feed_stage, "flow": feed_flow, "zs": list(_normalize(feed_zs)), "enthalpy": None}
+    ]
+    if additional_feeds:
+        for af in additional_feeds:
+            af_stage = max(1, min(int(af.get("stage", feed_stage)), n_stages - 2))
+            all_feeds.append({
+                "stage": af_stage,
+                "flow": float(af.get("flow", 0)),
+                "zs": list(_normalize(af.get("zs", feed_zs))),
+                "enthalpy": af.get("enthalpy"),
+            })
+
+    total_feed_flow = sum(f["flow"] for f in all_feeds)
 
     # Linear pressure profile
     P_profile = [
@@ -430,23 +477,32 @@ def _initialize_stages(
         for j in range(n_stages)
     ]
 
+    # Determine the first (primary) feed stage for section boundary
+    primary_feed_stage = feed_stage
+
     # CMO initial flows
-    # Bottoms rate from overall mass balance: B = F - D
-    B = max(feed_flow - distillate_rate, 1e-10)
+    B = max(total_feed_flow - distillate_rate, 1e-10)
     D = distillate_rate
 
     # Rectifying section (above feed): V = L + D, L = R*D
     L_rect = reflux_ratio * D
-    V_rect = L_rect + D  # vapor rising in rectifying section
+    V_rect = L_rect + D
 
     # Stripping section (below feed): L' = L + q*F, V' = V - (1-q)*F
-    # Assume saturated liquid feed (q = 1): L' = L + F, V' = V
     q = 1.0  # assume saturated liquid feed for initialization
-    L_strip = L_rect + q * feed_flow
-    V_strip = V_rect - (1.0 - q) * feed_flow
+    L_strip = L_rect + q * total_feed_flow
+    V_strip = V_rect - (1.0 - q) * total_feed_flow
     V_strip = max(V_strip, 1e-10)
 
     zs_init = _normalize(feed_zs)
+
+    # Build side draw lookup
+    sd_lookup: dict[int, dict] = {}
+    if side_draws:
+        for sd_spec in side_draws:
+            sd_stage = max(1, min(int(sd_spec.get("stage", 0)), n_stages - 2))
+            if sd_stage > 0:
+                sd_lookup[sd_stage] = sd_spec
 
     for j in range(n_stages):
         sd = StageData()
@@ -457,27 +513,23 @@ def _initialize_stages(
         if j == 0:
             # Condenser
             if condenser_type == "total":
-                sd.V = 0.0  # no vapor leaves a total condenser
+                sd.V = 0.0
                 sd.L = L_rect
             else:
-                # Partial condenser: vapor distillate leaves
                 sd.V = D
                 sd.L = L_rect
-        elif j < feed_stage:
-            # Rectifying section
+        elif j < primary_feed_stage:
             sd.L = L_rect
             sd.V = V_rect
         elif j == n_stages - 1:
-            # Reboiler — L leaving as bottoms product = B = F - D
-            B_flow = max(feed_flow - D, 0.01)
+            B_flow = max(total_feed_flow - D, 0.01)
             sd.L = B_flow
             sd.V = V_strip
         else:
-            # Stripping section (including feed stage)
             sd.L = L_strip
             sd.V = V_strip
 
-        # Initial compositions: use feed composition everywhere
+        # Initial compositions
         sd.x = list(zs_init)
         sd.K = _get_k_values(flasher, sd.T, sd.P, sd.x, nc)
         sd.y = _normalize([sd.K[i] * sd.x[i] for i in range(nc)])
@@ -485,15 +537,19 @@ def _initialize_stages(
         # Initial enthalpies
         sd.H_L, sd.H_V = _get_stage_enthalpies(flasher, sd.T, sd.P, sd.x, sd.y, nc)
 
-        # Feed
-        if j == feed_stage:
-            sd.is_feed_stage = True
-            sd.feed_flow = feed_flow
-            sd.feed_zs = list(zs_init)
-        else:
-            sd.is_feed_stage = False
-            sd.feed_flow = 0.0
-            sd.feed_zs = [0.0] * nc
+        # Assign feeds to this stage
+        sd.feeds = []
+        for af in all_feeds:
+            if af["stage"] == j:
+                sd.feeds.append({
+                    "flow": af["flow"],
+                    "zs": af["zs"],
+                    "enthalpy": af.get("enthalpy"),
+                })
+
+        # Side draw
+        if j in sd_lookup:
+            sd.side_draw = sd_lookup[j]
 
         stages.append(sd)
 
@@ -583,7 +639,25 @@ def _solve_material_balance(
         for j in range(n):
             sj = stages[j]
             K_ji = max(sj.K[i], 1e-15)
-            f_ji = sj.feed_flow * sj.feed_zs[i] if sj.is_feed_stage and len(sj.feed_zs) > i else 0.0
+            # Sum feeds for this stage (multi-feed support)
+            f_ji = 0.0
+            for feed in sj.feeds:
+                fzs = feed.get("zs", [])
+                if i < len(fzs):
+                    f_ji += feed.get("flow", 0.0) * fzs[i]
+
+            # Side draw modifies effective flows
+            # Liquid side draw: reduces effective L_j by S_L = flow_fraction * L_j
+            # Vapor side draw: reduces effective V_j by S_V = flow_fraction * V_j
+            sd_L_frac = 0.0
+            sd_V_frac = 0.0
+            if sj.side_draw:
+                sd_type = sj.side_draw.get("type", "liquid")
+                sd_frac = float(sj.side_draw.get("flow_fraction", 0.1))
+                if sd_type == "liquid":
+                    sd_L_frac = sd_frac
+                else:
+                    sd_V_frac = sd_frac
 
             if j == 0:
                 # Condenser
@@ -607,10 +681,11 @@ def _solve_material_balance(
                 d_vec[j] = -f_ji
 
             else:
-                # Internal stage
+                # Internal stage (with side draw modification)
                 L_j = max(sj.L, 1e-10)
+                V_j_eff = sj.V * (1.0 + sd_V_frac)  # side vapor draw increases effective V leaving
                 a_vec[j] = 1.0
-                b_vec[j] = -(1.0 + sj.V * K_ji / L_j)
+                b_vec[j] = -(1.0 + sd_L_frac + V_j_eff * K_ji / L_j)
                 if j < n - 1:
                     sj1 = stages[j + 1]
                     K_j1i = max(sj1.K[i], 1e-15)
@@ -742,19 +817,14 @@ def _update_flows(
     nc: int,
     distillate_rate: float,
     condenser_type: str,
+    feed_enthalpies: dict[int, float] | None = None,
     feed_enthalpy: float | None = None,
 ) -> None:
     """Update liquid and vapor flows from energy balance corrections.
 
-    Per-stage energy balance (no side draws, Q_j=0 for internal stages):
-      V_{j+1}*H_V_{j+1} + L_{j-1}*H_L_{j-1} + F_j*H_F_j
-          = V_j*H_V_j + L_j*H_L_j
-
-    Substituting the mass balance V_j = L_{j-1} + V_{j+1} + F_j - L_j and
-    solving for L_j:
-
-      L_j = [V_{j+1}*(H_V_{j+1} - H_V_j) + L_{j-1}*(H_L_{j-1} - H_V_j)
-             + F_j*(H_F_j - H_V_j)] / (H_L_j - H_V_j)
+    Per-stage energy balance with side draws:
+      V_{j+1}*H_V_{j+1} + L_{j-1}*H_L_{j-1} + Σ(F_k*H_F_k)
+          = V_j*H_V_j + L_j*H_L_j + S_L_j*H_L_j + S_V_j*H_V_j
 
     Damped 50% to maintain stability. Vapor flows recomputed from mass balance
     in a bottom-up sweep.
@@ -766,29 +836,54 @@ def _update_flows(
     for j in range(n):
         sj = stages[j]
         if j == 0:
-            # Condenser: L_0 fixed (reflux ratio specification)
-            pass
+            pass  # Condenser: L_0 fixed
         elif j == n - 1:
-            # Reboiler: L_{n-1} = B from overall balance
             total_feed = sum(s.feed_flow for s in stages)
-            sj.L = max(total_feed - D, 1e-10)
+            # Subtract side draw flows from total
+            total_side_draw = 0.0
+            for s in stages:
+                if s.side_draw:
+                    sd_frac = float(s.side_draw.get("flow_fraction", 0.1))
+                    if s.side_draw.get("type", "liquid") == "liquid":
+                        total_side_draw += sd_frac * s.L
+                    else:
+                        total_side_draw += sd_frac * s.V
+            sj.L = max(total_feed - D - total_side_draw, 1e-10)
         else:
-            # Internal stage energy balance
             denom = sj.H_L - sj.H_V
             if abs(denom) < 1.0:
-                continue  # H_L ~ H_V; skip to avoid instability
+                continue
 
             V_j1 = stages[j + 1].V if j + 1 < n else 0.0
             H_V_j1 = stages[j + 1].H_V if j + 1 < n else 0.0
             L_jm1 = stages[j - 1].L if j > 0 else 0.0
             H_L_jm1 = stages[j - 1].H_L if j > 0 else 0.0
 
-            H_F_j = (feed_enthalpy if feed_enthalpy is not None else (sj.H_L + sj.H_V) / 2.0) if sj.is_feed_stage else 0.0
+            # Multi-feed enthalpy: sum over all feeds on this stage
             F_j = sj.feed_flow
+            H_F_j = 0.0
+            if F_j > 0:
+                if feed_enthalpies and j in feed_enthalpies:
+                    H_F_j = feed_enthalpies[j]
+                elif feed_enthalpy is not None:
+                    H_F_j = feed_enthalpy
+                else:
+                    H_F_j = (sj.H_L + sj.H_V) / 2.0
+
+            # Side draw energy removal (relative to H_V reference used in numerator)
+            # Liquid draw: S_L * (H_L - H_V) in the (H_L - H_V) denominator formulation
+            # Vapor draw: S_V * (H_V - H_V) = 0 (cancels exactly)
+            sd_energy = 0.0
+            if sj.side_draw:
+                sd_frac = float(sj.side_draw.get("flow_fraction", 0.1))
+                if sj.side_draw.get("type", "liquid") == "liquid":
+                    sd_energy = sd_frac * sj.L * (sj.H_L - sj.H_V)
+                # vapor side draw contributes 0 in this formulation
 
             numerator = (V_j1 * (H_V_j1 - sj.H_V)
                          + L_jm1 * (H_L_jm1 - sj.H_V)
-                         + F_j * (H_F_j - sj.H_V))
+                         + F_j * (H_F_j - sj.H_V)
+                         - sd_energy)
 
             L_j_new = numerator / denom
             if L_j_new > 0:
@@ -796,18 +891,33 @@ def _update_flows(
 
     # Fix reboiler liquid (bottoms product)
     total_feed = sum(s.feed_flow for s in stages)
-    B_flow = max(total_feed - D, 1e-10)
+    total_side_draw = 0.0
+    for s in stages:
+        if s.side_draw:
+            sd_frac = float(s.side_draw.get("flow_fraction", 0.1))
+            if s.side_draw.get("type", "liquid") == "liquid":
+                total_side_draw += sd_frac * s.L
+            else:
+                total_side_draw += sd_frac * s.V
+    B_flow = max(total_feed - D - total_side_draw, 1e-10)
     stages[n - 1].L = B_flow
 
     # Bottom-up sweep: vapor flows from mass balance
-    # Mass balance on stage j: L_{j-1} + V_{j+1} + F_j = L_j + V_j
-    # => V_j = L_{j-1} + V_{j+1} + F_j - L_j
+    # Mass balance: L_{j-1} + V_{j+1} + F_j = L_j + V_j + S_L_j + S_V_j
     stages[n - 1].V = max(
         stages[n - 2].L + stages[n - 1].feed_flow - B_flow, 1e-10
     )
     for j in range(n - 2, 0, -1):
         sj = stages[j]
-        V_j = (stages[j - 1].L + stages[j + 1].V + sj.feed_flow - sj.L)
+        sd_L = 0.0
+        sd_V = 0.0
+        if sj.side_draw:
+            sd_frac = float(sj.side_draw.get("flow_fraction", 0.1))
+            if sj.side_draw.get("type", "liquid") == "liquid":
+                sd_L = sd_frac * sj.L
+            else:
+                sd_V = sd_frac * sj.V
+        V_j = (stages[j - 1].L + stages[j + 1].V + sj.feed_flow - sj.L - sd_L - sd_V)
         sj.V = max(V_j, 1e-10)
 
     # Condenser vapor balance
@@ -840,6 +950,8 @@ def solve_rigorous_distillation(
     condenser_type: str = "total",
     tol: float = 1e-6,
     max_iter: int = 100,
+    additional_feeds: list[dict] | None = None,
+    side_draws: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Solve a distillation column rigorously using the Bubble-Point MESH method.
 
@@ -899,6 +1011,7 @@ def solve_rigorous_distillation(
         "condenser_temperature": 0.0,
         "reboiler_temperature": 0.0,
         "stage_profiles": [],
+        "side_draws": [],
         "temperature_history": [],
         "error": None,
     }
@@ -986,6 +1099,8 @@ def solve_rigorous_distillation(
             pressure_bottom=pressure_bottom,
             flasher=flasher,
             condenser_type=condenser_type,
+            additional_feeds=additional_feeds,
+            side_draws=side_draws,
         )
     except Exception as exc:
         result["error"] = f"Initialization failed: {exc}"
@@ -998,16 +1113,32 @@ def solve_rigorous_distillation(
     )
 
     # -----------------------------------------------------------------------
-    # Compute actual feed enthalpy for energy balance (not avg of stage H_L/H_V)
+    # Compute actual feed enthalpies for energy balance (all feeds)
     # -----------------------------------------------------------------------
     feed_H: float | None = None
+    feed_enthalpies: dict[int, float] = {}
     try:
         state_feed = flasher.flash(T=feed_T, P=feed_P, zs=feed_zs_norm)
         feed_H = state_feed.H()  # J/mol
     except Exception:
-        # Cp-based fallback (typical liquid ~150 J/(mol·K))
         feed_H = 150.0 * (feed_T - 298.15)
         logger.warning("Feed flash failed for rigorous distillation; using Cp-based enthalpy estimate")
+
+    # Compute per-stage feed enthalpies for multi-feed
+    for j, sj in enumerate(stages):
+        if sj.feeds:
+            total_flow_j = sum(f.get("flow", 0.0) for f in sj.feeds)
+            if total_flow_j > 0:
+                H_total = 0.0
+                for f in sj.feeds:
+                    fh = f.get("enthalpy")
+                    if fh is not None:
+                        H_total += f.get("flow", 0.0) * fh
+                    elif feed_H is not None:
+                        H_total += f.get("flow", 0.0) * feed_H
+                    else:
+                        H_total += f.get("flow", 0.0) * 150.0 * (feed_T - 298.15)
+                feed_enthalpies[j] = H_total / total_flow_j
 
     # -----------------------------------------------------------------------
     # Outer iteration loop
@@ -1046,7 +1177,7 @@ def solve_rigorous_distillation(
 
         # Step 4: Update flows from energy balance
         try:
-            _update_flows(stages, nc, distillate_rate, condenser_type, feed_enthalpy=feed_H)
+            _update_flows(stages, nc, distillate_rate, condenser_type, feed_enthalpies=feed_enthalpies, feed_enthalpy=feed_H)
         except Exception as exc:
             logger.warning("Flow update failed at iteration %d: %s", iteration, exc)
             # Non-fatal: continue with CMO flows
@@ -1088,23 +1219,49 @@ def solve_rigorous_distillation(
             Q_c = stages[0].L * stages[0].H_L + distillate_rate * stages[0].H_V - V_1 * H_V_1
     # Q_c should be negative (heat removed); enforce sign
     if Q_c > 0:
+        logger.warning("Condenser duty Q_c=%.1f W is positive (should be negative) — possible convergence or enthalpy reference issue; flipping sign", Q_c)
         Q_c = -Q_c
 
     # Reboiler duty (W): Q_r > 0 (heat added)
-    # Overall energy balance: F*H_F + Q_r + Q_c = D*H_D + B*H_B
-    # => Q_r = D*H_D + B*H_B - Q_c - F*H_F
-    H_F = 0.0
-    try:
-        state_feed = flasher.flash(T=feed_T, P=feed_P, zs=feed_zs_norm)
-        H_F = state_feed.H() if callable(getattr(state_feed, 'H', None)) else 0.0
-    except Exception:
-        pass
+    # Overall energy balance: Σ(F_k*H_F_k) + Q_r + Q_c = D*H_D + B*H_B + Σ(S_k*H_S_k)
+    # => Q_r = D*H_D + B*H_B + Σ(S_k*H_S_k) - Q_c - Σ(F_k*H_F_k)
+    total_feed_enthalpy_rate = 0.0
+    total_feed_flow_all = 0.0
+    for sj in stages:
+        if sj.feeds:
+            for f in sj.feeds:
+                f_flow = f.get("flow", 0.0)
+                total_feed_flow_all += f_flow
+                fh = f.get("enthalpy")
+                if fh is not None:
+                    total_feed_enthalpy_rate += f_flow * fh
+                elif feed_H is not None:
+                    total_feed_enthalpy_rate += f_flow * feed_H
+                else:
+                    total_feed_enthalpy_rate += f_flow * 150.0 * (feed_T - 298.15)
+    if total_feed_flow_all <= 0:
+        total_feed_flow_all = feed_flow
+        total_feed_enthalpy_rate = feed_flow * (feed_H if feed_H is not None else 0.0)
+
+    # Side draw enthalpy rate
+    total_side_draw_enthalpy = 0.0
+    total_side_draw_flow = 0.0
+    for sj in stages:
+        if sj.side_draw:
+            sd_frac = float(sj.side_draw.get("flow_fraction", 0.1))
+            if sj.side_draw.get("type", "liquid") == "liquid":
+                sd_flow = sd_frac * sj.L
+                total_side_draw_enthalpy += sd_flow * sj.H_L
+            else:
+                sd_flow = sd_frac * sj.V
+                total_side_draw_enthalpy += sd_flow * sj.H_V
+            total_side_draw_flow += sd_flow
 
     H_D = stages[0].H_L if condenser_type == "total" else stages[0].H_V
-    B_flow = max(feed_flow - distillate_rate, 1e-10)
+    B_flow = max(total_feed_flow_all - distillate_rate - total_side_draw_flow, 1e-10)
     H_B = stages[-1].H_L
 
-    Q_r = distillate_rate * H_D + B_flow * H_B - Q_c - feed_flow * H_F
+    Q_r = distillate_rate * H_D + B_flow * H_B + total_side_draw_enthalpy - Q_c - total_feed_enthalpy_rate
     # Reboiler must add heat
     if Q_r < 0:
         logger.debug("Q_reb=%.1f W (negative from reference state); taking absolute value", Q_r)
@@ -1133,7 +1290,39 @@ def solve_rigorous_distillation(
         }
         if sj.is_feed_stage:
             profile["is_feed_stage"] = True
+            profile["feed_count"] = len(sj.feeds)
+        if sj.side_draw:
+            profile["side_draw"] = sj.side_draw
         stage_profiles.append(profile)
+
+    # Extract side draw compositions and flows
+    side_draw_results: list[dict] = []
+    for j, sj in enumerate(stages):
+        if sj.side_draw:
+            sd_type = sj.side_draw.get("type", "liquid")
+            sd_frac = float(sj.side_draw.get("flow_fraction", 0.1))
+            if sd_type == "liquid":
+                sd_comp = {feed_comp_names[i]: round(sj.x[i], 6) for i in range(nc)}
+                sd_flow = sj.L * sd_frac
+                sd_T = sj.T
+                sd_vf = 0.0
+                sd_H = sj.H_L
+            else:
+                sd_comp = {feed_comp_names[i]: round(sj.y[i], 6) for i in range(nc)}
+                sd_flow = sj.V * sd_frac
+                sd_T = sj.T
+                sd_vf = 1.0
+                sd_H = sj.H_V
+            side_draw_results.append({
+                "stage": j,
+                "type": sd_type,
+                "flow_fraction": sd_frac,
+                "molar_flow": round(sd_flow, 6),
+                "temperature": round(sd_T, 2),
+                "vapor_fraction": sd_vf,
+                "enthalpy": round(sd_H, 2),
+                "composition": sd_comp,
+            })
 
     result["converged"] = converged
     result["iterations"] = iteration
@@ -1153,6 +1342,7 @@ def solve_rigorous_distillation(
     result["condenser_temperature"] = round(stages[0].T, 2)
     result["reboiler_temperature"] = round(stages[-1].T, 2)
     result["stage_profiles"] = stage_profiles
+    result["side_draws"] = side_draw_results
     result["temperature_history"] = [
         [round(t, 2) for t in temps] for temps in temperature_history
     ]

@@ -20,7 +20,7 @@ class OpenAIProvider(AIProvider):
     def __init__(self):
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
-        self.model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     async def chat(self, messages, tools=None):
         kwargs: dict = {"model": self.model, "messages": messages}

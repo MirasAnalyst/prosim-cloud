@@ -110,6 +110,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       temperature: { label: 'Temperature', unit: '°C', default: null, min: -273.15, max: 2000, type: 'number' },
       pressure: { label: 'Pressure', unit: 'kPa', default: null, min: 0, max: 50000, type: 'number' },
       pressureDrop: { label: 'Pressure Drop', unit: 'kPa', default: 0, min: 0, max: 1000, type: 'number' },
+      dropletDiameter: { label: 'Droplet Diameter', unit: 'μm', default: 150, min: 10, max: 5000, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -220,11 +221,17 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       lightKey: { label: 'Light Key', unit: '', default: '', type: 'string' },
       heavyKey: { label: 'Heavy Key', unit: '', default: '', type: 'string' },
       condenserType: { label: 'Condenser Type', unit: '', default: 'total', type: 'string' },
+      feed2Stage: { label: 'Feed 2 Stage', unit: '', default: 0, min: 0, max: 200, type: 'number' },
+      sideDrawStage: { label: 'Side Draw Stage', unit: '', default: 0, min: 0, max: 200, type: 'number' },
+      sideDrawType: { label: 'Side Draw Type', unit: '', default: 'liquid', type: 'string' },
+      sideDrawFlowFraction: { label: 'Side Draw Flow Fraction', unit: '', default: 0.1, min: 0.01, max: 0.5, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
+      { id: 'in-2', name: 'Feed 2', position: 'left', type: 'inlet' },
       { id: 'out-1', name: 'Distillate', position: 'top', type: 'outlet' },
       { id: 'out-2', name: 'Bottoms', position: 'bottom', type: 'outlet' },
+      { id: 'out-3', name: 'Side Draw', position: 'right', type: 'outlet' },
       { id: 'energy-reboiler', name: 'Reboiler Duty', position: 'bottom', type: 'inlet' },
       { id: 'energy-condenser', name: 'Condenser Duty', position: 'top', type: 'outlet' },
     ],
@@ -342,6 +349,9 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
       pressureDropCoeff: { label: 'ΔP Coefficient K', unit: '', default: 8, min: 1, max: 20, type: 'number' },
       efficiency: { label: 'Separation Efficiency', unit: '%', default: 95, min: 50, max: 99.9, type: 'number' },
       solidsFraction: { label: 'Solids Fraction', unit: '', default: 0.05, min: 0, max: 1, type: 'number' },
+      cycloneDiameter: { label: 'Cyclone Body Diameter', unit: 'm', default: 1.2, min: 0.1, max: 10, type: 'number' },
+      particleDensity: { label: 'Particle Density', unit: 'kg/m³', default: 2500, min: 500, max: 10000, type: 'number' },
+      effectiveTurns: { label: 'Effective Turns', unit: '', default: 5, min: 1, max: 20, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },
@@ -358,6 +368,7 @@ export const equipmentLibrary: Record<EquipmentType, EquipmentDefinition> = {
     parameters: {
       ...feedConditionParams,
       lightLiquidFraction: { label: 'Light Liquid Fraction', unit: '', default: 0.5, min: 0, max: 1, type: 'number' },
+      liquidDropletDiameter: { label: 'Liquid Droplet Diameter', unit: 'μm', default: 500, min: 50, max: 10000, type: 'number' },
     },
     ports: [
       { id: 'in-1', name: 'Feed', position: 'left', type: 'inlet' },

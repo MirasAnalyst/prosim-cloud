@@ -385,6 +385,34 @@ GPT-4o guessed compound names from training data (e.g. "CO2", "H2S", "butane") w
 
 1. **E2E `lightKeyPurity` assertions used fraction thresholds but engine returns percent scale**: Tests 3, 5, 7 asserted `lightKeyPurity > 0.85` (fraction) but engine returns e.g. 92.5 (percent), making assertions trivially true with zero verification value. Fix: changed to `> 85`, `> 80`, `> 70` respectively. **When writing E2E assertions against engine outputs, always verify the unit/scale of the returned value — percent vs fraction mismatches create silently useless tests.**
 
+### Phase 10 T2-2/T2-6 Chem-Sim Review: Mistakes and Resolutions
+
+1. **Separator vessel length used Souders-Brown V_max (flooding velocity) instead of actual gas velocity**: `vessel_length = V_max * t_settling` conflates the maximum allowable velocity with the actual sizing basis. For vertical separators, vessel length should come from L/D ratio (3-5 per API 12J), not from gas velocity × settling time. Fix: replaced with `L_D = 4.0`, `vessel_length = L_D * D_ref`. **Vertical separator length is set by L/D ratio, not by gas velocity × droplet settling time.**
+
+2. **ThreePhaseSeparator coalescence time formula `σ/(Δρ·g·d_p²)` is dimensionless, not seconds**: The formula computes `[N/m] / ([kg/m³]·[m/s²]·[m²]) = dimensionless` (inverse Bond number), but was treated as seconds. The 120-600s clamp hid this by coincidence. Fix: replaced with industry-standard retention time heuristic (180s light oil, 300s medium, 600s heavy/emulsion based on Δρ). **Dimensional analysis catches formula bugs — always verify units of empirical correlations.**
+
+3. **Cyclone Lapple d50 used circular inlet area `π·D²/4` instead of rectangular tangential inlet**: Standard cyclones have rectangular inlets with Lapple proportions `a=D_c/2`, `b=D_c/4`. Using circular area gives 2.5× higher velocity and 1.6× smaller d50 (non-conservative sizing). Fix: added `cycloneDiameter` param, compute `inlet_width = D_c/4`, `A_inlet = width × height`. **Lapple model assumes rectangular tangential inlet — always match the geometry to the correlation.**
+
+4. **Distillation Q_r and B_flow ignored additional feeds and side draws**: `B_flow = feed_flow - D` and `Q_r = D·H_D + B·H_B - Q_c - F·H_F` only used the primary feed, making reboiler duty and bottoms flow wrong for multi-feed/side-draw columns. Fix: summed all feed flows/enthalpies and side draw flows/enthalpies across stages. **When extending single-feed models to multi-feed, update ALL downstream balances — not just the solver internals.**
+
+5. **E2E test 11 separator feed at 40°C/5000 kPa with 82% methane was all gas (VF=1.0)**: No liquid phase meant no settling calculation and empty sizing dict. Fix: changed to heavier composition (methane 0.45, C2-C5 mix) at 25°C/3000 kPa to ensure two-phase flow. **When writing sizing E2E tests, verify the feed conditions actually produce the phase state needed for the calculation (two-phase for settling, gas for cyclone).**
+
+6. **Separator Stokes settling velocity overestimated ~60× due to missing intermediate-regime drag correction**: For 150 μm droplets Re_p ≈ 2.25, well outside Stokes regime (Re_p < 1). Uncorrected Stokes law underestimates drag, giving non-conservative (too fast) settling. Fix: added Oseen first-order correction `v_corrected = v_stokes / (1 + 3/16·Re_p)` when Re_p > 1. **Always check particle Reynolds number after computing Stokes settling — apply Oseen/Schiller-Naumann correction when Re_p > 1.**
+
+### Phase 10 T2-2/T2-6 Chem-Sim Review Round 2: Mistakes and Resolutions
+
+1. **Souders-Brown area used total mass flow instead of gas mass flow**: `A_min = mf / (rho_V * V_max)` where `mf` is total inlet mass flow. Souders-Brown sizes gas handling cross-section, so only gas mass flow should be used. For 30% gas by mass, diameter overestimated ~80%. Fix: extract gas mass flow from vapor outlet port: `mf_gas = vap_port.get("mass_flow", mf * 0.5)`. Same error in ThreePhaseSeparator. **Souders-Brown correlation sizes gas flow capacity — always use gas mass flow, not total inlet flow.**
+
+2. **Liquid-liquid Stokes settling missing Oseen correction**: For 500 μm droplets Re_p ≈ 17, well outside Stokes regime. Gas-liquid Separator correctly applied Oseen but liquid-liquid did not. Fix: added same Oseen pattern `v / (1 + 3/16 * Re_p)` when Re_p > 1. **Apply intermediate-regime drag correction consistently to ALL settling calculations, not just gas-liquid.**
+
+3. **Side draw energy balance used absolute enthalpy instead of relative**: `sd_energy = sd_frac * sj.L * sj.H_L` in the `(H_L - H_V)` denominator formulation should be `sd_frac * sj.L * (sj.H_L - sj.H_V)`. Vapor draws should contribute 0. Error corrupted L_j by ~12% per iteration for 10% side draw. Fix: use relative enthalpy term. **When deriving energy balance corrections in the (H_L - H_V) formulation, ALL terms must use relative enthalpies, not absolute.**
+
+4. **Rigorous solver double-counted multi-feed flow**: `feed_molar_flow = mf / (feed_mw / 1000.0)` used merged `mf` (sum of all feeds) as primary. Solver placed this as primary feed + added individual additional feeds = 150% of actual for equal two-feed case. Fix: compute from `material_inlets[0]` only. **When passing feeds to a solver that accepts primary + additional, ensure the primary is only the first inlet — not the merged total.**
+
+5. **FUG multi-feed merge used mass-weighted mole fractions**: `mf_weighted_zs[ci] += z_i * extra_mf` mixes mass flow (kg/s) with mole fractions — dimensionally incorrect. Correct merge requires molar flows: `z_i_mix = sum(z_i_k * F_k_mol) / sum(F_k_mol)`. Also mass-averaged temperature (intensive property). Fix: convert each feed to molar flow using its own MW, merge compositions on molar basis. **Composition merging must use molar flows — mass-weighted mole fractions are physically meaningless.**
+
+6. **Additional feed molar flow conversion used primary feed MW**: `extra_molar = extra_mf / (feed_mw / 1000.0)` where `feed_mw` is primary feed's molecular weight. For stripping steam (MW=18) vs hydrocarbon (MW=100), molar flow off by ~5.5×. Fix: compute `extra_mw` from extra feed's own composition. **Each feed stream has its own molecular weight — never use one stream's MW to convert another stream's mass flow.**
+
 ## Dev Commands
 ```bash
 # Backend

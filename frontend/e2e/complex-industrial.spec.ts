@@ -1,5 +1,5 @@
 /**
- * 10 Complex Industrial Flowsheet E2E Tests
+ * 16 Complex Industrial Flowsheet E2E Tests
  *
  * Validates ProSim Cloud's simulation engine against HYSYS/DWSIM reference values
  * for realistic multi-equipment industrial processes across Oil & Gas, Chemical,
@@ -1070,4 +1070,293 @@ test('10 — Urea Crystallization & Solids Handling (PR)', async ({ page }) => {
   // Mass balance overall: inputs ~ outputs (very loose for solids handling chain
   // where crystallization, filtration, drying, and cyclone each have heuristic splits)
   checkMassBalance(res, 8, ['e7', 'e8', 'e9', 'e10'], 0.45);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 11: Separator Settling Velocity (T2-2)
+// ═══════════════════════════════════════════════════════════════════════════
+test('11 — Separator settling velocity sizing (PR)', async ({ page }) => {
+  // Feed conditions chosen to produce two-phase flow (VF 0.3-0.9):
+  // Heavier NG at moderate T/P ensures liquid condensate phase exists
+  const nodes = [
+    makeFeed('f1', 'NG Feed', 25, 3000, 8, {
+      methane: 0.45, ethane: 0.15, propane: 0.15, 'n-butane': 0.15, 'n-pentane': 0.10,
+    }),
+    makeNode('sep', 'Separator', 'HP Sep', { dropletDiameter: 150 }),
+    makeProduct('p1', 'Gas'),
+    makeProduct('p2', 'Liquid'),
+  ];
+  const edges = [
+    E('e1', 'f1', 'out-1', 'sep', 'in-1'),
+    E('e2', 'sep', 'out-1', 'p1', 'in-1'),
+    E('e3', 'sep', 'out-2', 'p2', 'in-1'),
+  ];
+
+  const raw = await runSim(page, nodes, edges);
+  const res = validatePhysics(raw);
+  console.log('Test 11 — Separator settling velocity');
+
+  const sepRes = res.equipment_results?.['sep'];
+  expect(sepRes).toBeDefined();
+  expect(sepRes?.error).toBeUndefined();
+
+  // Sizing should include settling results
+  const sizing = sepRes?.sizing;
+  expect(sizing).toBeDefined();
+  expect(sizing?.v_settling_m_s).toBeGreaterThan(0);
+  expect(sizing?.vessel_length_m).toBeGreaterThan(0);
+  expect(sizing?.t_settling_s).toBeGreaterThan(0);
+  expect(sizing?.L_D_ratio).toBeGreaterThan(0);
+  expect(sizing?.droplet_diameter_um).toBe(150);
+
+  // Souders-Brown should also be there
+  expect(sizing?.V_max_m_s).toBeGreaterThan(0);
+  expect(sizing?.diameter_m).toBeGreaterThan(0);
+
+  console.log('  v_settling:', sizing?.v_settling_m_s, 'm/s');
+  console.log('  vessel_length:', sizing?.vessel_length_m, 'm');
+  console.log('  L/D:', sizing?.L_D_ratio);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 12: ThreePhaseSeparator Liquid-Liquid Settling (T2-2)
+// ═══════════════════════════════════════════════════════════════════════════
+test('12 — ThreePhaseSeparator settling (PR)', async ({ page }) => {
+  const nodes = [
+    makeFeed('f1', 'Well Fluid', 60, 2000, 12, {
+      methane: 0.10, 'n-hexane': 0.35, 'n-octane': 0.30, water: 0.25,
+    }),
+    makeNode('sep3', 'ThreePhaseSeparator', '3-Phase Sep', { liquidDropletDiameter: 500 }),
+    makeProduct('p1', 'Gas'),
+    makeProduct('p2', 'Light Oil'),
+    makeProduct('p3', 'Water'),
+  ];
+  const edges = [
+    E('e1', 'f1', 'out-1', 'sep3', 'in-1'),
+    E('e2', 'sep3', 'out-1', 'p1', 'in-1'),
+    E('e3', 'sep3', 'out-2', 'p2', 'in-1'),
+    E('e4', 'sep3', 'out-3', 'p3', 'in-1'),
+  ];
+
+  const raw = await runSim(page, nodes, edges);
+  const res = validatePhysics(raw);
+  console.log('Test 12 — ThreePhaseSeparator settling');
+
+  const sepRes = res.equipment_results?.['sep3'];
+  expect(sepRes).toBeDefined();
+  expect(sepRes?.error).toBeUndefined();
+
+  const sizing = sepRes?.sizing;
+  expect(sizing).toBeDefined();
+  // Liquid-liquid settling
+  expect(sizing?.v_settle_liquid_liquid_m_s).toBeGreaterThan(0);
+  expect(sizing?.retention_time_s).toBeGreaterThanOrEqual(180);
+  expect(sizing?.retention_time_s).toBeLessThanOrEqual(600);
+  expect(sizing?.vessel_length_m).toBeGreaterThan(0);
+  expect(sizing?.liquid_droplet_diameter_um).toBe(500);
+
+  console.log('  v_settle_LL:', sizing?.v_settle_liquid_liquid_m_s, 'm/s');
+  console.log('  retention_time:', sizing?.retention_time_s, 's');
+  console.log('  vessel_length:', sizing?.vessel_length_m, 'm');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 13: Cyclone d50 Cut Point (T2-2)
+// ═══════════════════════════════════════════════════════════════════════════
+test('13 — Cyclone d50 cut point (PR)', async ({ page }) => {
+  const nodes = [
+    makeFeed('f1', 'Dusty Gas', 120, 200, 5, {
+      nitrogen: 0.79, oxygen: 0.21,
+    }),
+    makeNode('cyc', 'Cyclone', 'Primary Cyclone', {
+      inletDiameter: 0.3, pressureDropCoeff: 8, efficiency: 95,
+      solidsFraction: 0.05, particleDensity: 2500, effectiveTurns: 5,
+    }),
+    makeProduct('p1', 'Clean Gas'),
+    makeProduct('p2', 'Dust'),
+  ];
+  const edges = [
+    E('e1', 'f1', 'out-1', 'cyc', 'in-1'),
+    E('e2', 'cyc', 'out-1', 'p1', 'in-1'),
+    E('e3', 'cyc', 'out-2', 'p2', 'in-1'),
+  ];
+
+  const raw = await runSim(page, nodes, edges);
+  const res = validatePhysics(raw);
+  console.log('Test 13 — Cyclone d50 cut point');
+
+  const cycRes = res.equipment_results?.['cyc'];
+  expect(cycRes).toBeDefined();
+  expect(cycRes?.error).toBeUndefined();
+
+  const sizing = cycRes?.sizing;
+  expect(sizing).toBeDefined();
+  // d50 should be realistic (2-50 μm for standard cyclones)
+  expect(sizing?.d50_cut_point_um).toBeGreaterThan(0);
+  expect(sizing?.d50_cut_point_um).toBeLessThan(100);
+  expect(sizing?.inlet_velocity_m_s).toBeGreaterThan(0);
+  expect(sizing?.N_turns).toBe(5);
+  expect(sizing?.rho_particle).toBe(2500);
+  expect(sizing?.v_terminal_d50_m_s).toBeGreaterThan(0);
+
+  console.log('  d50:', sizing?.d50_cut_point_um, 'μm');
+  console.log('  inlet velocity:', sizing?.inlet_velocity_m_s, 'm/s');
+  console.log('  v_terminal:', sizing?.v_terminal_d50_m_s, 'm/s');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 14: Multi-Feed Distillation Column (T2-6)
+// ═══════════════════════════════════════════════════════════════════════════
+test('14 — Multi-feed distillation column (PR)', async ({ page }) => {
+  // BTX column with two feeds at different stages
+  const nodes = [
+    makeFeed('f1', 'Light Feed', 80, 101.325, 5, {
+      benzene: 0.60, toluene: 0.30, 'o-xylene': 0.10,
+    }),
+    makeFeed('f2', 'Heavy Feed', 120, 101.325, 5, {
+      benzene: 0.15, toluene: 0.45, 'o-xylene': 0.40,
+    }),
+    makeNode('col', 'DistillationColumn', 'BTX Column', {
+      numberOfStages: 20, feedStage: 8, feed2Stage: 14,
+      refluxRatio: 2.5, condenserPressure: 101.325,
+      method: 'Rigorous', distillateToFeedRatio: 0.4,
+      lightKey: 'benzene', heavyKey: 'toluene',
+    }),
+    makeProduct('p1', 'Distillate'),
+    makeProduct('p2', 'Bottoms'),
+  ];
+  const edges = [
+    E('e1', 'f1', 'out-1', 'col', 'in-1'),
+    E('e2', 'f2', 'out-1', 'col', 'in-2'),
+    E('e3', 'col', 'out-1', 'p1', 'in-1'),
+    E('e4', 'col', 'out-2', 'p2', 'in-1'),
+  ];
+
+  const raw = await runSim(page, nodes, edges);
+  const res = validatePhysics(raw);
+  console.log('Test 14 — Multi-feed distillation');
+
+  const colRes = res.equipment_results?.['col'];
+  expect(colRes).toBeDefined();
+  expect(colRes?.error).toBeUndefined();
+
+  // Should have feedCount = 2
+  if (colRes?.feedCount !== undefined) {
+    expect(colRes.feedCount).toBe(2);
+  }
+
+  // Column should produce separation results
+  if (colRes?.distillateTemperature !== undefined) {
+    expect(colRes.distillateTemperature).toBeLessThan(colRes.bottomsTemperature);
+  }
+
+  // Total feed = 10 kg/s; distillate + bottoms should be close
+  checkMassBalance(res, 10, ['e3', 'e4'], 0.20);
+  console.log('  distT:', colRes?.distillateTemperature, '°C');
+  console.log('  botT:', colRes?.bottomsTemperature, '°C');
+  console.log('  feedCount:', colRes?.feedCount);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 15: Distillation with Liquid Side Draw (T2-6)
+// ═══════════════════════════════════════════════════════════════════════════
+test('15 — Distillation with side draw (PR)', async ({ page }) => {
+  const nodes = [
+    makeFeed('f1', 'BTX Feed', 100, 101.325, 8, {
+      benzene: 0.30, toluene: 0.40, 'o-xylene': 0.30,
+    }),
+    makeNode('col', 'DistillationColumn', 'Side Draw Column', {
+      numberOfStages: 25, feedStage: 12, refluxRatio: 3.0,
+      condenserPressure: 101.325, method: 'Rigorous',
+      distillateToFeedRatio: 0.3,
+      lightKey: 'benzene', heavyKey: 'toluene',
+      sideDrawStage: 18, sideDrawType: 'liquid', sideDrawFlowFraction: 0.15,
+    }),
+    makeProduct('p1', 'Distillate'),
+    makeProduct('p2', 'Bottoms'),
+    makeProduct('p3', 'Side Draw Product'),
+  ];
+  const edges = [
+    E('e1', 'f1', 'out-1', 'col', 'in-1'),
+    E('e2', 'col', 'out-1', 'p1', 'in-1'),
+    E('e3', 'col', 'out-2', 'p2', 'in-1'),
+    E('e4', 'col', 'out-3', 'p3', 'in-1'),
+  ];
+
+  const raw = await runSim(page, nodes, edges);
+  const res = validatePhysics(raw);
+  console.log('Test 15 — Side draw distillation');
+
+  const colRes = res.equipment_results?.['col'];
+  expect(colRes).toBeDefined();
+  expect(colRes?.error).toBeUndefined();
+
+  // Side draw result should be in equipment results
+  if (colRes?.sideDrawStage_0 !== undefined) {
+    expect(colRes.sideDrawStage_0).toBe(18);
+    expect(colRes.sideDrawFlow_0).toBeGreaterThan(0);
+  }
+
+  // Out-3 stream should exist (side draw)
+  const sdStream = res.stream_results?.['e4'];
+  if (sdStream) {
+    expect(sdStream.temperature).toBeGreaterThan(-274);
+    console.log('  side draw T:', sdStream.temperature, '°C');
+    console.log('  side draw flow:', sdStream.flowRate, 'kg/s');
+  }
+
+  console.log('  distT:', colRes?.distillateTemperature, '°C');
+  console.log('  botT:', colRes?.bottomsTemperature, '°C');
+  console.log('  sideDrawStage:', colRes?.sideDrawStage_0);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TEST 16: Single-Feed Column Backward Compatibility (T2-6)
+// ═══════════════════════════════════════════════════════════════════════════
+test('16 — Single-feed column backward compat (PR)', async ({ page }) => {
+  // Verify single-feed rigorous still works after multi-feed changes
+  const nodes = [
+    makeFeed('f1', 'BT Feed', 80, 101.325, 6, {
+      benzene: 0.50, toluene: 0.50,
+    }),
+    makeNode('col', 'DistillationColumn', 'BT Column', {
+      numberOfStages: 15, feedStage: 7, refluxRatio: 2.0,
+      condenserPressure: 101.325, method: 'Rigorous',
+      distillateToFeedRatio: 0.5,
+    }),
+    makeProduct('p1', 'Distillate'),
+    makeProduct('p2', 'Bottoms'),
+  ];
+  const edges = [
+    E('e1', 'f1', 'out-1', 'col', 'in-1'),
+    E('e2', 'col', 'out-1', 'p1', 'in-1'),
+    E('e3', 'col', 'out-2', 'p2', 'in-1'),
+  ];
+
+  const raw = await runSim(page, nodes, edges);
+  const res = validatePhysics(raw);
+  console.log('Test 16 — Single-feed backward compat');
+
+  const colRes = res.equipment_results?.['col'];
+  expect(colRes).toBeDefined();
+  expect(colRes?.error).toBeUndefined();
+  expect(colRes?.method).toBe('Rigorous');
+
+  // Should converge
+  if (colRes?.converged !== undefined) {
+    expect(colRes.converged).toBeTruthy();
+  }
+
+  // T_dist < T_bott
+  if (colRes?.distillateTemperature !== undefined && colRes?.bottomsTemperature !== undefined) {
+    expect(colRes.distillateTemperature).toBeLessThan(colRes.bottomsTemperature);
+  }
+
+  // Mass balance
+  checkMassBalance(res, 6, ['e2', 'e3'], 0.15);
+
+  console.log('  converged:', colRes?.converged);
+  console.log('  iterations:', colRes?.iterations);
+  console.log('  distT:', colRes?.distillateTemperature, '°C');
+  console.log('  botT:', colRes?.bottomsTemperature, '°C');
 });

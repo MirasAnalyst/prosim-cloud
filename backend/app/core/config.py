@@ -10,7 +10,7 @@ _env_file = Path(__file__).resolve().parents[3] / ".env"
 class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://postgres:postgres@localhost:5432/prosim"
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-5-mini"
+    OPENAI_MODEL: str = "gpt-4o-mini"
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
     DWSIM_PATH: str = "/opt/dwsim"
     PORT: int = 8000
