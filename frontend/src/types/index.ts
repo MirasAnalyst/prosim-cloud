@@ -52,6 +52,8 @@ export interface ParameterDefinition {
   min?: number;
   max?: number;
   type: 'number' | 'string' | 'boolean';
+  group?: string;
+  options?: string[];
 }
 
 export interface EquipmentDefinition {
