@@ -82,7 +82,7 @@ export function saveFlowsheet(
   projectId: string,
   nodes: Record<string, unknown>[],
   edges: Record<string, unknown>[],
-  simulationBasis?: { compounds: string[]; property_package?: string },
+  simulationBasis?: { compounds: string[]; property_package?: string; pseudoComponents?: unknown[] },
 ) {
   const payload: Record<string, unknown> = { nodes, edges };
   if (simulationBasis) {
@@ -442,6 +442,7 @@ export interface ChatResponseData {
   message: ChatMessage;
   usage: Record<string, number> | null;
   flowsheet_action: FlowsheetActionData | null;
+  completion_log: string[] | null;
 }
 
 export function agentChat(messages: ChatMessage[], flowsheetContext?: Record<string, unknown>) {

@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { toast } from 'sonner';
 import { EquipmentType, type AgentMessage, type EquipmentData } from '../types';
 import { agentChat, getChatHistory, saveChatMessages, clearChatHistory, type FlowsheetActionData } from '../lib/api-client';
-import { getDefaultParameters } from '../lib/equipment-library';
+import { getDefaultParameters, equipmentLibrary } from '../lib/equipment-library';
 import { autoLayout } from '../lib/auto-layout';
 import { useFlowsheetStore } from './flowsheetStore';
 import { useSimulationStore } from './simulationStore';
@@ -87,6 +87,33 @@ function applyFlowsheetAction(action: FlowsheetActionData): void {
     targetId: idMap.get(conn.target_id) ?? conn.target_id,
     targetPort: conn.target_port,
   }));
+
+  // Auto-create ProductStream for any REQUIRED equipment outlet port with no outgoing connection
+  // Skip ports explicitly marked as optional (e.g., DistillationColumn side draws)
+  const connectedPorts = new Set(streams.map(s => `${s.sourceId}:${s.sourcePort}`));
+  for (const eq of [...equipment]) {
+    const def = equipmentLibrary[eq.type];
+    if (!def) continue;
+    for (const port of def.ports) {
+      if (port.type === 'outlet' && !port.id.startsWith('energy-') && port.required !== false && !connectedPorts.has(`${eq.id}:${port.id}`)) {
+        const prodId = uuidv4();
+        equipment.push({
+          id: prodId,
+          type: EquipmentType.ProductStream,
+          name: 'Product',
+          parameters: {},
+          position: { x: (eq.position?.x ?? 100) + 200, y: (eq.position?.y ?? 100) },
+        });
+        streams.push({
+          id: uuidv4(),
+          sourceId: eq.id,
+          sourcePort: port.id,
+          targetId: prodId,
+          targetPort: 'in-1',
+        });
+      }
+    }
+  }
 
   if (action.mode === 'add') {
     // Merge: append new nodes/edges to existing state
@@ -208,7 +235,9 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             equipmentCount: data.flowsheet_action.equipment.length,
             connectionCount: data.flowsheet_action.connections.length,
           };
-          toast.success(`Created ${flowsheetAction.equipmentCount} equipment with ${flowsheetAction.connectionCount} connections`);
+          const fixCount = data.completion_log?.length ?? 0;
+          const fixSuffix = fixCount > 0 ? ` (${fixCount} auto-fixed)` : '';
+          toast.success(`Created ${flowsheetAction.equipmentCount} equipment with ${flowsheetAction.connectionCount} connections${fixSuffix}`);
           // Auto-simulate after AI generates a flowsheet
           setTimeout(() => {
             useSimulationStore.getState().runSimulation().catch((err) => {

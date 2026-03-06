@@ -37,6 +37,7 @@ class ChatResponse(BaseModel):
     message: ChatMessage
     usage: dict[str, int] | None = None
     flowsheet_action: FlowsheetAction | None = None
+    completion_log: list[str] | None = None
 
 
 class ChatHistoryMessage(BaseModel):

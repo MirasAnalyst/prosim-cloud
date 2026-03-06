@@ -42,7 +42,7 @@ FeedStream, ProductStream, Heater, Cooler, Mixer, Splitter, Separator, Pump, Com
 - Splitter: in-1 (feed), out-1 (product 1), out-2 (product 2)
 - Mixer: in-1 (feed 1), in-2 (feed 2), out-1 (product)
 - HeatExchanger: in-hot, in-cold, out-hot, out-cold
-- DistillationColumn: in-1 (feed), out-1 (distillate), out-2 (bottoms)
+- DistillationColumn: in-1 (feed), in-2 (optional second feed), out-1 (distillate), out-2 (bottoms), out-3 (side draw — only connect if sideDrawStage > 0)
 - Absorber: in-1 (gas feed), in-2 (solvent), out-1 (lean gas), out-2 (rich solvent)
 - Stripper: in-1 (rich solvent), in-2 (stripping gas/steam), out-1 (overhead gas), out-2 (lean solvent)
 - Cyclone: in-1 (feed), out-1 (clean gas), out-2 (solids)
@@ -62,7 +62,7 @@ FeedStream, ProductStream, Heater, Cooler, Mixer, Splitter, Separator, Pump, Com
 - Splitter: splitRatio (0-1 fraction, e.g. 0.5 means 50% to outlet 1)
 - Mixer: pressure, pressureDrop
 - HeatExchanger: hotOutletTemp, coldOutletTemp, pressureDropHot, pressureDropCold
-- DistillationColumn: numberOfStages, feedStage, refluxRatio, condenserPressure, reboilerDuty
+- DistillationColumn: numberOfStages, feedStage, refluxRatio, condenserPressure, reboilerDuty, lightKey, heavyKey, condenserType (total or partial), sideDrawStage, sideDrawType (liquid or vapor), sideDrawFlowFraction
 - CSTRReactor: volume, temperature, pressure, duty
 - PFRReactor: length, diameter, temperature, pressure
 - ConversionReactor: conversion (0-100 scale, e.g. 80 means 80%), temperature, pressure, duty, keyReactant (compound name from feed)
@@ -75,7 +75,7 @@ FeedStream, ProductStream, Heater, Cooler, Mixer, Splitter, Separator, Pump, Com
 - Filter: efficiency (0-100 scale), pressureDrop
 
 ### Supported compounds (use these exact names in feedComposition):
-water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-hexane, n-heptane, n-octane, n-decane, ethylene, propylene, benzene, toluene, o-xylene, methanol, ethanol, acetone, acetic acid, hydrogen, nitrogen, oxygen, carbon dioxide, carbon monoxide, hydrogen sulfide, sulfur dioxide, ammonia, chlorine, argon, helium, cyclohexane, styrene, 1-propanol, 2-propanol, diethyl ether, dimethyl ether, formic acid, formaldehyde, diethanolamine, monoethanolamine
+water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-hexane, n-heptane, n-octane, n-decane, n-dodecane, n-hexadecane, ethylene, propylene, benzene, toluene, o-xylene, methanol, ethanol, acetone, acetic acid, hydrogen, nitrogen, oxygen, carbon dioxide, carbon monoxide, hydrogen sulfide, sulfur dioxide, ammonia, chlorine, argon, helium, cyclohexane, styrene, 1-propanol, 2-propanol, diethyl ether, dimethyl ether, formic acid, formaldehyde, diethanolamine, monoethanolamine, triethylene glycol
 
 ### Rules:
 1. ALWAYS use FeedStream nodes for feed conditions (temperature, pressure, flow rate, composition). Never put feedTemperature/feedPressure/feedFlowRate/feedComposition on a Heater, Cooler, or any other equipment. Heaters are only for heating — use outletTemperature, duty, pressureDrop.
@@ -90,14 +90,22 @@ water, methane, ethane, propane, n-butane, isobutane, n-pentane, isopentane, n-h
 10. Keep equipment names SHORT (1-2 words). Keep JSON compact — omit optional fields. This ensures the tool call fits within the token budget.
 11. feedComposition uses MOLE fractions, NOT mass fractions. When the user specifies weight percentages (common for amine solutions, glycol systems), convert to mole fractions. Example: 30 wt% MEA in water = 11.2 mol% MEA → {"monoethanolamine":0.112,"water":0.888}.
 12. When a feed needs preheating before entering equipment, use FeedStream → Heater → Equipment. The FeedStream defines the feed conditions; the Heater only sets outletTemperature. When no preheating is needed, connect FeedStream directly to the equipment.
+13. ALWAYS create a ProductStream node for every REQUIRED equipment outlet that does not connect to another piece of equipment. Every required outlet port (out-1, out-2, out-hot, out-cold) must connect to something — either the next equipment OR a ProductStream. Name ProductStreams descriptively (e.g., "Sweet Gas", "Rich Amine", "Distillate", "Bottoms", "Vapor Product"). DistillationColumn side-draw ports (out-3, out-4, out-5) only need ProductStreams if sideDrawStage > 0.
+14. Do NOT create recycle/loop connections (where a downstream outlet feeds back to an upstream inlet). Instead, terminate recycle streams at a ProductStream and note in your explanation that "in practice, this stream would recirculate." The simulator has tear-stream convergence but AI-generated recycles rarely converge.
+15. For DistillationColumn, set condenserType="partial" when the light key is methane, ethane, ethylene, hydrogen, nitrogen, carbon monoxide, or any component with normal boiling point below -40°C. These components cannot be fully condensed with conventional cooling. Use refluxRatio of at least 1.5× R_min (typical: 3-8 for hydrocarbon fractionation; higher for sharp splits or wide-boiling feeds).
+16. HeatExchanger ALWAYS requires exactly 2 feed streams (one hot, one cold). Never create an HX with a single feed — use a Heater or Cooler instead for single-stream heating/cooling.
+17. Before finalizing, verify every non-ProductStream equipment has at least one inlet connection, and every non-FeedStream equipment has at least one outlet connection. Count your connections against your equipment list.
+18. Reboilers and condensers are INTEGRAL parts of DistillationColumn and Stripper models (same as Aspen HYSYS/DWSIM). Do NOT create separate Heater, Cooler, or HeatExchanger nodes for "Reboiler", "Reflux Drum", or "Condenser" — these are computed internally by the column model. Configure via column parameters (reboilerDuty, condenserPressure, condenserType). Pump-arounds are column parameters (pumpAround1DrawStage etc.), not separate equipment.
 
 ### Example 1 — Linear chain with preheating: "Heat methane to 200C then separate":
 equipment: [
   {"id":"equip-1","type":"FeedStream","name":"Methane","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":1.0,"feedComposition":"{\"methane\":1.0}"}},
   {"id":"equip-2","type":"Heater","name":"Feed Heater","parameters":{"outletTemperature":200}},
-  {"id":"equip-3","type":"Separator","name":"Separator","parameters":{}}
+  {"id":"equip-3","type":"Separator","name":"Separator","parameters":{}},
+  {"id":"equip-4","type":"ProductStream","name":"Vapor","parameters":{}},
+  {"id":"equip-5","type":"ProductStream","name":"Liquid","parameters":{}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"}]
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"},{"source_id":"equip-3","source_port":"out-1","target_id":"equip-4","target_port":"in-1"},{"source_id":"equip-3","source_port":"out-2","target_id":"equip-5","target_port":"in-1"}]
 
 ### Example 2 — Mixer with two feeds: "Mix methane 1kg/s with ethane 2kg/s at 500 kPa":
 equipment: [
@@ -133,9 +141,11 @@ connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2"
 equipment: [
   {"id":"equip-1","type":"FeedStream","name":"Column Feed","parameters":{"feedTemperature":25,"feedPressure":101.325,"feedFlowRate":5,"feedComposition":"{\"benzene\":0.5,\"toluene\":0.5}"}},
   {"id":"equip-2","type":"Heater","name":"Preheater","parameters":{"outletTemperature":85}},
-  {"id":"equip-3","type":"DistillationColumn","name":"Column","parameters":{"numberOfStages":15,"feedStage":7,"refluxRatio":2,"condenserPressure":101.325,"reboilerDuty":1000}}
+  {"id":"equip-3","type":"DistillationColumn","name":"Column","parameters":{"numberOfStages":15,"feedStage":7,"refluxRatio":2,"condenserPressure":101.325,"reboilerDuty":1000}},
+  {"id":"equip-4","type":"ProductStream","name":"Distillate","parameters":{}},
+  {"id":"equip-5","type":"ProductStream","name":"Bottoms","parameters":{}}
 ]
-connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"}]
+connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2","target_port":"in-1"},{"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-1"},{"source_id":"equip-3","source_port":"out-1","target_id":"equip-4","target_port":"in-1"},{"source_id":"equip-3","source_port":"out-2","target_id":"equip-5","target_port":"in-1"}]
 
 ### Example 6 — CSTR reactor with preheating: "CSTR for syngas at 250C, 5000 kPa":
 equipment: [
@@ -149,11 +159,15 @@ connections: [{"source_id":"equip-1","source_port":"out-1","target_id":"equip-2"
 equipment: [
   {"id":"equip-1","type":"FeedStream","name":"Sour Gas","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":10,"feedComposition":"{\"methane\":0.92,\"hydrogen sulfide\":0.05,\"carbon dioxide\":0.03}"}},
   {"id":"equip-2","type":"FeedStream","name":"MEA Solvent","parameters":{"feedTemperature":40,"feedPressure":4000,"feedFlowRate":15,"feedComposition":"{\"monoethanolamine\":0.112,\"water\":0.888}"}},
-  {"id":"equip-3","type":"Absorber","name":"Absorber","parameters":{"numberOfStages":10,"pressure":4000}}
+  {"id":"equip-3","type":"Absorber","name":"Absorber","parameters":{"numberOfStages":10,"pressure":4000}},
+  {"id":"equip-4","type":"ProductStream","name":"Sweet Gas","parameters":{}},
+  {"id":"equip-5","type":"ProductStream","name":"Rich Amine","parameters":{}}
 ]
 connections: [
   {"source_id":"equip-1","source_port":"out-1","target_id":"equip-3","target_port":"in-1"},
-  {"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-2"}
+  {"source_id":"equip-2","source_port":"out-1","target_id":"equip-3","target_port":"in-2"},
+  {"source_id":"equip-3","source_port":"out-1","target_id":"equip-4","target_port":"in-1"},
+  {"source_id":"equip-3","source_port":"out-2","target_id":"equip-5","target_port":"in-1"}
 ]
 
 ### Example 8 — Feed/Product streams: "Flash natural gas at 50C and 3000 kPa":
@@ -326,14 +340,18 @@ class AgentService:
         self,
         messages: list[ChatMessage],
         flowsheet_context: dict[str, Any] | None = None,
-    ) -> tuple[ChatMessage, dict[str, int] | None, FlowsheetAction | None]:
-        """Send messages to OpenAI and return the assistant response."""
+    ) -> tuple[ChatMessage, dict[str, int] | None, FlowsheetAction | None, list[str] | None]:
+        """Send messages to OpenAI and return the assistant response.
+
+        Returns:
+            (message, usage, flowsheet_action, completion_log)
+        """
         formatted = self._build_messages(messages, flowsheet_context)
 
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=formatted,
-            max_completion_tokens=4096,
+            max_completion_tokens=8192,
             tools=[GENERATE_FLOWSHEET_TOOL, SUGGEST_OPTIMIZATIONS_TOOL],
             tool_choice="auto",
         )
@@ -346,6 +364,13 @@ class AgentService:
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
+
+        # Detect token truncation — finish_reason "length" means output was cut off
+        if choice.finish_reason == "length":
+            logger.warning("AI response truncated (finish_reason=length, tokens=%s)", usage)
+            content = ("I was unable to generate the complete flowsheet because the response "
+                       "was truncated. Please try simplifying the request or breaking it into smaller steps.")
+            return ChatMessage(role="assistant", content=content), usage, None, None
 
         # Check if the model called the tool
         if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
@@ -361,19 +386,27 @@ class AgentService:
                 except Exception as exc:
                     logger.warning("Failed to parse flowsheet tool call: %s", exc)
                     content = choice.message.content or "I tried to generate a flowsheet but encountered an error parsing the result."
-                    return ChatMessage(role="assistant", content=content), usage, None
+                    return ChatMessage(role="assistant", content=content), usage, None, None
+
+                # Run the flowsheet completer to validate and auto-fix
+                from app.services.flowsheet_completer import validate_and_complete
+                flowsheet_action, completion_log = validate_and_complete(flowsheet_action)
 
                 # Make a follow-up call to get a text explanation
+                tool_result_data = {
+                    "status": "success",
+                    "equipment_count": len(flowsheet_action.equipment),
+                    "connection_count": len(flowsheet_action.connections),
+                }
+                if completion_log:
+                    tool_result_data["auto_fixes"] = completion_log
+
                 follow_up_messages = formatted + [
                     choice.message.model_dump(exclude_none=True),
                     {
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": json.dumps({
-                            "status": "success",
-                            "equipment_count": len(flowsheet_action.equipment),
-                            "connection_count": len(flowsheet_action.connections),
-                        }),
+                        "content": json.dumps(tool_result_data),
                     },
                 ]
 
@@ -393,7 +426,12 @@ class AgentService:
                 except Exception:
                     explanation = "Flowsheet created successfully."
 
-                return ChatMessage(role="assistant", content=explanation), usage, flowsheet_action
+                return (
+                    ChatMessage(role="assistant", content=explanation),
+                    usage,
+                    flowsheet_action,
+                    completion_log if completion_log else None,
+                )
 
             elif tool_call.function.name == "suggest_optimizations":
                 try:
@@ -410,13 +448,13 @@ class AgentService:
                             lines.append(f"   Expected benefit: {s['expected_benefit']}")
                         lines.append("")
                     content = "\n".join(lines)
-                    return ChatMessage(role="assistant", content=content), usage, None
+                    return ChatMessage(role="assistant", content=content), usage, None, None
                 except Exception as exc:
                     logger.warning("Failed to parse optimization tool call: %s", exc)
 
         # Normal text response — no tool call
         content = choice.message.content or ""
-        return ChatMessage(role="assistant", content=content), usage, None
+        return ChatMessage(role="assistant", content=content), usage, None, None
 
     async def chat_stream(
         self,

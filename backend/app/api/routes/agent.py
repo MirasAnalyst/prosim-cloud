@@ -1,36 +1,46 @@
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.schemas.agent import ChatRequest, ChatResponse
 from app.services.openai_agent import AgentService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_limiter = Limiter(key_func=get_remote_address)
 
 agent_service = AgentService()
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest):
+@_limiter.limit("20/minute")
+async def chat(request: Request, body: ChatRequest):
     if not body.messages:
         raise HTTPException(status_code=400, detail="Messages list cannot be empty")
 
     try:
-        message, usage, flowsheet_action = await agent_service.chat(
+        message, usage, flowsheet_action, completion_log = await agent_service.chat(
             messages=body.messages,
             flowsheet_context=body.flowsheet_context,
         )
-        return ChatResponse(message=message, usage=usage, flowsheet_action=flowsheet_action)
+        return ChatResponse(
+            message=message,
+            usage=usage,
+            flowsheet_action=flowsheet_action,
+            completion_log=completion_log,
+        )
     except Exception as exc:
         logger.exception("Agent chat failed")
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest):
+@_limiter.limit("20/minute")
+async def chat_stream(request: Request, body: ChatRequest):
     if not body.messages:
         raise HTTPException(status_code=400, detail="Messages list cannot be empty")
 

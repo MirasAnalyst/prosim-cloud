@@ -43,6 +43,7 @@ export interface PortDefinition {
   name: string;
   position: 'top' | 'bottom' | 'left' | 'right';
   type: 'inlet' | 'outlet';
+  required?: boolean;
 }
 
 export interface ParameterDefinition {
@@ -63,6 +64,15 @@ export interface EquipmentDefinition {
   icon: string;
   parameters: Record<string, ParameterDefinition>;
   ports: PortDefinition[];
+}
+
+export interface PseudoComponent {
+  name: string;
+  mw: number;        // g/mol (molecular weight)
+  tb: number;        // °C (normal boiling point)
+  tc: number | null;  // °C (critical temperature, null = auto-estimate)
+  pc: number | null;  // kPa (critical pressure, null = auto-estimate)
+  omega: number | null; // acentric factor (null = auto-estimate)
 }
 
 export interface EquipmentData {
