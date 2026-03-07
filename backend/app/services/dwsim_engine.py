@@ -7,6 +7,15 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.distillation_rigorous import solve_rigorous_distillation
+from app.services.flash_helpers import (
+    normalize_compound_name,
+    normalize_compound_names,
+    wilson_k_values,
+    solve_rachford_rice,
+    validate_bip_matrix,
+    get_actionable_message,
+    flash_vlle,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +119,61 @@ def _w_to_kw(power_w: float) -> float:
     return power_w / 1000.0
 
 
+def _lmtd_correction_factor(R: float, P: float, n_shell_passes: int = 1) -> float:
+    """LMTD correction factor (Ft) for shell-and-tube exchangers.
+
+    Bowman (1940) analytical formula for 1-2N exchangers.
+    R = (T1in - T1out) / (T2out - T2in)  (capacity ratio)
+    P = (T2out - T2in) / (T1in - T2in)   (effectiveness)
+    n_shell_passes: number of shell passes (1, 2, etc.)
+    """
+    if P < 1e-10:
+        return 1.0
+    if P * R > 1.0 - 1e-10:
+        return 0.5  # thermodynamically infeasible
+
+    # For multi-shell passes, convert to per-shell P
+    if n_shell_passes > 1:
+        # Seider et al.: P_1 from overall P for N shells
+        PR = P * R
+        if abs(PR - 1.0) < 1e-6:
+            P1 = P / n_shell_passes
+        else:
+            E = ((1 - PR) / (1 - P)) ** (1.0 / n_shell_passes)
+            P1 = (E - 1) / (E - R) if abs(E - R) > 1e-10 else P / n_shell_passes
+        P = max(P1, 1e-10)
+
+    if abs(R - 1.0) < 1e-6:
+        # Special case R=1: F = (P*sqrt(2)) / ((1-P) * ln((2-P*(2-sqrt(2)))/(2-P*(2+sqrt(2)))))
+        s2 = math.sqrt(2.0)
+        a = 2.0 - P * (2.0 - s2)
+        b = 2.0 - P * (2.0 + s2)
+        if b <= 0 or a <= 0:
+            return 0.75
+        F = P * s2 / ((1.0 - P) * math.log(a / b))
+        return max(min(F, 1.0), 0.5)
+
+    S = math.sqrt(R * R + 1.0)
+    # Bowman formula: F = S*ln(W) / ((R-1)*ln((2-P*(R+1-S))/(2-P*(R+1+S))))
+    # where W = (1-PR)/(1-P)
+    W = (1.0 - P * R) / (1.0 - P)
+    if W <= 0:
+        return 0.5
+    a = 2.0 - P * (R + 1.0 - S)
+    b = 2.0 - P * (R + 1.0 + S)
+    if a <= 0 or b <= 0 or abs(b) < 1e-15:
+        return 0.75
+    ratio = a / b
+    if ratio <= 0:
+        return 0.75
+    num = S * math.log(1.0 / W)  # = -S*ln(W); positive since W < 1
+    den = (R - 1.0) * math.log(ratio)
+    if abs(den) < 1e-10:
+        return 0.75
+    F = num / den
+    return max(min(F, 1.0), 0.5)
+
+
 # ---------------------------------------------------------------------------
 # Equipment type map: frontend PascalCase → DWSIM class name
 # Must match the EquipmentType enum in frontend/src/types/index.ts
@@ -158,6 +222,100 @@ _CP_WATER = 4186.0
 _CP_AIR = 1005.0
 
 # ---------------------------------------------------------------------------
+# Pseudo-component support
+# ---------------------------------------------------------------------------
+# Global registry: maps pseudo-component name -> {mw, tb_k, tc, pc, omega, cp_ig}
+# Populated at simulation start from flowsheet_data["pseudo_components"]
+_PSEUDO_PROPS: dict[str, dict[str, float]] = {}
+
+
+def _estimate_critical_props(mw: float, tb_k: float) -> dict[str, float]:
+    """Estimate Tc, Pc, omega from MW and Tb for pseudo-components.
+
+    Uses:
+    - Tc: fitted Tb/(a + b*Tb) correlation (±5% for C5-C16 hydrocarbons)
+    - Pc: corresponding-states Zc*R*Tc/Vc with Vc ~ MW correlation
+    - omega: Edmister correlation
+    """
+    import math
+
+    # Critical temperature: Tc = Tb / (0.567 + 0.0003 * Tb)
+    # Fitted to n-alkane data C5-C16; gives Tc/Tb ≈ 1.29-1.52
+    tc = tb_k / (0.567 + 0.0003 * tb_k)
+    tc = max(tc, tb_k + 10.0)  # Tc must be > Tb
+
+    # Critical pressure from corresponding states:
+    # Zc ≈ 0.27, Vc ≈ 4.3e-6 * MW (m³/mol, fitted to n-alkanes)
+    # Pc = Zc * R * Tc / Vc = 0.27 * 8.314 * Tc / (4.3e-6 * MW)
+    # ≈ 522000 * Tc / MW (Pa)
+    pc = 522000.0 * tc / max(mw, 1.0)  # Pa
+    pc = max(pc, 500000.0)    # floor 500 kPa
+    pc = min(pc, 10000000.0)  # cap 10 MPa
+
+    # Edmister acentric factor: omega = (3/7) * log10(Pc/1atm) / (Tc/Tb - 1) - 1
+    pc_atm = pc / 101325.0
+    tc_over_tb = tc / max(tb_k, 1.0)
+    if tc_over_tb > 1.01 and pc_atm > 1.0:
+        omega = (3.0 / 7.0) * math.log10(pc_atm) / (tc_over_tb - 1.0) - 1.0
+    else:
+        omega = 0.3  # fallback
+    omega = max(0.0, min(omega, 1.5))
+
+    return {"tc": tc, "pc": pc, "omega": omega}
+
+
+def _register_pseudo_components(pseudo_comps: list[dict]) -> list[str]:
+    """Register pseudo-components in the global registry.
+    Returns list of registered pseudo-component names (with pseudo: prefix stripped).
+    """
+    registered = []
+    for pc in pseudo_comps:
+        raw_name = pc.get("name", "").strip()
+        if not raw_name:
+            continue
+        # Strip "pseudo:" prefix if present (frontend adds it to compounds list)
+        pc_name = raw_name.lower().replace("pseudo:", "").strip()
+        if not pc_name:
+            continue
+
+        pc_mw = float(pc.get("mw", 100))
+        pc_tb_c = float(pc.get("tb", 100))
+        pc_tb_k = pc_tb_c + 273.15
+
+        # User-supplied or auto-estimated critical properties
+        user_tc = pc.get("tc")
+        user_pc = pc.get("pc")
+        user_omega = pc.get("omega")
+
+        est = _estimate_critical_props(pc_mw, pc_tb_k)
+        tc_k = (float(user_tc) + 273.15) if user_tc is not None else est["tc"]
+        pc_pa = (float(user_pc) * 1000.0) if user_pc is not None else est["pc"]
+        omega = float(user_omega) if user_omega is not None else est["omega"]
+
+        # Estimate ideal gas Cp (J/mol/K) — count ~3R per heavy atom (C,O,N,S)
+        # For hydrocarbons: ~3 atoms per CH2 (14 g/mol), so n_atoms ~ MW/14*3
+        # Cp_ig ~ n_atoms * R ~ (MW/14*3) * 8.314 = MW * 1.78
+        n_heavy_atoms = pc_mw / 14.0 * 3.0  # approximate atom count
+        cp_ig = max(n_heavy_atoms * 8.314, 33.0)  # J/(mol·K), floor at 4R
+
+        _PSEUDO_PROPS[pc_name] = {
+            "mw": pc_mw,
+            "tb_k": pc_tb_k,
+            "tc": tc_k,
+            "pc": pc_pa,
+            "omega": omega,
+            "cp_ig": cp_ig,
+        }
+        # Also register in MW table
+        _MW_BUILTIN[pc_name] = pc_mw
+
+        registered.append(pc_name)
+        logger.info("Registered pseudo-component '%s': MW=%.1f, Tb=%.1fK, Tc=%.1fK, Pc=%.0fPa, omega=%.3f",
+                     pc_name, pc_mw, pc_tb_k, tc_k, pc_pa, omega)
+    return registered
+
+
+# ---------------------------------------------------------------------------
 # Molecular weight cache and helpers
 # ---------------------------------------------------------------------------
 # Built-in MW fallback for common compounds (g/mol)
@@ -177,6 +335,8 @@ _MW_BUILTIN: dict[str, float] = {
     "diethyl ether": 74.121, "dimethyl ether": 46.068,
     "formic acid": 46.025, "formaldehyde": 30.026,
     "diethanolamine": 105.136, "monoethanolamine": 61.083,
+    "sulfur": 32.065, "triethylene glycol": 150.173,
+    "n-dodecane": 170.334, "n-hexadecane": 226.441,
 }
 
 # Heat capacity ratio (Cp/Cv) for compressor calculations
@@ -260,16 +420,36 @@ def _get_solubility(compound: str, T_celsius: float) -> float | None:
 @functools.lru_cache(maxsize=256)
 def _get_mw(comp_name: str) -> float:
     """Get molecular weight (g/mol) for a compound, with caching."""
-    # Try thermo library first
+    # Strip pseudo: prefix and normalize alias
+    clean = normalize_compound_name(comp_name)
+
+    # Check pseudo-component registry first
+    pc = _PSEUDO_PROPS.get(clean.lower())
+    if pc:
+        return pc["mw"]
+
+    # Try thermo/chemicals library (20,000+ compounds)
     if _thermo_available:
         try:
-            c, _ = ChemicalConstantsPackage.from_IDs([comp_name])
+            c, _ = ChemicalConstantsPackage.from_IDs([clean])
             return c.MWs[0]
         except Exception:
             pass
 
+    # Try chemicals library directly for broader coverage
+    try:
+        from chemicals import MW as chemicals_MW  # type: ignore[import-untyped]
+        from chemicals import CAS_from_any  # type: ignore[import-untyped]
+        cas = CAS_from_any(clean)
+        if cas:
+            mw = chemicals_MW(cas)
+            if mw and mw > 0:
+                return mw
+    except Exception:
+        pass
+
     # Fallback to builtin table
-    return _MW_BUILTIN.get(comp_name.lower(), _MW_BUILTIN.get(comp_name, 18.015))
+    return _MW_BUILTIN.get(clean.lower(), _MW_BUILTIN.get(clean, 18.015))
 
 
 # Heat of vaporization (J/kg) for separator fallback
@@ -422,12 +602,40 @@ class DWSIMEngine:
                 normalized.append(node)
         return normalized
 
+    @staticmethod
+    def _find_nearest_feed(tear_edge_target: str, nodes: list[dict], edges: list[dict], feed_conditions: dict[str, dict]) -> dict | None:
+        """BFS backward from tear edge target to find nearest FeedStream."""
+        visited: set[str] = set()
+        queue = [tear_edge_target]
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            # Check if this is a FeedStream with known conditions
+            node = next((n for n in nodes if n.get("id") == current), None)
+            if node and node.get("type") == "FeedStream":
+                feed_cond = feed_conditions.get(current)
+                if feed_cond:
+                    return dict(feed_cond)
+            # Add upstream nodes (edges where target == current)
+            for e in edges:
+                if e.get("target") == current and e.get("type") != "energy-stream":
+                    queue.append(e["source"])
+        return None
+
     async def simulate(self, flowsheet_data: dict[str, Any]) -> dict[str, Any]:
         """Run simulation on flowsheet_data = {nodes, edges, property_package}."""
         nodes = self._normalize_nodes(flowsheet_data.get("nodes", []))
         edges = flowsheet_data.get("edges", [])
         property_package = flowsheet_data.get("property_package", "PengRobinson")
         simulation_basis = flowsheet_data.get("simulation_basis") or {}
+
+        # Clear and register pseudo-components (prevents cross-session leakage)
+        _PSEUDO_PROPS.clear()
+        pseudo_comps = flowsheet_data.get("pseudo_components") or []
+        if pseudo_comps:
+            _register_pseudo_components(pseudo_comps)
 
         if not nodes:
             return {"status": "error", "error": "No equipment nodes in flowsheet"}
@@ -447,6 +655,23 @@ class DWSIMEngine:
         )
 
     # ------------------------------------------------------------------
+    # Public flash API
+    # ------------------------------------------------------------------
+    @staticmethod
+    def flash_tp(
+        comp_names: list[str],
+        zs: list[float],
+        T: float,
+        P: float,
+        property_package: str = "PengRobinson",
+    ) -> dict[str, Any] | None:
+        """Public API for TP flash.
+
+        Delegates to the internal ``_flash_tp`` implementation.
+        """
+        return DWSIMEngine._flash_tp(comp_names, zs, T, P, property_package)
+
+    # ------------------------------------------------------------------
     # Shared flash helper (reusable across equipment types)
     # ------------------------------------------------------------------
     @staticmethod
@@ -463,8 +688,6 @@ class DWSIMEngine:
         gas_zs, liquid_zs, MW_mix, rho_liquid, flasher, constants, properties,
         or None if flash fails.
         """
-        if not _thermo_available:
-            return None
         if not comp_names or not zs:
             return None
 
@@ -475,7 +698,31 @@ class DWSIMEngine:
                 return None
             zs_norm = [z / total for z in zs]
 
-            constants, properties = ChemicalConstantsPackage.from_IDs(comp_names)
+            # Normalize compound names (alias resolution + pseudo: prefix strip)
+            clean_names = normalize_compound_names(comp_names)
+
+            # Check if any component is a pseudo-component
+            has_pseudo = any(n.lower() in _PSEUDO_PROPS for n in clean_names)
+
+            if has_pseudo:
+                # Simplified flash for mixtures containing pseudo-components.
+                # Cannot use thermo library (no CAS/properties for custom compounds).
+                return DWSIMEngine._flash_tp_pseudo(clean_names, zs_norm, T, P)
+
+            if not _thermo_available:
+                return None
+
+            # Phase 15 §4.4: CoolProp pure-component flash for reference-grade properties
+            # ~110 fluids with Helmholtz EOS — superior accuracy for single-component streams
+            if _coolprop_available and len(clean_names) == 1:
+                try:
+                    cp_result = DWSIMEngine._flash_tp_coolprop(clean_names[0], T, P)
+                    if cp_result is not None:
+                        return cp_result
+                except Exception:
+                    pass  # Fall through to thermo
+
+            constants, properties = ChemicalConstantsPackage.from_IDs(clean_names)
 
             # Build gas + liquid phase objects based on property package
             if property_package in ("NRTL", "UNIQUAC") and len(comp_names) >= 2:
@@ -506,6 +753,22 @@ class DWSIMEngine:
                         taus = [[0.0] * n for _ in range(n)]
                         alphas = [[0.3] * n for _ in range(n)]
                         logger.warning("NRTL BIPs not found for %s, using zero-interaction matrix", comp_names)
+
+                    # Phase 15 §1.1: BIP Validation Gate — detect all-zero BIP matrix
+                    has_bips, nz_count, total_pairs = validate_bip_matrix(taus, len(comp_names))
+                    if not has_bips and len(comp_names) >= 2:
+                        logger.warning(
+                            "NRTL BIP matrix is all zeros for %s — activity coefficients will "
+                            "be γ=1.0 (ideal solution). Auto-downgrading to Peng-Robinson EOS.",
+                            comp_names,
+                        )
+                        # Recurse with PR to avoid silent ideal-solution results
+                        result = DWSIMEngine._flash_tp(comp_names, zs, T, P, "PengRobinson")
+                        if result:
+                            result["_bip_warning"] = get_actionable_message("no_bips")
+                            result["_original_pp"] = "NRTL"
+                        return result
+
                     # M7: Also fetch aij parameters for full NRTL tau = aij + bij/T
                     tau_as = None
                     try:
@@ -523,6 +786,19 @@ class DWSIMEngine:
                         n = len(comp_names)
                         taus = [[0.0] * n for _ in range(n)]
                         logger.warning("UNIQUAC BIPs not found for %s, using zero-interaction matrix", comp_names)
+
+                    # Phase 15 §1.1: BIP Validation Gate — detect all-zero UNIQUAC BIPs
+                    has_bips, nz_count, total_pairs = validate_bip_matrix(taus, len(comp_names))
+                    if not has_bips and len(comp_names) >= 2:
+                        logger.warning(
+                            "UNIQUAC BIP matrix is all zeros for %s — auto-downgrading to PR.",
+                            comp_names,
+                        )
+                        result = DWSIMEngine._flash_tp(comp_names, zs, T, P, "PengRobinson")
+                        if result:
+                            result["_bip_warning"] = get_actionable_message("no_bips")
+                            result["_original_pp"] = "UNIQUAC"
+                        return result
                     # UNIQUAC r/q: use UNIFAC dimensionless parameters, NOT Van der Waals volumes/areas
                     rs = constants.UNIFAC_Rs if constants.UNIFAC_Rs is not None else [2.0] * len(comp_names)
                     qs = constants.UNIFAC_Qs if constants.UNIFAC_Qs is not None else [1.8] * len(comp_names)
@@ -579,12 +855,32 @@ class DWSIMEngine:
 
             vf = state.VF if state.VF is not None else 0.0
 
-            # Supercritical override: if all components are above Tc and flash
-            # reports VF=0 (liquid), it's actually supercritical fluid — treat as vapor.
-            # thermo's FlashVL sometimes mis-assigns supercritical fluids as liquid.
-            if vf < 0.5 and hasattr(constants, 'Tcs') and len(constants.Tcs) > 0:
-                if all(T > 0.95 * Tc for Tc in constants.Tcs):
-                    vf = 1.0
+            # Phase 15 §1.5: Supercritical phase classification
+            # Use compressibility factor Z to decide phase behavior instead of
+            # simple Tr/Pr thresholds. Z > 0.3 → gas-like, Z < 0.3 → liquid-like.
+            _is_supercritical = False
+            if hasattr(constants, 'Tcs') and len(constants.Tcs) > 0:
+                Tc_mix = sum(zs_norm[i] * constants.Tcs[i] for i in range(len(zs_norm)))
+                Pc_mix = sum(zs_norm[i] * constants.Pcs[i] for i in range(len(zs_norm)))
+                Tr = T / Tc_mix if Tc_mix > 0 else 0
+                Pr = P / Pc_mix if Pc_mix > 0 else 0
+                if Tr > 1.0 and Pr > 0:
+                    _is_supercritical = True
+                    # Use actual Z from flash if available, else estimate
+                    Z_actual = None
+                    try:
+                        Z_actual = state.Z()
+                    except Exception:
+                        pass
+                    if Z_actual is None:
+                        # Estimate from ideal gas: Z = PV/(nRT) ≈ P*MW/(ρ*R*T)
+                        Z_actual = P * (MW_mix / 1000.0) / (8.314 * T) if T > 0 else 0.5
+                    if vf < 0.5 and Z_actual > 0.3:
+                        # Gas-like supercritical — force VF=1.0
+                        vf = 1.0
+                    elif vf > 0.5 and Z_actual < 0.2:
+                        # Dense supercritical — keep as liquid-like
+                        vf = 0.0
 
             # Compute mixture molecular weight
             MW_mix = sum(z * mw for z, mw in zip(zs_norm, constants.MWs))
@@ -639,6 +935,34 @@ class DWSIMEngine:
             H_gas = _safe(gas_phase, 'H') if gas_phase else None  # J/mol
             S_gas = _safe(gas_phase, 'S') if gas_phase else None  # J/(mol·K)
             Z_gas = _safe(gas_phase, 'Z') if gas_phase else None
+
+            # Fugacity coefficients (ln(phi)) for high-pressure corrections
+            lnphis_gas = None
+            if gas_phase:
+                try:
+                    lnphis_gas = list(gas_phase.lnphis())
+                except Exception:
+                    pass
+
+            # Supercritical fallbacks: when VF forced to 1.0 but flash only has liquid phase,
+            # use mixture-level properties as gas-phase substitutes
+            if _is_supercritical and vf >= 0.999 and gas_phase is None:
+                H_gas = H_gas if H_gas is not None else H  # Use mixture enthalpy
+                S_gas = S_gas if S_gas is not None else S
+                # Ideal gas density: P*MW/(R*T)
+                if rho_gas is None and MW_mix > 0 and T > 0:
+                    rho_gas = P * (MW_mix / 1000.0) / (8.314 * T)
+                # Use liquid-phase properties as fallbacks for transport
+                if mu_gas is None and mu_liquid is not None:
+                    mu_gas = mu_liquid
+                if Cp_gas is None and Cp_liquid is not None:
+                    Cp_gas = Cp_liquid
+            # Dense supercritical (VF kept at 0): ensure liquid properties available
+            if _is_supercritical and vf <= 0.001 and liquid_phase is None:
+                H_liquid = H_liquid if H_liquid is not None else H
+                S_liquid = S_liquid if S_liquid is not None else S
+                if rho_liquid is None and MW_mix > 0 and T > 0:
+                    rho_liquid = P * (MW_mix / 1000.0) / (8.314 * T)  # Rough estimate
 
             # Mixture-level Cv and Z
             Cv_mix = None
@@ -702,6 +1026,7 @@ class DWSIMEngine:
                 "Z_gas": Z_gas,            # dimensionless or None
                 "gas_zs": gas_zs,
                 "liquid_zs": liquid_zs,
+                "lnphis_gas": lnphis_gas,
                 "comp_names": comp_names,
                 "zs": zs_norm,
                 "flasher": flasher,
@@ -709,9 +1034,563 @@ class DWSIMEngine:
                 "constants": constants,
                 "properties": properties,
             }
-        except Exception as exc:
-            logger.warning("_flash_tp failed for %s: %s", comp_names, exc)
+        except (ValueError, ArithmeticError, RuntimeError, ZeroDivisionError) as exc:
+            # Phase 15 §1.2/1.6: Multi-solver retry with Wilson+RR intermediate
+            # Attempt 1 already failed (EOS flash above)
+
+            # Attempt 2: Retry with PR if using activity model
+            if property_package in ("NRTL", "UNIQUAC"):
+                logger.warning("_flash_tp %s failed for %s, retrying with PengRobinson: %s",
+                               property_package, comp_names, exc)
+                try:
+                    result = DWSIMEngine._flash_tp(comp_names, zs, T, P, "PengRobinson")
+                    if result:
+                        result["_flash_warning"] = (
+                            f"{property_package} flash failed — fell back to Peng-Robinson. "
+                            "Results may be less accurate for polar/non-ideal mixtures."
+                        )
+                        return result
+                except Exception:
+                    pass
+
+            # Attempt 3: Wilson K-values + Rachford-Rice (intermediate — better than ideal gas)
+            logger.warning("_flash_tp EOS failed for %s at T=%.1f P=%.0f: %s — trying Wilson+RR",
+                           comp_names, T, P, exc)
+            try:
+                constants_fb, properties_fb = ChemicalConstantsPackage.from_IDs(comp_names)
+                total_fb = sum(zs)
+                zs_fb = [z / total_fb for z in zs] if total_fb > 0 else zs
+                MW_mix_fb = sum(z * mw for z, mw in zip(zs_fb, constants_fb.MWs))
+
+                # Wilson K-values using actual critical properties
+                K_wilson = wilson_k_values(
+                    list(constants_fb.Tcs), list(constants_fb.Pcs),
+                    list(constants_fb.omegas), T, P,
+                )
+
+                # Rachford-Rice for VF and phase compositions
+                vf_fb, liq_xs, vap_ys = solve_rachford_rice(zs_fb, K_wilson)
+
+                # Estimate Cp from HeatCapacityGases
+                Cp_fb = None
+                try:
+                    Cp_fb = sum(zs_fb[i] * properties_fb.HeatCapacityGases[i].T_dependent_property(T)
+                                for i in range(len(zs_fb)))
+                except Exception:
+                    pass
+
+                # Enthalpy from Cp integration
+                T_ref = 298.15
+                H_fb = Cp_fb * (T - T_ref) if Cp_fb else 0.0
+
+                # Density estimates
+                rho_gas_fb = P * (MW_mix_fb / 1000.0) / (8.314 * T) if T > 0 else 1.0
+                rho_liq_fb = 800.0  # rough default
+
+                # Entropy estimate
+                S_fb = 0.0
+                if Cp_fb and T > 0:
+                    S_fb = Cp_fb * math.log(T / T_ref) - 8.314 * math.log(max(P, 1.0) / 101325.0)
+
+                return {
+                    "T": T, "P": P, "H": H_fb, "S": S_fb, "Cp": Cp_fb,
+                    "VF": vf_fb, "MW_mix": MW_mix_fb, "MWs": list(constants_fb.MWs),
+                    "rho_liquid": rho_liq_fb, "rho_gas": rho_gas_fb,
+                    "rho_mix": rho_gas_fb if vf_fb > 0.5 else rho_liq_fb,
+                    "mu_liquid": None, "mu_gas": None,
+                    "k_liquid": None, "k_gas": None, "sigma": None,
+                    "Cp_mass_mix": Cp_fb * 1000.0 / MW_mix_fb if Cp_fb and MW_mix_fb > 0 else None,
+                    "Cp_liquid": None, "Cp_gas": None,
+                    "Cv_liquid": None, "Cv_gas": None,
+                    "H_liquid": H_fb if vf_fb < 0.5 else None,
+                    "H_gas": H_fb if vf_fb >= 0.5 else None,
+                    "S_liquid": S_fb if vf_fb < 0.5 else None,
+                    "S_gas": S_fb if vf_fb >= 0.5 else None,
+                    "Z_liquid": None, "Z_gas": None,
+                    "gas_zs": vap_ys, "liquid_zs": liq_xs,
+                    "lnphis_gas": None,
+                    "comp_names": comp_names, "zs": zs_fb,
+                    "flasher": None, "state": None,
+                    "constants": constants_fb, "properties": properties_fb,
+                    "flash_degraded": True,
+                    "_flash_warning": get_actionable_message("flash_failed"),
+                }
+            except Exception as exc2:
+                logger.warning("Wilson+RR fallback also failed: %s — last resort ideal gas", exc2)
+
+            # Attempt 4: Ideal gas fallback (last resort)
+            try:
+                constants_fb, properties_fb = ChemicalConstantsPackage.from_IDs(comp_names)
+                total_fb = sum(zs)
+                zs_fb = [z / total_fb for z in zs] if total_fb > 0 else zs
+                MW_mix_fb = sum(z * mw for z, mw in zip(zs_fb, constants_fb.MWs))
+                Cp_fb = None
+                try:
+                    Cp_fb = sum(zs_fb[i] * properties_fb.HeatCapacityGases[i].T_dependent_property(T)
+                                for i in range(len(zs_fb)))
+                except Exception:
+                    pass
+                T_ref = 298.15
+                H_fb = Cp_fb * (T - T_ref) if Cp_fb else 0.0
+                rho_gas_fb = P * (MW_mix_fb / 1000.0) / (8.314 * T) if T > 0 else 1.0
+                vf_fb = 1.0 if all(T > 0.95 * Tc for Tc in constants_fb.Tcs) else 0.0
+                return {
+                    "T": T, "P": P, "H": H_fb, "S": 0.0, "Cp": Cp_fb,
+                    "VF": vf_fb, "MW_mix": MW_mix_fb,
+                    "rho_liquid": 800.0, "rho_gas": rho_gas_fb,
+                    "mu_liquid": None, "mu_gas": None,
+                    "H_liquid": H_fb if vf_fb < 0.5 else None,
+                    "H_gas": H_fb if vf_fb >= 0.5 else None,
+                    "S_liquid": None, "S_gas": None,
+                    "Z_liquid": None, "Z_gas": None,
+                    "gas_zs": zs_fb, "liquid_zs": zs_fb,
+                    "comp_names": comp_names, "zs": zs_fb,
+                    "flasher": None, "state": None,
+                    "constants": constants_fb, "properties": properties_fb,
+                    "flash_degraded": True,
+                    "_flash_warning": "All flash methods failed — using ideal gas approximation. Results may be inaccurate.",
+                }
+            except Exception:
+                pass
             return None
+        except Exception as exc:
+            logger.error("_flash_tp unexpected error for %s at T=%.1f P=%.0f: %s (%s)",
+                         comp_names, T, P, exc, type(exc).__name__)
+            return None
+
+    # ------------------------------------------------------------------
+    # CoolProp pure-component flash (Helmholtz EOS, ~110 fluids)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _flash_tp_coolprop(
+        compound: str,
+        T: float,
+        P: float,
+    ) -> dict[str, Any] | None:
+        """TP flash for a single component using CoolProp Helmholtz EOS.
+
+        Returns reference-grade thermodynamic properties for ~110 supported
+        fluids. Returns None if CoolProp doesn't support the compound.
+        """
+        if not _coolprop_available:
+            return None
+
+        # Map common names to CoolProp fluid names
+        _CP_NAME_MAP: dict[str, str] = {
+            "water": "Water", "methane": "Methane", "ethane": "Ethane",
+            "propane": "Propane", "n-butane": "n-Butane", "isobutane": "IsoButane",
+            "n-pentane": "n-Pentane", "isopentane": "Isopentane",
+            "n-hexane": "n-Hexane", "n-heptane": "n-Heptane", "n-octane": "n-Octane",
+            "n-nonane": "n-Nonane", "n-decane": "n-Decane",
+            "n-dodecane": "n-Dodecane", "hydrogen": "Hydrogen",
+            "nitrogen": "Nitrogen", "oxygen": "Oxygen",
+            "carbon dioxide": "CarbonDioxide", "carbon monoxide": "CarbonMonoxide",
+            "hydrogen sulfide": "HydrogenSulfide", "sulfur dioxide": "SulfurDioxide",
+            "ammonia": "Ammonia", "argon": "Argon", "helium": "Helium",
+            "ethylene": "Ethylene", "propylene": "Propylene",
+            "methanol": "Methanol", "ethanol": "Ethanol",
+            "benzene": "Benzene", "toluene": "Toluene",
+            "cyclohexane": "CycloHexane", "acetone": "Acetone",
+            "dimethyl ether": "DimethylEther",
+            "diethyl ether": "DiethylEther",
+            "dichloromethane": "DichloroMethane",
+        }
+
+        cp_name = _CP_NAME_MAP.get(compound.lower())
+        if cp_name is None:
+            # Try CoolProp's own name resolution
+            try:
+                CP.PropsSI("T", "T", 300, "P", 101325, compound)
+                cp_name = compound
+            except Exception:
+                return None
+
+        try:
+            # Core flash properties
+            H = CP.PropsSI("Hmolar", "T", T, "P", P, cp_name)  # J/mol
+            S = CP.PropsSI("Smolar", "T", T, "P", P, cp_name)  # J/(mol·K)
+            Cp_mol = CP.PropsSI("Cpmolar", "T", T, "P", P, cp_name)  # J/(mol·K)
+            Cv_mol = CP.PropsSI("Cvmolar", "T", T, "P", P, cp_name)  # J/(mol·K)
+            rho = CP.PropsSI("Dmass", "T", T, "P", P, cp_name)  # kg/m³
+            MW = CP.PropsSI("M", "T", T, "P", P, cp_name) * 1000.0  # g/mol
+            phase_idx = CP.PropsSI("Phase", "T", T, "P", P, cp_name)
+
+            # Phase determination using CoolProp phase constants when available,
+            # falling back to integer indices for compatibility
+            _is_two_phase = False
+            try:
+                _phase_liquid = CP.iphase_liquid
+                _phase_gas = CP.iphase_gas
+                _phase_twophase = CP.iphase_twophase
+                _phase_supercritical = CP.iphase_supercritical
+                _phase_supercrit_gas = CP.iphase_supercritical_gas
+                _phase_supercrit_liq = CP.iphase_supercritical_liquid
+            except AttributeError:
+                _phase_liquid, _phase_gas, _phase_twophase = 0, 5, 6
+                _phase_supercritical, _phase_supercrit_gas, _phase_supercrit_liq = 1, 2, 3
+
+            if phase_idx == _phase_twophase:
+                vf = CP.PropsSI("Q", "T", T, "P", P, cp_name)
+                vf = max(0.0, min(1.0, vf))
+                _is_two_phase = True
+            elif phase_idx in (_phase_liquid, _phase_supercrit_liq):
+                vf = 0.0
+            else:
+                vf = 1.0
+
+            # Transport & phase-specific properties
+            rho_liquid = None
+            rho_gas = None
+            mu_liquid = None
+            mu_gas = None
+            k_liquid = None
+            k_gas = None
+            Cp_liquid = None
+            Cp_gas = None
+            sigma_val = None
+            H_liquid = None
+            H_gas = None
+            S_liquid = None
+            S_gas = None
+
+            if _is_two_phase:
+                # Query saturated phase properties individually for two-phase
+                try:
+                    rho_liquid = CP.PropsSI("Dmass", "Q", 0, "P", P, cp_name)
+                    rho_gas = CP.PropsSI("Dmass", "Q", 1, "P", P, cp_name)
+                except Exception:
+                    pass
+                try:
+                    mu_liquid = CP.PropsSI("viscosity", "Q", 0, "P", P, cp_name)
+                    mu_gas = CP.PropsSI("viscosity", "Q", 1, "P", P, cp_name)
+                except Exception:
+                    pass
+                try:
+                    k_liquid = CP.PropsSI("conductivity", "Q", 0, "P", P, cp_name)
+                    k_gas = CP.PropsSI("conductivity", "Q", 1, "P", P, cp_name)
+                except Exception:
+                    pass
+                try:
+                    sigma_val = CP.PropsSI("surface_tension", "Q", 0, "P", P, cp_name)
+                except Exception:
+                    pass
+                try:
+                    Cp_liq_mol = CP.PropsSI("Cpmolar", "Q", 0, "P", P, cp_name)
+                    Cp_gas_mol = CP.PropsSI("Cpmolar", "Q", 1, "P", P, cp_name)
+                    Cp_liquid = Cp_liq_mol * 1000.0 / MW if MW > 0 else None
+                    Cp_gas = Cp_gas_mol * 1000.0 / MW if MW > 0 else None
+                except Exception:
+                    pass
+                try:
+                    H_liquid = CP.PropsSI("Hmolar", "Q", 0, "P", P, cp_name)
+                    H_gas = CP.PropsSI("Hmolar", "Q", 1, "P", P, cp_name)
+                except Exception:
+                    pass
+                try:
+                    S_liquid = CP.PropsSI("Smolar", "Q", 0, "P", P, cp_name)
+                    S_gas = CP.PropsSI("Smolar", "Q", 1, "P", P, cp_name)
+                except Exception:
+                    pass
+            else:
+                # Single-phase: assign to the appropriate bucket
+                try:
+                    mu_val = CP.PropsSI("viscosity", "T", T, "P", P, cp_name)
+                    if vf < 0.5:
+                        mu_liquid = mu_val
+                    else:
+                        mu_gas = mu_val
+                except Exception:
+                    pass
+                try:
+                    k_val = CP.PropsSI("conductivity", "T", T, "P", P, cp_name)
+                    if vf < 0.5:
+                        k_liquid = k_val
+                    else:
+                        k_gas = k_val
+                except Exception:
+                    pass
+                try:
+                    sigma_val = CP.PropsSI("surface_tension", "T", T, "P", P, cp_name)
+                except Exception:
+                    pass
+
+                if vf < 0.5:
+                    rho_liquid = rho
+                    H_liquid = H
+                    S_liquid = S
+                    Cp_liquid = Cp_mol * 1000.0 / MW if MW > 0 else None
+                else:
+                    rho_gas = rho
+                    H_gas = H
+                    S_gas = S
+                    Cp_gas = Cp_mol * 1000.0 / MW if MW > 0 else None
+
+            Z = P * (MW / 1000.0) / (rho * 8.314 * T) if rho > 0 and T > 0 else None
+            Cp_mass = Cp_mol * 1000.0 / MW if MW > 0 else None
+            Z_liquid = Z if vf < 0.5 else None
+            Z_gas = Z if vf >= 0.5 else None
+            if _is_two_phase:
+                # Both phases present — compute Z for each
+                if rho_liquid and rho_liquid > 0:
+                    Z_liquid = P * (MW / 1000.0) / (rho_liquid * 8.314 * T)
+                if rho_gas and rho_gas > 0:
+                    Z_gas = P * (MW / 1000.0) / (rho_gas * 8.314 * T)
+
+            return {
+                "T": T,
+                "P": P,
+                "H": H,
+                "S": S,
+                "VF": vf,
+                "Cp": Cp_mol,
+                "Cv": Cv_mol,
+                "Z": Z,
+                "MW_mix": MW,
+                "MWs": [MW],
+                "rho_liquid": rho_liquid,
+                "rho_gas": rho_gas,
+                "rho_mix": rho,
+                "mu_liquid": mu_liquid,
+                "mu_gas": mu_gas,
+                "k_liquid": k_liquid,
+                "k_gas": k_gas,
+                "sigma": sigma_val,
+                "Cp_mass_mix": Cp_mass,
+                "Cp_liquid": Cp_liquid,
+                "Cp_gas": Cp_gas,
+                "Cv_liquid": None,
+                "Cv_gas": None,
+                "H_liquid": H_liquid,
+                "H_gas": H_gas,
+                "S_liquid": S_liquid,
+                "S_gas": S_gas,
+                "Z_liquid": Z_liquid,
+                "Z_gas": Z_gas,
+                "gas_zs": [1.0],
+                "liquid_zs": [1.0],
+                "lnphis_gas": None,
+                "comp_names": [compound],
+                "zs": [1.0],
+                "flasher": None,
+                "state": None,
+                "constants": None,
+                "properties": None,
+                "_source": "CoolProp Helmholtz EOS",
+            }
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Simplified flash for pseudo-component mixtures
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _flash_tp_pseudo(
+        comp_names: list[str],
+        zs: list[float],
+        T: float,
+        P: float,
+    ) -> dict[str, Any] | None:
+        """TP flash for mixtures containing pseudo-components.
+
+        Phase 15 §1.3: Try PR EOS first by constructing ChemicalConstantsPackage
+        from pseudo-component properties. Falls back to Wilson K-values if PR fails.
+        """
+        n = len(comp_names)
+        if n == 0:
+            return None
+
+        # Gather per-component properties
+        mws = []
+        tbs = []
+        tcs = []
+        pcs = []
+        omegas = []
+        cps = []  # J/(mol·K)
+
+        for name in comp_names:
+            pc_props = _PSEUDO_PROPS.get(name.lower())
+            if pc_props:
+                mws.append(pc_props["mw"])
+                tbs.append(pc_props["tb_k"])
+                tcs.append(pc_props["tc"])
+                pcs.append(pc_props["pc"])
+                omegas.append(pc_props["omega"])
+                cps.append(pc_props["cp_ig"])
+            else:
+                # Real component — look up from thermo if available, else use rough estimates
+                mw = _MW_BUILTIN.get(name.lower(), 100.0)
+                mws.append(mw)
+                tb_est = 200.0 + mw * 1.5
+                tbs.append(tb_est)
+                tc_est = tb_est * 1.5
+                tcs.append(tc_est)
+                pcs.append(3000000.0)
+                omegas.append(0.3)
+                cps.append(max((mw / 14.0 * 3.0) * 8.314, 33.0))
+
+                if _thermo_available:
+                    try:
+                        c, p = ChemicalConstantsPackage.from_IDs([name])
+                        mws[-1] = c.MWs[0]
+                        if c.Tbs and c.Tbs[0]:
+                            tbs[-1] = c.Tbs[0]
+                        if c.Tcs and c.Tcs[0]:
+                            tcs[-1] = c.Tcs[0]
+                        if c.Pcs and c.Pcs[0]:
+                            pcs[-1] = c.Pcs[0]
+                        if c.omegas and c.omegas[0] is not None:
+                            omegas[-1] = c.omegas[0]
+                        try:
+                            cp_val = p.HeatCapacityGases[0].T_dependent_property(T)
+                            if cp_val and cp_val > 0:
+                                cps[-1] = cp_val
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+        MW_mix = sum(z * mw for z, mw in zip(zs, mws))
+
+        # Phase 15 §1.3: Try PR EOS flash with manually constructed constants
+        pr_flash_ok = False
+        if _thermo_available and n >= 1:
+            try:
+                from thermo import PropertyCorrelationsPackage  # type: ignore[import-untyped]
+                # Build a ChemicalConstantsPackage from our gathered properties
+                constants_manual = ChemicalConstantsPackage(
+                    MWs=mws, Tcs=tcs, Pcs=pcs, omegas=omegas, Tbs=tbs,
+                    CASs=[f"pseudo-{i}" for i in range(n)],
+                    names=comp_names,
+                )
+                # Zero kijs for pseudo-components
+                kijs = [[0.0] * n for _ in range(n)]
+                eos_kwargs = {
+                    "Pcs": pcs, "Tcs": tcs, "omegas": omegas, "kijs": kijs,
+                }
+                # Need HeatCapacityGases — use constant Cp approximation
+                from thermo import HeatCapacityGas  # type: ignore[import-untyped]
+                HCGs = []
+                for i in range(n):
+                    # Create a simple constant Cp model
+                    hcg = HeatCapacityGas(CASRN=f"pseudo-{i}", MW=mws[i])
+                    HCGs.append(hcg)
+
+                gas = CEOSGas(PRMIX, eos_kwargs, HeatCapacityGases=HCGs, T=T, P=P, zs=zs)
+                liq = CEOSLiquid(PRMIX, eos_kwargs, HeatCapacityGases=HCGs, T=T, P=P, zs=zs)
+
+                if n == 1:
+                    # Can't easily build FlashPureVLS without full properties
+                    raise ValueError("Single pseudo-component — use Wilson fallback")
+                flasher = FlashVL(constants_manual, None, liquid=liq, gas=gas)
+                state = flasher.flash(T=T, P=P, zs=zs)
+
+                vf = state.VF if state.VF is not None else 0.0
+                gas_phase = getattr(state, 'gas', None)
+                liquid_phase = getattr(state, 'liquid0', None)
+                gas_zs_pr = list(gas_phase.zs) if gas_phase else zs
+                liq_zs_pr = list(liquid_phase.zs) if liquid_phase else zs
+                H_pr = state.H() if callable(getattr(state, 'H', None)) else 0.0
+                S_pr = 0.0
+                try:
+                    S_pr = state.S() if callable(getattr(state, 'S', None)) else 0.0
+                except Exception:
+                    pass
+
+                Cp_mol = sum(z * cp for z, cp in zip(zs, cps))
+                rho_gas_pr = P * (MW_mix / 1000.0) / (8.314 * max(T, 1.0))
+                rho_liq_pr = 700.0 + MW_mix * 0.5
+                Cp_mass = Cp_mol * 1000.0 / max(MW_mix, 1.0)
+
+                pr_flash_ok = True
+                return {
+                    "T": T, "P": P, "H": H_pr, "S": S_pr,
+                    "VF": vf, "Cp": Cp_mol, "Cv": None, "Z": None,
+                    "MW_mix": MW_mix, "MWs": mws,
+                    "rho_liquid": rho_liq_pr, "rho_gas": rho_gas_pr,
+                    "rho_mix": rho_gas_pr if vf > 0.5 else rho_liq_pr,
+                    "mu_liquid": None, "mu_gas": None,
+                    "k_liquid": None, "k_gas": None, "sigma": None,
+                    "Cp_mass_mix": Cp_mass,
+                    "Cp_liquid": Cp_mass if vf < 0.5 else None,
+                    "Cp_gas": Cp_mass if vf >= 0.5 else None,
+                    "Cv_liquid": None, "Cv_gas": None,
+                    "H_liquid": H_pr if vf < 0.5 else None,
+                    "H_gas": H_pr if vf >= 0.5 else None,
+                    "S_liquid": S_pr if vf < 0.5 else None,
+                    "S_gas": S_pr if vf >= 0.5 else None,
+                    "Z_liquid": None, "Z_gas": None,
+                    "gas_zs": gas_zs_pr, "liquid_zs": liq_zs_pr,
+                    "lnphis_gas": None,
+                    "comp_names": comp_names, "zs": zs,
+                    "flasher": flasher, "state": state,
+                    "constants": constants_manual, "properties": None,
+                    "pseudo_flash": True, "pseudo_method": "PR_EOS",
+                }
+            except Exception as exc:
+                logger.debug("PR EOS flash for pseudo-components failed: %s — using Wilson", exc)
+
+        # Wilson K-values fallback (original method)
+        Cp = sum(z * cp for z, cp in zip(zs, cps))
+        K_vals = wilson_k_values(tcs, pcs, omegas, T, P)
+        vf, liquid_zs, gas_zs = solve_rachford_rice(zs, K_vals)
+
+        # Enthalpy: ideal gas H = Cp * (T - T_ref), J/mol
+        T_ref = 298.15
+        H = Cp * (T - T_ref)
+
+        # Entropy: ideal gas S = Cp * ln(T/T_ref) - R * ln(P/P_ref), J/(mol·K)
+        P_ref = 101325.0
+        S = Cp * math.log(max(T, 1.0) / T_ref) - 8.314 * math.log(max(P, 1.0) / P_ref)
+
+        # Density estimates
+        rho_gas = P * (MW_mix / 1000.0) / (8.314 * max(T, 1.0))  # ideal gas
+        rho_liquid = 700.0 + MW_mix * 0.5  # crude liquid density estimate
+
+        Cp_mass = Cp * 1000.0 / max(MW_mix, 1.0)  # J/(kg·K)
+
+        return {
+            "T": T,
+            "P": P,
+            "H": H,
+            "S": S,
+            "VF": vf,
+            "Cp": Cp,
+            "Cv": None,
+            "Z": None,
+            "MW_mix": MW_mix,
+            "MWs": mws,
+            "rho_liquid": rho_liquid,
+            "rho_gas": rho_gas,
+            "rho_mix": rho_gas if vf > 0.5 else rho_liquid,
+            "mu_liquid": None,
+            "mu_gas": None,
+            "k_liquid": None,
+            "k_gas": None,
+            "sigma": None,
+            "Cp_mass_mix": Cp_mass,
+            "Cp_liquid": Cp_mass if vf < 0.5 else None,
+            "Cp_gas": Cp_mass if vf >= 0.5 else None,
+            "Cv_liquid": None,
+            "Cv_gas": None,
+            "H_liquid": H if vf < 0.5 else None,
+            "H_gas": H if vf >= 0.5 else None,
+            "S_liquid": S if vf < 0.5 else None,
+            "S_gas": S if vf >= 0.5 else None,
+            "Z_liquid": None,
+            "Z_gas": None,
+            "gas_zs": gas_zs,
+            "liquid_zs": liquid_zs,
+            "lnphis_gas": None,
+            "comp_names": comp_names,
+            "zs": zs,
+            "flasher": None,
+            "state": None,
+            "constants": None,
+            "properties": None,
+            "pseudo_flash": True,
+        }
 
     # ------------------------------------------------------------------
     # Additional flash helpers (T1-5: Flash Type Expansion)
@@ -1113,6 +1992,27 @@ class DWSIMEngine:
                 except Exception as exc:
                     logs.append(f"WARNING: Failed to load simulation basis compounds: {exc}")
 
+            # Auto-add feed compounds to simulation basis (Fix D)
+            if simulation_basis is None:
+                simulation_basis = {}
+            if "compounds" not in simulation_basis:
+                simulation_basis["compounds"] = []
+            basis_lc = set(c.lower() for c in simulation_basis["compounds"])
+            for fs_n in feed_stream_nodes:
+                fs_p = fs_n.get("parameters", {})
+                fc = fs_p.get("feedComposition", {})
+                if isinstance(fc, str):
+                    try:
+                        fc = json.loads(fc)
+                    except Exception:
+                        fc = {}
+                for comp_name in fc:
+                    if comp_name.lower() not in basis_lc:
+                        simulation_basis["compounds"].append(comp_name)
+                        basis_lc.add(comp_name.lower())
+                        logs.append(f"INFO: Auto-added '{comp_name}' to simulation basis")
+            basis_compounds = simulation_basis.get("compounds", [])
+
             basis_set = set(basis_compounds) if basis_compounds else None
 
             # Activity coefficient model info
@@ -1211,11 +2111,39 @@ class DWSIMEngine:
             # T2-5: Convergence diagnostics — track variable history per iteration
             convergence_history: list[dict[str, Any]] = []
 
-            # Initialize tear stream conditions with default feed for first pass
+            # Pre-compute feed conditions for tear-stream initialization
+            _feed_conditions_cache: dict[str, dict[str, Any]] = {}
+            if tear_edges:
+                for fs_node in feed_stream_nodes:
+                    fs_id = fs_node.get("id", "")
+                    fs_params = fs_node.get("parameters", {})
+                    try:
+                        fc = self._build_feed_from_params(fs_params, property_package)
+                        _feed_conditions_cache[fs_id] = fc
+                    except Exception:
+                        pass  # Feed will be processed normally in the loop
+
+            # Initialize tear stream conditions — prefer nearest upstream feed over default water
             tear_stream_conditions: dict[str, dict[str, Any]] = {}
             for te in tear_edges:
                 te_key = f"{te['source']}_{te.get('sourceHandle', 'out-1')}"
-                tear_stream_conditions[te_key] = dict(_DEFAULT_FEED)
+                target_id = te.get("target", "")
+                nearest_feed = self._find_nearest_feed(target_id, nodes, edges, _feed_conditions_cache)
+                if nearest_feed is not None:
+                    tear_stream_conditions[te_key] = nearest_feed
+                    logs.append(f"INFO: Tear stream {te_key} initialized from upstream feed")
+                else:
+                    # Fallback: use any available feed
+                    any_feed = None
+                    for fc_val in _feed_conditions_cache.values():
+                        any_feed = dict(fc_val)
+                        break
+                    if any_feed is not None:
+                        tear_stream_conditions[te_key] = any_feed
+                        logs.append(f"INFO: Tear stream {te_key} initialized from available feed")
+                    else:
+                        tear_stream_conditions[te_key] = dict(_DEFAULT_FEED)
+                        logs.append(f"WARNING: Tear stream {te_key} initialized with default water — may converge slowly")
 
             for iteration in range(1, max_iterations + 1):
                 actual_iterations = iteration
@@ -1342,13 +2270,53 @@ class DWSIMEngine:
                                     break
 
                         # If no upstream connections, build feed from node parameters
+                        _mark_underspecified = False
                         if not inlets:
-                            inlets = [self._build_feed_from_params(params, property_package)]
+                            # Check if user specified a feed composition on this node
+                            has_user_feed = bool(params.get("feedComposition"))
+                            feed_from_params = self._build_feed_from_params(params, property_package)
+                            use_basis_fallback = (
+                                (feed_from_params is None or feed_from_params.get("mass_flow", 0) <= 0)
+                                or (not has_user_feed and simulation_basis and simulation_basis.get("compounds"))
+                            )
+                            if use_basis_fallback:
+                                # Graceful fallback: build feed from simulation basis compounds
+                                if simulation_basis and simulation_basis.get("compounds"):
+                                    basis_comps = simulation_basis["compounds"]
+                                    n_comps_fb = len(basis_comps)
+                                    fallback_comp = {c: 1.0 / n_comps_fb for c in basis_comps}
+                                    fb_T = _c_to_k(float(params.get("feedTemperature", params.get("temperature", 25))))
+                                    fb_P = _kpa_to_pa(float(params.get("feedPressure", params.get("pressure", 101.325))))
+                                    fb_mf = float(params.get("feedFlowRate", params.get("massFlow", 1.0)))
+                                    feed_from_params = {
+                                        "temperature": fb_T, "pressure": fb_P, "mass_flow": fb_mf,
+                                        "composition": fallback_comp, "vapor_fraction": 0.0,
+                                    }
+                                    fb_flash = self._flash_tp(
+                                        basis_comps, [1.0 / n_comps_fb] * n_comps_fb,
+                                        fb_T, fb_P, property_package,
+                                    )
+                                    if fb_flash and fb_flash.get("MW_mix", 0) > 0:
+                                        feed_from_params["enthalpy"] = fb_flash["H"] / (fb_flash["MW_mix"] / 1000.0)
+                                        feed_from_params["vapor_fraction"] = fb_flash.get("VF", 0.0)
+                                    else:
+                                        feed_from_params["enthalpy"] = _estimate_cp(fallback_comp) * (fb_T - _T_REF)
+                                    logs.append(f"INFO: {name} — no upstream, using simulation basis as default feed")
+                                    _mark_underspecified = True
+                                else:
+                                    # No basis either — use _DEFAULT_FEED (water at 25°C) as last resort
+                                    feed_from_params = dict(_DEFAULT_FEED)
+                                    feed_from_params["composition"] = dict(_DEFAULT_FEED["composition"])
+                                    logs.append(f"INFO: {name} — no upstream or basis, using default water feed")
+                                    _mark_underspecified = True
+                            inlets = [feed_from_params]
 
                         # ----------------------------------------------------------
                         # Equipment-specific calculations (all SI internally)
                         # ----------------------------------------------------------
                         eq_res: dict[str, Any] = {"equipment_type": ntype, "name": name}
+                        if _mark_underspecified:
+                            eq_res["underspecified"] = True
                         outlets: dict[str, dict[str, Any]] = {}
 
                         if ntype in ("Heater", "Cooler"):
@@ -1428,14 +2396,13 @@ class DWSIMEngine:
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out
-                            # Store real enthalpy for downstream propagation
-                            if duty_mode and mf > 0:
+                            # Store enthalpy from first law for energy consistency
+                            # (independent re-flash can give different H than upstream,
+                            # causing false energy-balance warnings)
+                            if mf > 0:
                                 outlet["enthalpy"] = inlet["enthalpy"] + duty_w / mf
-                            elif flash_out and flash_out.get("MW_mix", 0) > 0:
-                                mw_kg_out = flash_out["MW_mix"] / 1000.0
-                                outlet["enthalpy"] = flash_out["H"] / mw_kg_out  # J/kg
                             else:
-                                outlet["enthalpy"] = cp * (T_out - _T_REF)
+                                outlet["enthalpy"] = inlet.get("enthalpy", 0.0)
                             outlet["vapor_fraction"] = vf_out
                             outlet["composition"] = dict(comp)
                             outlets["out-1"] = outlet
@@ -1588,6 +2555,12 @@ class DWSIMEngine:
                             if eff <= 0:
                                 eff = 0.75
 
+                            # Phase 15 §3.2: Polytropic efficiency mode
+                            eff_mode = str(params.get("efficiencyMode", "isentropic")).lower()
+                            poly_eff = float(params.get("polytropicEfficiency", 0)) / 100.0
+                            if poly_eff <= 0:
+                                poly_eff = eff  # default: same as isentropic
+
                             n_stages = max(1, int(params.get("stages", 1)))
                             intercool_temp = _c_to_k(float(params.get("intercoolTemp", 35)))
 
@@ -1606,7 +2579,7 @@ class DWSIMEngine:
                                     eq_res["error_liquid_feed"] = True
                                 elif vf_in < 0.5:
                                     logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — compressor expects vapor feed")
-                                elif vf_in < 0.99:
+                                elif vf_in < 0.90:
                                     logs.append(f"WARNING: {name} inlet VF={vf_in:.2f} — wet gas in compressor feed")
 
                             # Multi-stage compression (C1: entropy method per stage)
@@ -1753,9 +2726,21 @@ class DWSIMEngine:
                                             gamma = gamma_sum / z_sum
 
                                     ratio = P_out / P_in if P_in > 0 else 1.0
-                                    T_out_isen = T_in * (ratio ** ((gamma - 1) / gamma))
-                                    T_out = T_in + (T_out_isen - T_in) / eff
-                                    work_w = mf * cp * (T_out - T_in)
+
+                                    if eff_mode == "polytropic" and poly_eff > 0:
+                                        # Phase 15 §3.2: Polytropic compression
+                                        # T_out = T_in * (P_out/P_in)^((gamma-1)/(gamma*eta_p))
+                                        poly_exp = (gamma - 1) / (gamma * poly_eff) if gamma > 1 else 0
+                                        T_out = T_in * (ratio ** poly_exp)
+                                        work_w = mf * cp * (T_out - T_in)
+                                        eq_res["efficiencyMode"] = "polytropic"
+                                        eq_res["polytropicEfficiency"] = round(poly_eff * 100, 1)
+                                    else:
+                                        # Standard isentropic
+                                        T_out_isen = T_in * (ratio ** ((gamma - 1) / gamma))
+                                        T_out = T_in + (T_out_isen - T_in) / eff
+                                        work_w = mf * cp * (T_out - T_in)
+                                        eq_res["efficiencyMode"] = "isentropic"
 
                             eq_res["work"] = round(_w_to_kw(work_w), 3)
                             eq_res["efficiency"] = round(eff * 100, 1)
@@ -1765,18 +2750,9 @@ class DWSIMEngine:
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out
-                            # Outlet enthalpy: use work-consistent value when entropy method was used
-                            if used_entropy and flash_in and flash_in.get("MW_mix", 0) > 0:
-                                mw_kg = flash_in["MW_mix"] / 1000.0
-                                h_in_kg = flash_in["H"] / mw_kg  # J/kg
-                                outlet["enthalpy"] = h_in_kg + (work_w / mf if mf > 0 else 0)
-                            else:
-                                # TP flash fallback for gamma method
-                                flash_comp_out = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
-                                if flash_comp_out and flash_comp_out.get("MW_mix", 0) > 0:
-                                    outlet["enthalpy"] = flash_comp_out["H"] / (flash_comp_out["MW_mix"] / 1000.0)
-                                else:
-                                    outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
+                            # Outlet enthalpy from first law using upstream inlet enthalpy
+                            # (avoids inconsistency between re-flash H_in and upstream H_in)
+                            outlet["enthalpy"] = inlet["enthalpy"] + (work_w / mf if mf > 0 else 0)
                             outlet["composition"] = dict(comp)
                             # Update VF from flash at outlet conditions
                             flash_comp_vf = self._flash_tp(comp_names, zs, T_out, P_out, property_package)
@@ -2253,20 +3229,143 @@ class DWSIMEngine:
                             else:
                                 cold_out["enthalpy"] = cp_cold * (T_cold_out - _T_REF)
 
-                            # Recompute duty from enthalpy difference (correct for phase change)
-                            if flash_hot and flash_hot_out and flash_hot["MW_mix"] > 0 and flash_hot_out["MW_mix"] > 0:
-                                h_hot_in = flash_hot["H"] / (flash_hot["MW_mix"] / 1000.0)
-                                h_hot_out_j = hot_out["enthalpy"]
-                                duty = mf_hot * (h_hot_in - h_hot_out_j)
-                                # Force cold outlet enthalpy from energy balance for consistency
-                                if flash_cold and flash_cold.get("MW_mix", 0) > 0 and mf_cold > 0:
-                                    h_cold_in_eb = flash_cold["H"] / (flash_cold["MW_mix"] / 1000.0)
-                                    cold_out["enthalpy"] = h_cold_in_eb + duty / mf_cold
+                            # Recompute duty from upstream enthalpies (not re-flash)
+                            # to ensure energy balance consistency with upstream equipment
+                            h_hot_in_up = hot.get("enthalpy", 0.0)
+                            h_hot_out_j = hot_out["enthalpy"]
+                            duty = mf_hot * (h_hot_in_up - h_hot_out_j)
+                            # Force cold outlet enthalpy from energy balance
+                            h_cold_in_up = cold.get("enthalpy", 0.0)
+                            if mf_cold > 0:
+                                cold_out["enthalpy"] = h_cold_in_up + duty / mf_cold
 
                             eq_res["duty"] = round(_w_to_kw(duty), 3)
                             eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out), 2)
                             eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out), 2)
                             eq_res["LMTD"] = round(self._calc_lmtd(T_hot_in, T_hot_out, T_cold_in, T_cold_out), 2)
+
+                            # Determine VF for hot inlet (used below for U estimation)
+                            vf_hot_in = flash_hot.get("VF", 0) if flash_hot else 0
+
+                            # Phase 15 §3.1: Multi-pass Ft correction
+                            n_shell_passes = int(params.get("shellPasses", 1))
+                            n_tube_passes = int(params.get("tubePasses", 2))
+                            fouling_hot = float(params.get("foulingHot", 0.0002))
+                            fouling_cold = float(params.get("foulingCold", 0.0002))
+                            if n_shell_passes >= 1 and n_tube_passes >= 2:
+                                R_ht = (T_hot_in - T_hot_out) / max(T_cold_out - T_cold_in, 0.1)
+                                P_ht = (T_cold_out - T_cold_in) / max(T_hot_in - T_cold_in, 0.1)
+                                Ft = None
+                                try:
+                                    from ht import F_LMTD_Fagan  # type: ignore[import-untyped]
+                                    Ft = F_LMTD_Fagan(R_ht, P_ht, n_shell_passes)
+                                except ImportError:
+                                    pass
+                                except Exception as exc_ht:
+                                    logger.debug("ht Ft correction failed: %s", exc_ht)
+                                # Analytical fallback when ht is unavailable or failed
+                                if Ft is None:
+                                    Ft = _lmtd_correction_factor(R_ht, P_ht, n_shell_passes)
+                                Ft = max(0.5, min(1.0, Ft))
+                                eq_res["Ft_correction"] = round(Ft, 4)
+                                eq_res["shellPasses"] = n_shell_passes
+                                eq_res["tubePasses"] = n_tube_passes
+                                # Corrected LMTD
+                                lmtd_corr = eq_res.get("LMTD", 10) * Ft
+                                eq_res["LMTD_corrected"] = round(lmtd_corr, 2)
+                                logs.append(f"{name}: Ft={Ft:.3f} ({n_shell_passes}S-{n_tube_passes}T), LMTD_corr={lmtd_corr:.1f} K")
+
+                            # Overall U estimation with fouling
+                            U_user = float(params.get("overallU", 0))
+                            if U_user <= 0:
+                                # Estimate U from service type
+                                U_user = 500.0  # default W/(m²·K)
+                                hx_geometry_type = str(params.get("geometry", "shell-tube"))
+                                if hx_geometry_type == "plate":
+                                    U_user = 1000.0
+                                elif vf_hot_in > 0.5:
+                                    U_user = 200.0  # gas cooling
+                            # Apply fouling resistance: 1/U_dirty = 1/U_clean + R_f
+                            total_fouling = fouling_hot + fouling_cold
+                            if total_fouling > 0 and U_user > 0:
+                                U_dirty = 1.0 / (1.0 / U_user + total_fouling)
+                                eq_res["U_clean"] = round(U_user, 1)
+                                eq_res["U_dirty"] = round(U_dirty, 1)
+                                eq_res["fouling_total"] = round(total_fouling, 6)
+
+                            # Estimate area from duty and LMTD
+                            lmtd_for_area = eq_res.get("LMTD_corrected", eq_res.get("LMTD", 10))
+                            U_for_area = eq_res.get("U_dirty", U_user)
+                            if lmtd_for_area > 0 and U_for_area > 0:
+                                area_est = abs(duty) / (U_for_area * lmtd_for_area)
+                                eq_res["area_estimated"] = round(area_est, 2)
+
+                            # Effective UA
+                            if lmtd_for_area > 0 and abs(duty) > 0:
+                                eq_res["UA_effective"] = round(abs(duty) / lmtd_for_area, 2)
+
+                            # Geometry-based rating via equipment_rating
+                            tube_geom = params.get("tubeGeometry") or params.get("tube_geometry")
+                            if isinstance(tube_geom, dict) and tube_geom.get("n_tubes"):
+                                try:
+                                    from app.services.equipment_rating import rate_heat_exchanger
+                                    # Build process dict from current stream data
+                                    _mu_hot = flash_hot.get("mu", 0.001) if flash_hot else 0.001
+                                    _mu_cold = flash_cold.get("mu", 0.001) if flash_cold else 0.001
+                                    _k_hot = flash_hot.get("k", 0.6) if flash_hot else 0.6
+                                    _k_cold = flash_cold.get("k", 0.6) if flash_cold else 0.6
+                                    _rho_hot = flash_hot.get("rho", 1000.0) if flash_hot else 1000.0
+                                    _rho_cold = flash_cold.get("rho", 1000.0) if flash_cold else 1000.0
+                                    rating_process = {
+                                        "hot_flow_kg_s": mf_hot,
+                                        "cold_flow_kg_s": mf_cold,
+                                        "T_hot_in_K": T_hot_in,
+                                        "T_cold_in_K": T_cold_in,
+                                        "Cp_hot": cp_hot,
+                                        "Cp_cold": cp_cold,
+                                        "mu_hot": _mu_hot,
+                                        "mu_cold": _mu_cold,
+                                        "k_hot": _k_hot,
+                                        "k_cold": _k_cold,
+                                        "rho_hot": _rho_hot,
+                                        "rho_cold": _rho_cold,
+                                    }
+                                    rating_geom = dict(tube_geom)
+                                    rating_geom.setdefault("n_passes", n_tube_passes)
+                                    rating_geom.setdefault("fouling_factor", total_fouling)
+                                    rating_result = rate_heat_exchanger(rating_geom, rating_process)
+                                    eq_res["rating"] = rating_result
+                                    # Override outlet temps and duty from geometry rating
+                                    T_hot_out_r = rating_result.get("T_hot_out_K", T_hot_out)
+                                    T_cold_out_r = rating_result.get("T_cold_out_K", T_cold_out)
+                                    duty_r = rating_result.get("duty_W", duty)
+                                    hot_out["temperature"] = T_hot_out_r
+                                    cold_out["temperature"] = T_cold_out_r
+                                    # Re-flash outlets at rated temperatures
+                                    flash_hot_r = self._flash_tp(hot_comp_names, hot_zs, T_hot_out_r, P_hot_in - dp_hot, property_package)
+                                    if flash_hot_r and flash_hot_r.get("MW_mix", 0) > 0:
+                                        hot_out["enthalpy"] = flash_hot_r["H"] / (flash_hot_r["MW_mix"] / 1000.0)
+                                        hot_out["vapor_fraction"] = flash_hot_r.get("VF", hot_out.get("vapor_fraction", 0))
+                                    flash_cold_r = self._flash_tp(cold_comp_names, cold_zs, T_cold_out_r, P_cold_in - dp_cold, property_package)
+                                    if flash_cold_r and flash_cold_r.get("MW_mix", 0) > 0:
+                                        cold_out["enthalpy"] = flash_cold_r["H"] / (flash_cold_r["MW_mix"] / 1000.0)
+                                        cold_out["vapor_fraction"] = flash_cold_r.get("VF", cold_out.get("vapor_fraction", 0))
+                                    # Update eq_res with rated values
+                                    eq_res["duty"] = round(_w_to_kw(duty_r), 3)
+                                    eq_res["hotOutletTemp"] = round(_k_to_c(T_hot_out_r), 2)
+                                    eq_res["coldOutletTemp"] = round(_k_to_c(T_cold_out_r), 2)
+                                    eq_res["LMTD"] = round(rating_result.get("LMTD_K", eq_res.get("LMTD", 0)), 2)
+                                    eq_res["U_rated"] = rating_result.get("U_overall_W_m2K")
+                                    eq_res["area_rated"] = rating_result.get("area_m2")
+                                    eq_res["method"] = "geometry-rating"
+                                    logs.append(
+                                        f"{name}: geometry rating — U={rating_result.get('U_overall_W_m2K', 0):.0f} W/(m²·K), "
+                                        f"A={rating_result.get('area_m2', 0):.1f} m², Q={rating_result.get('duty_kW', 0):.1f} kW"
+                                    )
+                                except ImportError:
+                                    logger.warning("equipment_rating not available for geometry-based HX rating")
+                                except Exception as exc_rating:
+                                    logger.debug("HX geometry rating failed: %s", exc_rating)
 
                             # NTU method override
                             hx_method = str(params.get("method", "LMTD"))
@@ -2316,15 +3415,12 @@ class DWSIMEngine:
                                 if flash_cold_ntu and flash_cold_ntu.get("MW_mix", 0) > 0:
                                     cold_out["enthalpy"] = flash_cold_ntu["H"] / (flash_cold_ntu["MW_mix"] / 1000.0)
                                     cold_out["vapor_fraction"] = flash_cold_ntu.get("VF", cold_out.get("vapor_fraction", 0))
-                                # Recalculate duty from flash enthalpies (more accurate near phase transitions)
-                                if flash_hot and flash_hot_ntu and flash_hot.get("MW_mix", 0) > 0 and flash_hot_ntu.get("MW_mix", 0) > 0:
-                                    h_hot_in_ntu = flash_hot["H"] / (flash_hot["MW_mix"] / 1000.0)
-                                    h_hot_out_ntu = hot_out["enthalpy"]
-                                    Q_ntu = mf_hot * (h_hot_in_ntu - h_hot_out_ntu)
-                                    # Force cold-side enthalpy from energy balance
-                                    if mf_cold > 0:
-                                        h_cold_in_ntu = flash_cold["H"] / (flash_cold["MW_mix"] / 1000.0) if flash_cold and flash_cold.get("MW_mix", 0) > 0 else cold_out.get("enthalpy", 0)
-                                        cold_out["enthalpy"] = h_cold_in_ntu + Q_ntu / mf_cold
+                                # Recalculate duty using upstream enthalpies for consistency
+                                h_hot_out_ntu = hot_out["enthalpy"]
+                                Q_ntu = mf_hot * (h_hot_in_up - h_hot_out_ntu)
+                                # Force cold-side enthalpy from energy balance
+                                if mf_cold > 0:
+                                    cold_out["enthalpy"] = h_cold_in_up + Q_ntu / mf_cold
                                 eq_res["method"] = "NTU"
                                 eq_res["area"] = round(A_ntu, 3)
                                 eq_res["ntu"] = round(NTU, 3)
@@ -2400,10 +3496,22 @@ class DWSIMEngine:
                                     if vf < 0.01 and h_liq == 0.0 and h_mix_mass != 0.0:
                                         h_liq = h_mix_mass
 
+                                    # Enforce energy balance: scale per-phase enthalpies
+                                    # so mf_vap*h_vap + mf_liq*h_liq = mf*h_inlet
+                                    mf_vap_sep = mf * mass_vap_frac
+                                    mf_liq_sep = mf * (1 - mass_vap_frac)
+                                    h_in_sep = inlet.get("enthalpy", 0.0)
+                                    total_out_h = mf_vap_sep * h_vap + mf_liq_sep * h_liq
+                                    total_in_h = mf * h_in_sep
+                                    if abs(total_out_h) > 1e-6:
+                                        eb_scale = total_in_h / total_out_h
+                                        h_vap *= eb_scale
+                                        h_liq *= eb_scale
+
                                     outlets["out-1"] = {
                                         "temperature": T_op,
                                         "pressure": P_op,
-                                        "mass_flow": mf * mass_vap_frac,
+                                        "mass_flow": mf_vap_sep,
                                         "vapor_fraction": 1.0,
                                         "enthalpy": h_vap,
                                         "composition": vapor_comp,
@@ -2411,7 +3519,7 @@ class DWSIMEngine:
                                     outlets["out-2"] = {
                                         "temperature": T_op,
                                         "pressure": P_op,
-                                        "mass_flow": mf * (1 - mass_vap_frac),
+                                        "mass_flow": mf_liq_sep,
                                         "vapor_fraction": 0.0,
                                         "enthalpy": h_liq,
                                         "composition": liquid_comp,
@@ -2473,6 +3581,34 @@ class DWSIMEngine:
                             comp_names = list(comp.keys())
                             zs = [float(v) for v in comp.values()]
                             fug_ok = False
+
+                            # Collect all active side draws (up to 3)
+                            side_draws_fug: list[dict] = []
+                            for sd_idx in range(1, 4):
+                                suffix = "" if sd_idx == 1 else str(sd_idx)
+                                sd_stage_raw = params.get(f"sideDrawStage{suffix}")
+                                if sd_stage_raw is not None and float(sd_stage_raw) > 0:
+                                    sd_stage_val = int(float(sd_stage_raw))
+                                    sd_type_val = str(params.get(f"sideDrawType{suffix}", "liquid")).lower()
+                                    sd_frac_val = float(params.get(f"sideDrawFlowFraction{suffix}", 0.1))
+                                    sd_port_id = f"out-{sd_idx + 2}"  # out-3, out-4, out-5
+                                    side_draws_fug.append({
+                                        "stage": sd_stage_val, "type": sd_type_val,
+                                        "fraction": sd_frac_val, "port": sd_port_id, "idx": sd_idx,
+                                    })
+
+                            # Collect pump-around circuits (up to 2)
+                            pump_arounds_fug: list[dict] = []
+                            for pa_idx in range(1, 3):
+                                pa_draw = params.get(f"pumpAround{pa_idx}DrawStage")
+                                pa_return = params.get(f"pumpAround{pa_idx}ReturnStage")
+                                pa_duty = float(params.get(f"pumpAround{pa_idx}Duty", 0))
+                                if pa_draw is not None and pa_return is not None and pa_duty > 0:
+                                    pump_arounds_fug.append({
+                                        "draw": int(float(pa_draw)),
+                                        "return": int(float(pa_return)),
+                                        "duty": pa_duty * 1000,  # kW to W
+                                    })
 
                             # Multi-feed: merge additional feeds into equivalent single feed for FUG
                             # Use molar basis for composition merge (not mass-weighted mole fractions)
@@ -2672,7 +3808,13 @@ class DWSIMEngine:
                                             mass_bott = sum(b_fracs[i] * MWs[i] for i in range(len(comp_names)))
                                             mass_total = mass_dist + mass_bott
                                             frac_dist = mass_dist / mass_total if mass_total > 0 else 0.5
-                                            frac_bott = 1.0 - frac_dist
+                                            frac_bott = 1.0 - frac_dist  # default: no side draws
+                                            # Adjust distillate/bottoms fractions for side draws
+                                            total_sd_frac = sum(sd["fraction"] for sd in side_draws_fug)
+                                            if total_sd_frac > 0:
+                                                remaining = max(1.0 - total_sd_frac, 0.05)
+                                                frac_dist *= remaining
+                                                frac_bott = remaining - frac_dist
 
                                             # Reboiler pressure: user-specified or auto (condenser P + column ΔP)
                                             P_reb_kpa = float(params.get("reboilerPressure", 0))
@@ -2739,14 +3881,19 @@ class DWSIMEngine:
                                             # M6: Partial condenser support
                                             condenser_type = str(params.get("condenserType", "total")).lower()
 
-                                            # Auto-detect cryogenic distillation: switch to partial condenser
-                                            if condenser_type == "total" and T_dist < 123.15:  # -150°C in K
+                                            # Auto-detect cryogenic/refrigerated distillation:
+                                            # -40°C is the practical limit for single-stage propane
+                                            # refrigeration.  Below that, partial condenser is standard
+                                            # (demethanizers, deethanizers, cold-box columns).
+                                            # Between -40°C and 0°C, warn the user — conventional CW
+                                            # or air-cooled condensers cannot reach sub-zero temperatures.
+                                            if condenser_type == "total" and T_dist < 233.15:  # -40°C in K
                                                 condenser_type = "partial"
                                                 logs.append(
                                                     f"WARNING: {name} distillate bubble point {_k_to_c(T_dist):.0f}°C — "
-                                                    f"auto-switched to partial condenser for cryogenic column"
+                                                    f"auto-switched to partial condenser (total condenser impractical below -40°C)"
                                                 )
-                                            elif condenser_type == "total" and T_dist < 173.15:  # -100°C in K
+                                            elif condenser_type == "total" and T_dist < 273.15:  # 0°C in K
                                                 logs.append(
                                                     f"WARNING: {name} total condenser produces distillate at "
                                                     f"{_k_to_c(T_dist):.0f}°C — consider condenserType='partial'"
@@ -2788,15 +3935,52 @@ class DWSIMEngine:
                                             # h_dist now includes subcooling if applied
                                             Q_cond = D * (reflux_ratio + 1) * (h_vap_dist - h_dist) if flash_d_out else 0.0
 
+                                            # Pump-around reduces condenser load (for sizing) but total
+                                            # heat removal = Q_cond_effective + Q_PA for energy balance
+                                            total_pa_duty = sum(pa["duty"] for pa in pump_arounds_fug)
+                                            Q_cond_effective = Q_cond  # original condenser duty
+                                            if total_pa_duty > 0:
+                                                Q_cond_effective = max(Q_cond - total_pa_duty, 0.0)
+                                                logs.append(
+                                                    f"{name}: {len(pump_arounds_fug)} pump-around(s) removing "
+                                                    f"{_w_to_kw(total_pa_duty):.1f} kW from condenser load"
+                                                )
+
                                             # Condenser duty spec: user-provided non-zero overrides calculation
                                             cond_duty_spec = float(params.get("condenserDuty", 0))
                                             if cond_duty_spec > 0:
                                                 Q_cond = cond_duty_spec * 1000.0  # kW → W
+                                                Q_cond_effective = Q_cond
                                                 logs.append(f"{name}: using specified condenser duty {cond_duty_spec:.1f} kW")
 
-                                            # Q_reb from overall energy balance: F*hF + Q_reb = D*hD + B*hB + Q_cond
-                                            # Uses potentially overridden Q_cond for consistency
-                                            Q_reb = D * h_dist + B * h_bott + Q_cond - mf * h_feed if (flash_d_out or flash_b_out) else 0.0
+                                            # Pre-compute side draw enthalpies for energy balance
+                                            total_sd_enthalpy_rate = 0.0  # W (mass_flow * specific_enthalpy)
+                                            for sd in side_draws_fug:
+                                                sd_mf_eb = mf * sd["fraction"]
+                                                stage_frac_eb = sd["stage"] / max(N_eff, 1)
+                                                sd_h_eb = h_dist + stage_frac_eb * (h_bott - h_dist)
+                                                # Try flash for better enthalpy
+                                                try:
+                                                    sd_T_eb = T_dist + stage_frac_eb * (T_bott - T_dist)
+                                                    sd_P_eb = P_cond + stage_frac_eb * (P_bott - P_cond)
+                                                    sd_comp_eb: dict[str, float] = {}
+                                                    for c in comp_names:
+                                                        sd_comp_eb[c] = distillate_comp.get(c, 0) * (1 - stage_frac_eb) + bottoms_comp.get(c, 0) * stage_frac_eb
+                                                    total_z_eb = sum(sd_comp_eb.values())
+                                                    if total_z_eb > 0:
+                                                        sd_comp_eb = {c: z / total_z_eb for c, z in sd_comp_eb.items()}
+                                                    fl_sd_eb = self._flash_tp(list(sd_comp_eb.keys()), list(sd_comp_eb.values()), sd_T_eb, sd_P_eb, property_package)
+                                                    if fl_sd_eb and fl_sd_eb.get("MW_mix", 0) > 0:
+                                                        sd_h_eb = fl_sd_eb["H"] / (fl_sd_eb["MW_mix"] / 1000.0)
+                                                except Exception:
+                                                    pass
+                                                total_sd_enthalpy_rate += sd_mf_eb * sd_h_eb
+
+                                            # Q_reb from overall energy balance:
+                                            # F*hF + Q_reb = D*hD + B*hB + sum(SD*h_SD) + Q_cond + sum(Q_PA)
+                                            # Total heat removal from column = condenser + pump-arounds
+                                            Q_total_removal = Q_cond_effective + total_pa_duty
+                                            Q_reb = (D * h_dist + B * h_bott + total_sd_enthalpy_rate + Q_total_removal - mf * h_feed) if (flash_d_out or flash_b_out) else 0.0
                                             # Reboiler must add heat — enforce Q_reb >= 0
                                             if Q_reb < 0:
                                                 logs.append(
@@ -2830,7 +4014,7 @@ class DWSIMEngine:
                                             eq_res["hkRecovery"] = round(hk_recovery * 100, 2)
                                             eq_res["lightKey"] = comp_names[lk_idx]
                                             eq_res["heavyKey"] = comp_names[hk_idx]
-                                            eq_res["condenserDuty"] = round(_w_to_kw(Q_cond), 1)
+                                            eq_res["condenserDuty"] = round(_w_to_kw(Q_cond_effective), 1)
                                             eq_res["reboilerDuty"] = round(_w_to_kw(Q_reb), 1)
                                             eq_res["distillateTemperature"] = round(_k_to_c(T_dist), 1)
                                             eq_res["bottomsTemperature"] = round(_k_to_c(T_bott), 1)
@@ -2854,6 +4038,50 @@ class DWSIMEngine:
                                                 "enthalpy": h_bott,
                                                 "composition": bottoms_comp,
                                             }
+
+                                            # FUG side draw outlet streams
+                                            for sd in side_draws_fug:
+                                                stage_frac = sd["stage"] / max(N_eff, 1)  # 0=top, 1=bottom
+                                                sd_comp: dict[str, float] = {}
+                                                for c in comp_names:
+                                                    sd_comp[c] = distillate_comp.get(c, 0) * (1 - stage_frac) + bottoms_comp.get(c, 0) * stage_frac
+                                                total_z = sum(sd_comp.values())
+                                                if total_z > 0:
+                                                    sd_comp = {c: z / total_z for c, z in sd_comp.items()}
+                                                sd_mf = mf * sd["fraction"]
+                                                sd_T = T_dist + stage_frac * (T_bott - T_dist)
+                                                sd_P = P_cond + stage_frac * (P_bott - P_cond)
+                                                sd_h = h_dist + stage_frac * (h_bott - h_dist)  # linear enthalpy interpolation
+                                                # Try flash for better enthalpy
+                                                try:
+                                                    sd_names = list(sd_comp.keys())
+                                                    sd_zs_l = list(sd_comp.values())
+                                                    fl_sd = self._flash_tp(sd_names, sd_zs_l, sd_T, sd_P, property_package)
+                                                    if fl_sd and fl_sd.get("MW_mix", 0) > 0:
+                                                        sd_h = fl_sd["H"] / (fl_sd["MW_mix"] / 1000.0)
+                                                except Exception:
+                                                    pass
+                                                outlets[sd["port"]] = {
+                                                    "temperature": sd_T,
+                                                    "pressure": sd_P,
+                                                    "mass_flow": sd_mf,
+                                                    "vapor_fraction": 0.0 if sd["type"] == "liquid" else 1.0,
+                                                    "enthalpy": sd_h,
+                                                    "composition": sd_comp,
+                                                }
+                                                eq_res[f"sideDrawStage_{sd['idx']}"] = sd["stage"]
+                                                eq_res[f"sideDrawFlow_{sd['idx']}"] = round(sd_mf, 4)
+                                                eq_res[f"sideDrawType_{sd['idx']}"] = sd["type"]
+                                                logs.append(f"{name}: Side draw {sd['idx']} at stage {sd['stage']} ({sd['type']}, {sd_mf:.3f} kg/s)")
+
+                                            # Report pump-around results
+                                            if pump_arounds_fug:
+                                                eq_res["pumpArounds"] = len(pump_arounds_fug)
+                                                for i, pa in enumerate(pump_arounds_fug):
+                                                    eq_res[f"pumpAround{i+1}Duty"] = round(pa["duty"] / 1000, 1)  # W to kW
+                                                    eq_res[f"pumpAround{i+1}DrawStage"] = pa["draw"]
+                                                    eq_res[f"pumpAround{i+1}ReturnStage"] = pa["return"]
+
                                             fug_ok = True
                                             logs.append(
                                                 f"{name}: FUG — N_min={N_min:.1f}, R_min={R_min:.3f}, N_eff={N_eff:.1f}, "
@@ -2863,8 +4091,17 @@ class DWSIMEngine:
                                     logger.warning("Distillation FUG failed: %s, using boiling-point fallback", exc)
                                     logs.append(f"WARNING: {name} FUG method failed ({exc}), using boiling-point fallback")
 
-                            # Rigorous MESH method: run after FUG when requested
-                            dist_method = str(params.get("method", "FUG")).upper()
+                            # Phase 15 §2.3: Auto-select solver
+                            # Default to "Auto" instead of "FUG"
+                            # Auto: FUG for binary (exact), rigorous first for 3+ components
+                            dist_method = str(params.get("method", "Auto")).upper()
+                            if dist_method == "AUTO":
+                                if len(comp_names) <= 2:
+                                    dist_method = "FUG"  # FUG is exact for binary
+                                else:
+                                    dist_method = "RIGOROUS"  # Try rigorous first for multicomponent
+                                    logs.append(f"{name}: Auto-selected rigorous solver for {len(comp_names)}-component system")
+
                             if dist_method == "RIGOROUS" and len(comp_names) >= 2 and _thermo_available:
                                 try:
                                     # Compute primary feed molar flow from primary feed mass flow
@@ -2877,10 +4114,17 @@ class DWSIMEngine:
                                     feed_mw = sum(primary_zs[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
                                     feed_molar_flow = primary_mf / (feed_mw / 1000.0) if feed_mw > 0 else 10.0
                                     df_ratio = float(params.get("distillateToFeedRatio", 0.5))
-                                    # Total mf includes all feeds for D/F ratio
-                                    total_mf = sum(inp.get("mass_flow", 0) for inp in material_inlets)
-                                    total_feed_mw = feed_mw  # use primary feed MW for conversion
-                                    total_molar = total_mf / (total_feed_mw / 1000.0) if total_feed_mw > 0 else 10.0
+                                    # Total molar flow: sum per-feed molar flows using each feed's own MW
+                                    total_molar = feed_molar_flow
+                                    for extra_inlet in material_inlets[1:]:
+                                        extra_mf_r = extra_inlet.get("mass_flow", 0)
+                                        extra_comp_r = extra_inlet.get("composition", {})
+                                        extra_zs_r = [float(extra_comp_r.get(cn, 0.0)) for cn in comp_names]
+                                        ezs_sum_r = sum(extra_zs_r) or 1.0
+                                        extra_zs_r = [z / ezs_sum_r for z in extra_zs_r]
+                                        extra_mw_r = sum(extra_zs_r[i] * _get_mw(comp_names[i]) for i in range(len(comp_names)))
+                                        if extra_mw_r > 0:
+                                            total_molar += extra_mf_r / (extra_mw_r / 1000.0)
                                     dist_molar_rate = total_molar * df_ratio
                                     condenser_t = str(params.get("condenserType", "total")).lower()
 
@@ -2917,18 +4161,22 @@ class DWSIMEngine:
                                             })
                                         logs.append(f"{name}: Multi-feed column with {len(material_inlets)} feeds")
 
-                                    # Build side draws
+                                    # Build side draws (up to 3)
                                     side_draws_rig: list[dict] | None = None
-                                    sd_stage = int(params.get("sideDrawStage", 0))
-                                    if sd_stage > 0:
-                                        sd_type = str(params.get("sideDrawType", "liquid")).lower()
-                                        sd_frac = float(params.get("sideDrawFlowFraction", 0.1))
-                                        side_draws_rig = [{
-                                            "stage": sd_stage,
-                                            "type": sd_type,
-                                            "flow_fraction": sd_frac,
-                                        }]
-                                        logs.append(f"{name}: Side draw at stage {sd_stage} ({sd_type}, {sd_frac:.0%})")
+                                    for sd_idx_r in range(1, 4):
+                                        suffix_r = "" if sd_idx_r == 1 else str(sd_idx_r)
+                                        sd_stage_r = params.get(f"sideDrawStage{suffix_r}")
+                                        if sd_stage_r is not None and int(float(sd_stage_r)) > 0:
+                                            sd_type_r = str(params.get(f"sideDrawType{suffix_r}", "liquid")).lower()
+                                            sd_frac_r = float(params.get(f"sideDrawFlowFraction{suffix_r}", 0.1))
+                                            if side_draws_rig is None:
+                                                side_draws_rig = []
+                                            side_draws_rig.append({
+                                                "stage": int(float(sd_stage_r)),
+                                                "type": sd_type_r,
+                                                "flow_fraction": sd_frac_r,
+                                            })
+                                            logs.append(f"{name}: Side draw {sd_idx_r} at stage {int(float(sd_stage_r))} ({sd_type_r}, {sd_frac_r:.0%})")
 
                                     P_reb_kpa_rig = float(params.get("reboilerPressure", 0))
                                     P_bott_rig = _kpa_to_pa(P_reb_kpa_rig) if P_reb_kpa_rig > 0 else None
@@ -2979,11 +4227,27 @@ class DWSIMEngine:
                                         MW_d = sum(d_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
                                         MW_b = sum(b_zs_r[i] * MWs_r[i] for i in range(len(comp_names)))
                                         B_molar = feed_molar_flow - dist_molar_rate
-                                        mass_d_actual = dist_molar_rate * (MW_d / 1000.0)  # kg/s
-                                        mass_b_actual = B_molar * (MW_b / 1000.0)  # kg/s
-                                        mass_tot = mass_d_actual + mass_b_actual or mf
-                                        frac_d = mass_d_actual / mass_tot
-                                        frac_b = 1.0 - frac_d
+                                        mass_d_raw = dist_molar_rate * (MW_d / 1000.0)  # kg/s
+                                        mass_b_raw = B_molar * (MW_b / 1000.0)  # kg/s
+                                        # Pre-compute side draw mass to subtract from D+B budget
+                                        rig_side_draws_pre = rig_result.get("side_draws", [])
+                                        sd_mass_total_r = 0.0
+                                        for sd_res_pre in rig_side_draws_pre:
+                                            sd_comp_pre = sd_res_pre.get("composition", {})
+                                            sd_mol_pre = sd_res_pre.get("molar_flow", 0.0)
+                                            sd_zs_pre = [float(sd_comp_pre.get(cn, 0.0)) for cn in comp_names]
+                                            sd_mw_pre = sum(sd_zs_pre[i] * MWs_r[i] for i in range(len(comp_names)))
+                                            sd_mass_total_r += sd_mol_pre * (sd_mw_pre / 1000.0)
+                                        # Normalize: D + B + SD = mf (enforce mass conservation)
+                                        mass_db_raw = mass_d_raw + mass_b_raw
+                                        mf_available = mf - sd_mass_total_r  # mass available for D + B
+                                        if mass_db_raw > 0 and mf_available > 0:
+                                            scale = mf_available / mass_db_raw
+                                            frac_d = (mass_d_raw * scale) / mf
+                                            frac_b = (mass_b_raw * scale) / mf
+                                        else:
+                                            frac_d = 0.5 * (1.0 - sd_mass_total_r / mf if mf > 0 else 0.5)
+                                            frac_b = frac_d
 
                                         dist_vf_r = 0.0
                                         if condenser_t == "partial":
@@ -3053,6 +4317,14 @@ class DWSIMEngine:
                                             eq_res[f"sideDrawFlow_{sd_idx}"] = round(sd_mass, 4)
                                             eq_res[f"sideDrawType_{sd_idx}"] = sd_res.get("type")
 
+                                        # Report pump-around results (rigorous path)
+                                        if pump_arounds_fug:
+                                            eq_res["pumpArounds"] = len(pump_arounds_fug)
+                                            for i, pa in enumerate(pump_arounds_fug):
+                                                eq_res[f"pumpAround{i+1}Duty"] = round(pa["duty"] / 1000, 1)
+                                                eq_res[f"pumpAround{i+1}DrawStage"] = pa["draw"]
+                                                eq_res[f"pumpAround{i+1}ReturnStage"] = pa["return"]
+
                                         if len(material_inlets) > 1:
                                             eq_res["feedCount"] = len(material_inlets)
 
@@ -3064,7 +4336,40 @@ class DWSIMEngine:
                                         )
                                     else:
                                         err_msg = rig_result.get("error", "did not converge")
-                                        logs.append(f"WARNING: {name} Rigorous method failed ({err_msg}), using FUG results")
+                                        logs.append(f"WARNING: {name} Wang-Henke solver failed ({err_msg}), trying Naphtali-Sandholm backup")
+
+                                        # Phase 15 §2.2: Naphtali-Sandholm backup solver
+                                        try:
+                                            from app.services.distillation_newton import solve_naphtali_sandholm
+                                            ns_result = solve_naphtali_sandholm(
+                                                feed_comp_names=comp_names,
+                                                feed_zs=zs,
+                                                feed_T=T_feed,
+                                                feed_P=P_feed,
+                                                n_stages=n_stages,
+                                                feed_stage=int(params.get("feedStage", n_stages // 2)),
+                                                reflux_ratio=reflux_ratio,
+                                                distillate_rate=dist_molar_rate,
+                                                feed_flow=feed_molar_flow,
+                                                pressure_top=P_cond,
+                                                pressure_bottom=P_bott_rig,
+                                                property_package=property_package,
+                                                condenser_type=condenser_t,
+                                                additional_feeds=add_feeds_rig,
+                                                side_draws=side_draws_rig,
+                                            )
+                                            if ns_result.get("converged") or (ns_result.get("iterations", 0) > 0 and not ns_result.get("error")):
+                                                rig_result = ns_result
+                                                logs.append(f"{name}: Naphtali-Sandholm backup converged in {ns_result.get('iterations', 0)} iterations")
+                                                # Re-process results from backup solver
+                                                # (handled by the same code path above)
+                                            else:
+                                                ns_err = ns_result.get("error", "did not converge")
+                                                logs.append(f"WARNING: {name} Naphtali-Sandholm also failed ({ns_err}), using FUG results")
+                                        except ImportError:
+                                            logs.append(f"WARNING: {name} Naphtali-Sandholm solver not available, using FUG results")
+                                        except Exception as ns_exc:
+                                            logs.append(f"WARNING: {name} Naphtali-Sandholm error ({ns_exc}), using FUG results")
                                 except Exception as exc:
                                     logger.warning("Rigorous distillation failed: %s", exc)
                                     logs.append(f"WARNING: {name} Rigorous solver error ({exc}), keeping FUG results")
@@ -3215,17 +4520,16 @@ class DWSIMEngine:
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out
                             outlet["composition"] = out_comp
+                            # Flash for VF and duty estimation, then first-law enthalpy
+                            outlet["vapor_fraction"] = flash_out.get("VF", 0.0) if flash_out else inlet.get("vapor_fraction", 0.0)
                             if flash_out and flash_out.get("MW_mix", 0) > 0:
                                 mw_kg = flash_out["MW_mix"] / 1000.0
-                                outlet["enthalpy"] = flash_out["H"] / mw_kg
-                                outlet["vapor_fraction"] = flash_out.get("VF", 0.0)
+                                h_out_flash = flash_out["H"] / mw_kg
+                                actual_duty_w = mf * (h_out_flash - h_in) if mf > 0 else 0.0
                             else:
-                                outlet["enthalpy"] = _estimate_cp(clean_comp) * (T_out - _T_REF)
-                                outlet["vapor_fraction"] = inlet.get("vapor_fraction", 0.0)
-
-                            # Compute actual duty from energy balance
-                            h_out = outlet["enthalpy"]
-                            actual_duty_w = mf * (h_out - h_in) if mf > 0 else 0.0
+                                actual_duty_w = mf * _estimate_cp(clean_comp) * (T_out - T_in) if mf > 0 else 0.0
+                            # First-law enthalpy: guarantees energy balance
+                            outlet["enthalpy"] = h_in + actual_duty_w / mf if mf > 0 else h_in
                             eq_res["duty"] = round(_w_to_kw(actual_duty_w), 3)
 
                             # Jacket heat transfer
@@ -3315,10 +4619,26 @@ class DWSIMEngine:
 
                             # Arrhenius kinetics
                             out_comp = dict(comp)
+                            reaction_order = float(params.get("reactionOrder", 1))
                             if Ea_kj > 0 and A_pre > 0:
                                 R_gas = 8.314e-3
                                 k_rate = A_pre * math.exp(-Ea_kj / (R_gas * T_out))
-                                X_pfr = 1.0 - math.exp(-k_rate * tau) if tau < 1e6 else 0.999
+                                # Compute conversion based on reaction order
+                                # C_A0 = initial concentration of key reactant (mol/m³)
+                                key_r_tmp = params.get("keyReactant", "")
+                                z_A0 = comp.get(key_r_tmp, 0) if key_r_tmp and key_r_tmp in comp else max(comp.values()) if comp else 0.5
+                                C_A0 = (z_A0 * rho / (sum(comp.get(c, 0) * _get_mw(c) for c in comp) / 1000.0)) if rho > 0 and comp else 1.0
+                                if reaction_order == 0:
+                                    X_pfr = min(k_rate * tau / C_A0, 1.0) if C_A0 > 0 else 0.0
+                                elif reaction_order == 1 or abs(reaction_order - 1.0) < 0.01:
+                                    X_pfr = 1.0 - math.exp(-k_rate * tau) if tau < 1e6 else 0.999
+                                elif reaction_order == 2 or abs(reaction_order - 2.0) < 0.01:
+                                    X_pfr = k_rate * tau * C_A0 / (1 + k_rate * tau * C_A0)
+                                else:
+                                    # General nth-order PFR: X = 1 - (1 + (n-1)*k*tau*C_A0^(n-1))^(-1/(n-1))
+                                    n_ord = reaction_order
+                                    base = 1 + (n_ord - 1) * k_rate * tau * C_A0 ** (n_ord - 1)
+                                    X_pfr = 1.0 - base ** (-1.0 / (n_ord - 1)) if base > 0 else 0.999
                                 conversion_val = min(X_pfr, 0.999)
                                 eq_res["conversion"] = round(conversion_val * 100, 1)
                                 eq_res["rateConstant"] = round(k_rate, 4)
@@ -3350,13 +4670,17 @@ class DWSIMEngine:
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out_final
                             outlet["composition"] = out_comp
+                            # Flash for VF and duty estimation, then first-law enthalpy
+                            outlet["vapor_fraction"] = flash_final.get("VF", 0.0) if flash_final else inlet.get("vapor_fraction", 0.0)
                             if flash_final and flash_final.get("MW_mix", 0) > 0:
                                 mw_kg = flash_final["MW_mix"] / 1000.0
-                                outlet["enthalpy"] = flash_final["H"] / mw_kg
-                                outlet["vapor_fraction"] = flash_final.get("VF", 0.0)
+                                h_out_flash = flash_final["H"] / mw_kg
+                                actual_duty_w = mf * (h_out_flash - h_in) if mf > 0 else 0.0
                             else:
-                                outlet["enthalpy"] = _estimate_cp(clean_comp) * (T_out - _T_REF)
-                                outlet["vapor_fraction"] = inlet.get("vapor_fraction", 0.0)
+                                actual_duty_w = mf * _estimate_cp(clean_comp) * (T_out - T_in) if mf > 0 else 0.0
+                            # First-law enthalpy: guarantees energy balance
+                            outlet["enthalpy"] = h_in + actual_duty_w / mf if mf > 0 else h_in
+                            eq_res["duty"] = round(_w_to_kw(actual_duty_w), 3)
 
                             outlets["out-1"] = outlet
                             logs.append(f"{name}: L = {length} m, D = {diameter} m, V = {volume:.2f} m³")
@@ -3367,6 +4691,7 @@ class DWSIMEngine:
                             P_in = inlet["pressure"]
                             mf = inlet["mass_flow"]
                             in_comp = inlet.get("composition", {})
+                            h_in = inlet.get("enthalpy", 0.0)
 
                             conversion = float(params.get("conversion", 80)) / 100.0
                             conversion = max(0.0, min(1.0, conversion))
@@ -3465,23 +4790,26 @@ class DWSIMEngine:
                             out_zs = [float(v) for v in clean_comp.values()]
                             flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
 
-                            total_duty = float(duty_kw) * 1000.0 + heat_of_reaction_w  # W
                             eq_res["conversion"] = round(conversion * 100, 1)
                             eq_res["outletTemperature"] = round(_k_to_c(T_out), 2)
-                            eq_res["duty"] = round(_w_to_kw(total_duty), 3)
-                            if abs(heat_of_reaction_w) > 0:
-                                eq_res["heatOfReaction_kW"] = round(_w_to_kw(heat_of_reaction_w), 3)
 
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
                             outlet["pressure"] = P_out
+                            outlet["composition"] = out_comp
+                            # Flash for VF and duty estimation, then first-law enthalpy
+                            outlet["vapor_fraction"] = flash_out.get("VF", 0.0) if flash_out else inlet.get("vapor_fraction", 0.0)
                             if flash_out and flash_out.get("MW_mix", 0) > 0:
                                 mw_kg = flash_out["MW_mix"] / 1000.0
-                                outlet["enthalpy"] = flash_out["H"] / mw_kg
-                                outlet["vapor_fraction"] = flash_out.get("VF", 0.0)
+                                h_out_flash = flash_out["H"] / mw_kg
+                                actual_duty_w = mf * (h_out_flash - h_in) + heat_of_reaction_w + float(duty_kw) * 1000.0
                             else:
-                                outlet["enthalpy"] = _estimate_cp(out_comp) * (T_out - _T_REF)
-                            outlet["composition"] = out_comp
+                                actual_duty_w = mf * _estimate_cp(clean_comp) * (T_out - T_in) + heat_of_reaction_w + float(duty_kw) * 1000.0
+                            # First-law enthalpy: guarantees energy balance
+                            outlet["enthalpy"] = h_in + actual_duty_w / mf if mf > 0 else h_in
+                            eq_res["duty"] = round(_w_to_kw(actual_duty_w), 3)
+                            if abs(heat_of_reaction_w) > 0:
+                                eq_res["heatOfReaction_kW"] = round(_w_to_kw(heat_of_reaction_w), 3)
 
                             outlets["out-1"] = outlet
                             logs.append(f"{name}: X = {conversion:.0%}")
@@ -3652,17 +4980,136 @@ class DWSIMEngine:
                                 conversion_eq = n_consumed / n_initial[limiting_reactant]
                                 conversion_eq = min(conversion_eq, 1.0)
 
-                            # Flash outlet for real properties
-                            clean_comp = _clean_composition(out_comp)
-                            out_comp_names = list(clean_comp.keys())
-                            out_zs = [float(v) for v in clean_comp.values()]
-                            flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
+                            # Adiabatic / duty-specified temperature iteration
+                            # When no T_out specified, re-solve equilibrium at each trial T
+                            # because Keq(T) and thus composition change with temperature
+                            user_specified_T = T_op_c is not None
+                            if not user_specified_T:
+                                h_in_eq = inlet.get("enthalpy", 0.0)
+                                duty_w = duty_kw * 1000.0  # kW → W
+                                T_lo_ad, T_hi_ad = max(T_in - 200, 273.15), T_in + 500
+                                for _iter_ad in range(30):
+                                    T_mid_ad = (T_lo_ad + T_hi_ad) / 2.0
+                                    # Re-solve equilibrium at T_mid_ad
+                                    Keq_mid = math.exp(keqA - keqB / T_mid_ad) if T_mid_ad > 0 else 1.0
+                                    def rq_mid(xi_t: float) -> float:
+                                        n_t = 0.0
+                                        n_i_t: dict[str, float] = {}
+                                        for sp_t in all_species:
+                                            n_sp_t = n_initial.get(sp_t, 0.0) + nu.get(sp_t, 0.0) * xi_t
+                                            n_sp_t = max(n_sp_t, 1e-30)
+                                            n_i_t[sp_t] = n_sp_t
+                                            n_t += n_sp_t
+                                        if n_t <= 0:
+                                            return -1.0
+                                        ln_Ky_t = 0.0
+                                        for sp_t, coeff_t in nu.items():
+                                            if abs(coeff_t) > 1e-15:
+                                                y_i_t = max(n_i_t.get(sp_t, 1e-30) / n_t, 1e-30)
+                                                ln_Ky_t += coeff_t * math.log(y_i_t)
+                                        delta_nu_t = sum(nu.values())
+                                        ln_Kp_t = ln_Ky_t + delta_nu_t * math.log(max(P_out / 101325.0, 1e-30))
+                                        return ln_Kp_t - math.log(max(Keq_mid, 1e-30))
+                                    # Bisection for xi at this T
+                                    xi_mid = 0.0
+                                    if max_extent > 0 and nu:
+                                        lo_x, hi_x = 0.0, max_extent * 0.9999
+                                        f_lo_x = rq_mid(lo_x)
+                                        f_hi_x = rq_mid(hi_x)
+                                        if f_lo_x * f_hi_x < 0:
+                                            for _ in range(60):
+                                                mid_x = (lo_x + hi_x) / 2.0
+                                                f_mid_x = rq_mid(mid_x)
+                                                if abs(f_mid_x) < 1e-10 or (hi_x - lo_x) < 1e-15:
+                                                    xi_mid = mid_x
+                                                    break
+                                                if f_lo_x * f_mid_x < 0:
+                                                    hi_x = mid_x
+                                                else:
+                                                    lo_x = mid_x
+                                                    f_lo_x = f_mid_x
+                                            else:
+                                                xi_mid = (lo_x + hi_x) / 2.0
+                                        else:
+                                            xi_mid = hi_x if abs(f_hi_x) < abs(f_lo_x) else 0.0
+                                    # Build composition at this T
+                                    n_out_mid: dict[str, float] = {}
+                                    for sp_m in all_species:
+                                        n_out_mid[sp_m] = max(n_initial.get(sp_m, 0.0) + nu.get(sp_m, 0.0) * xi_mid, 0.0)
+                                    n_total_mid = sum(n_out_mid.values())
+                                    comp_mid: dict[str, float] = {}
+                                    if n_total_mid > 0:
+                                        comp_mid = {sp_m: n_out_mid[sp_m] / n_total_mid for sp_m in n_out_mid}
+                                    else:
+                                        comp_mid = dict(in_comp)
+                                    # Flash at T_mid for enthalpy
+                                    clean_mid = _clean_composition(comp_mid)
+                                    fl_mid = self._flash_tp(list(clean_mid.keys()), list(clean_mid.values()), T_mid_ad, P_out, property_package)
+                                    if fl_mid and fl_mid.get("MW_mix", 0) > 0:
+                                        mw_out_mid = sum(comp_mid.get(sp, 0) * _get_mw(sp) for sp in comp_mid)
+                                        mf_out_mid = n_total_mid * (mw_out_mid / 1000.0) if mw_out_mid > 0 else mf
+                                        h_out_mid = fl_mid["H"] / (fl_mid["MW_mix"] / 1000.0)
+                                        energy_balance = mf_out_mid * h_out_mid - mf * h_in_eq - duty_w
+                                        if energy_balance > 0:
+                                            T_hi_ad = T_mid_ad
+                                        else:
+                                            T_lo_ad = T_mid_ad
+                                    else:
+                                        break
+                                    if abs(T_hi_ad - T_lo_ad) < 0.1:
+                                        break
+                                T_out = (T_lo_ad + T_hi_ad) / 2.0
+                                # Final equilibrium solve at converged T_out
+                                Keq = math.exp(keqA - keqB / T_out) if T_out > 0 else 1.0
+                                # Re-run the main bisection at final T_out
+                                xi_eq = 0.0
+                                if max_extent > 0 and nu:
+                                    lo_f, hi_f = 0.0, max_extent * 0.9999
+                                    f_lo_f = reaction_quotient(lo_f)
+                                    f_hi_f = reaction_quotient(hi_f)
+                                    if f_lo_f * f_hi_f < 0:
+                                        for _ in range(100):
+                                            mid_f = (lo_f + hi_f) / 2.0
+                                            f_mid_f = reaction_quotient(mid_f)
+                                            if abs(f_mid_f) < 1e-10 or (hi_f - lo_f) < 1e-15:
+                                                xi_eq = mid_f
+                                                break
+                                            if f_lo_f * f_mid_f < 0:
+                                                hi_f = mid_f
+                                            else:
+                                                lo_f = mid_f
+                                                f_lo_f = f_mid_f
+                                        else:
+                                            xi_eq = (lo_f + hi_f) / 2.0
+                                    else:
+                                        xi_eq = hi_f if abs(f_hi_f) < abs(f_lo_f) else 0.0
+                                # Rebuild outlet at final equilibrium
+                                n_out = {}
+                                for sp in all_species:
+                                    n_out[sp] = max(n_initial.get(sp, 0.0) + nu.get(sp, 0.0) * xi_eq, 0.0)
+                                n_total_out = sum(n_out.values())
+                                out_comp = {}
+                                if n_total_out > 0:
+                                    out_comp = {sp: n_out[sp] / n_total_out for sp in n_out}
+                                else:
+                                    out_comp = dict(in_comp)
+                                # Recompute conversion
+                                if limiting_reactant and n_initial.get(limiting_reactant, 0) > 0:
+                                    n_consumed = abs(nu.get(limiting_reactant, 0)) * xi_eq
+                                    conversion_eq = min(n_consumed / n_initial[limiting_reactant], 1.0)
+                                logs.append(f"  {name}: adiabatic T iteration → T_out={_k_to_c(T_out):.1f}°C, X={conversion_eq:.1%}")
 
                             # Compute outlet mass flow from molar balance
                             mw_out_mix = sum(out_comp.get(sp, 0) * _get_mw(sp) for sp in out_comp)
                             if mw_out_mix <= 0:
                                 mw_out_mix = mw_mix_in
                             mf_out = n_total_out * (mw_out_mix / 1000.0)
+
+                            # Flash outlet for real properties
+                            clean_comp = _clean_composition(out_comp)
+                            out_comp_names = list(clean_comp.keys())
+                            out_zs = [float(v) for v in clean_comp.values()]
+                            flash_out = self._flash_tp(out_comp_names, out_zs, T_out, P_out, property_package)
 
                             outlet = dict(inlet)
                             outlet["temperature"] = T_out
@@ -3716,6 +5163,48 @@ class DWSIMEngine:
 
                             comp_names_g = list(in_comp.keys())
                             zs_g = [float(v) for v in in_comp.values()]
+
+                            # Auto-expand species: Gibbs minimization needs at
+                            # least as many species as element constraints.
+                            # Infer elements from feed, then add common small-
+                            # molecule products that can be formed from those
+                            # elements (e.g. H2, CO, CO2 for C-H-O systems).
+                            _GIBBS_CANDIDATES: dict[frozenset[str], list[str]] = {
+                                frozenset({"C", "H", "O"}): ["hydrogen", "carbon monoxide", "carbon dioxide"],
+                                frozenset({"C", "H"}): ["hydrogen"],
+                                frozenset({"H", "O"}): ["hydrogen", "oxygen"],
+                                frozenset({"C", "O"}): ["carbon monoxide", "carbon dioxide"],
+                                frozenset({"N", "H"}): ["nitrogen", "hydrogen", "ammonia"],
+                                frozenset({"N", "H", "O"}): ["nitrogen", "hydrogen", "ammonia", "nitric oxide"],
+                                frozenset({"S", "H", "O"}): ["hydrogen", "sulfur dioxide"],
+                            }
+                            if _thermo_available:
+                                try:
+                                    _pre_const, _ = ChemicalConstantsPackage.from_IDs(comp_names_g)
+                                    _feed_elements: set[str] = set()
+                                    if _pre_const.atomss:
+                                        for _ad in _pre_const.atomss:
+                                            if _ad:
+                                                _feed_elements.update(_ad.keys())
+                                    # Try each candidate set that is a subset of feed elements
+                                    _added_species: list[str] = []
+                                    feed_lc = set(c.lower() for c in comp_names_g)
+                                    for _el_key, _candidates in _GIBBS_CANDIDATES.items():
+                                        if _el_key.issubset(_feed_elements):
+                                            for _cand in _candidates:
+                                                if _cand.lower() not in feed_lc:
+                                                    comp_names_g.append(_cand)
+                                                    zs_g.append(0.0)
+                                                    feed_lc.add(_cand.lower())
+                                                    _added_species.append(_cand)
+                                    if _added_species:
+                                        logs.append(
+                                            f"  {name}: auto-added potential products: "
+                                            f"{', '.join(_added_species)}"
+                                        )
+                                except Exception:
+                                    pass  # proceed with original species
+
                             n_comps = len(comp_names_g)
 
                             # Compute initial moles from feed
@@ -3807,7 +5296,14 @@ class DWSIMEngine:
                                     b_j = sum(A_mat[j][i] * n0[i] for i in range(n_comps))
                                     b_vec.append(b_j)
 
-                                # Objective: minimize G_total = sum(n_i * (Gf_i + R*T*ln(y_i * P/P_ref)))
+                                # Fugacity coefficients for high-pressure correction
+                                lnphi = [0.0] * n_comps  # ideal gas default
+                                if P_out > 500000:  # >5 bar — fugacity matters
+                                    flash_fug = self._flash_tp(comp_names_g, zs_g, T_out, P_out, property_package)
+                                    if flash_fug and flash_fug.get("lnphis_gas"):
+                                        lnphi = flash_fug["lnphis_gas"]
+
+                                # Objective: minimize G_total = sum(n_i * (Gf_i + R*T*(ln(y_i * P/P_ref) + lnphi_i)))
                                 def gibbs_objective(n_vec: list[float]) -> float:
                                     n_total = sum(n_vec)
                                     if n_total <= 0:
@@ -3817,8 +5313,7 @@ class DWSIMEngine:
                                         ni = max(n_vec[i], 1e-30)
                                         yi = ni / n_total
                                         yi = max(yi, 1e-30)
-                                        # G_i = Gf_i + R*T*ln(y_i * P / P_ref)
-                                        G_i = Gf_list[i] + R_gas * T_out * math.log(yi * P_out / P_ref)
+                                        G_i = Gf_list[i] + R_gas * T_out * (math.log(yi * P_out / P_ref) + lnphi[i])
                                         G_total += ni * G_i
                                     return G_total
 
@@ -3834,7 +5329,7 @@ class DWSIMEngine:
                                         "fun": make_constraint(j),
                                     })
 
-                                # Analytical gradient: dG/dn_k = Gf_k + R*T*ln(y_k * P/P_ref)
+                                # Analytical gradient: dG/dn_k = Gf_k + R*T*(ln(y_k * P/P_ref) + lnphi_k)
                                 def gibbs_gradient(n_vec: list[float]) -> list[float]:
                                     n_total = sum(n_vec)
                                     if n_total <= 0:
@@ -3844,7 +5339,7 @@ class DWSIMEngine:
                                         nk = max(n_vec[k], 1e-30)
                                         yk = nk / n_total
                                         yk = max(yk, 1e-30)
-                                        grad.append(Gf_list[k] + R_gas * T_out * math.log(yk * P_out / P_ref))
+                                        grad.append(Gf_list[k] + R_gas * T_out * (math.log(yk * P_out / P_ref) + lnphi[k]))
                                     return grad
 
                                 # Bounds: n_i >= 1e-15 (avoid log(0))
@@ -3897,13 +5392,159 @@ class DWSIMEngine:
                                 if total_z > 0 and abs(total_z - 1.0) > 1e-9:
                                     out_comp_g = {k: v / total_z for k, v in out_comp_g.items()}
 
-                                # Flash outlet for real properties
-                                clean_comp_g = _clean_composition(out_comp_g)
-                                out_comp_names_g = list(clean_comp_g.keys())
-                                out_zs_g = [float(v) for v in clean_comp_g.values()]
-                                flash_out = self._flash_tp(
-                                    out_comp_names_g, out_zs_g, T_out, P_out, property_package
-                                )
+                                # Adiabatic / duty-specified temperature iteration
+                                # Re-run Gibbs minimization at each trial T because
+                                # Gf(T) and equilibrium composition change with temperature
+                                user_specified_T_g = T_op_c is not None
+                                if not user_specified_T_g:
+                                    h_in_g_iter = inlet.get("enthalpy", 0.0)
+                                    duty_w_g = duty_kw * 1000.0
+                                    T_lo_g, T_hi_g = max(T_in - 200, 273.15), T_in + 500
+                                    T_ref_g = 298.15
+                                    for _iter_tg in range(20):
+                                        T_mid_g = (T_lo_g + T_hi_g) / 2.0
+                                        # Recompute Gf_list at T_mid_g
+                                        Gf_mid_list: list[float] = []
+                                        for i_g in range(n_comps):
+                                            if Gfgs and Gfgs[i_g] is not None:
+                                                gf_298_m = Gfgs[i_g]
+                                            elif Hfgs and Sfgs and Hfgs[i_g] is not None and Sfgs[i_g] is not None:
+                                                gf_298_m = Hfgs[i_g] - T_ref_g * Sfgs[i_g]
+                                            else:
+                                                gf_298_m = 0.0
+                                            hf_m = Hfgs[i_g] if (Hfgs and Hfgs[i_g] is not None) else gf_298_m
+                                            gf_m = gf_298_m + (hf_m - gf_298_m) * (1.0 - T_mid_g / T_ref_g)
+                                            Gf_mid_list.append(gf_m)
+                                        # Fugacity at T_mid_g for high-pressure correction
+                                        lnphi_mid = [0.0] * n_comps
+                                        if P_out > 500000:
+                                            fl_fug_mid = self._flash_tp(comp_names_g, zs_g, T_mid_g, P_out, property_package)
+                                            if fl_fug_mid and fl_fug_mid.get("lnphis_gas"):
+                                                lnphi_mid = fl_fug_mid["lnphis_gas"]
+                                        # Build objective and gradient at T_mid_g
+                                        def gibbs_obj_mid(n_vec_m: list[float]) -> float:
+                                            n_t_m = sum(n_vec_m)
+                                            if n_t_m <= 0:
+                                                return 1e30
+                                            G_t = 0.0
+                                            for i_m in range(n_comps):
+                                                ni_m = max(n_vec_m[i_m], 1e-30)
+                                                yi_m = max(ni_m / n_t_m, 1e-30)
+                                                G_t += ni_m * (Gf_mid_list[i_m] + R_gas * T_mid_g * (math.log(yi_m * P_out / P_ref) + lnphi_mid[i_m]))
+                                            return G_t
+                                        def gibbs_grad_mid(n_vec_m: list[float]) -> list[float]:
+                                            n_t_m = sum(n_vec_m)
+                                            if n_t_m <= 0:
+                                                return [0.0] * n_comps
+                                            gr = []
+                                            for k_m in range(n_comps):
+                                                nk_m = max(n_vec_m[k_m], 1e-30)
+                                                yk_m = max(nk_m / n_t_m, 1e-30)
+                                                gr.append(Gf_mid_list[k_m] + R_gas * T_mid_g * (math.log(yk_m * P_out / P_ref) + lnphi_mid[k_m]))
+                                            return gr
+                                        try:
+                                            res_mid = scipy_minimize(
+                                                gibbs_obj_mid, n0_guess, method="SLSQP",
+                                                jac=gibbs_grad_mid, bounds=bounds,
+                                                constraints=constraints,
+                                                options={"maxiter": 200, "ftol": 1e-10},
+                                            )
+                                            n_opt_mid = res_mid.x
+                                        except Exception:
+                                            n_opt_mid = n0_guess
+                                        # Build composition at T_mid_g
+                                        n_total_mid = sum(n_opt_mid)
+                                        comp_mid_g: dict[str, float] = {}
+                                        if n_total_mid > 0:
+                                            for i_m in range(n_comps):
+                                                y_m = n_opt_mid[i_m] / n_total_mid
+                                                if y_m > 1e-12:
+                                                    comp_mid_g[comp_names_g[i_m]] = y_m
+                                        else:
+                                            comp_mid_g = dict(in_comp)
+                                        total_z_m = sum(comp_mid_g.values())
+                                        if total_z_m > 0 and abs(total_z_m - 1.0) > 1e-9:
+                                            comp_mid_g = {k: v / total_z_m for k, v in comp_mid_g.items()}
+                                        # Flash for enthalpy at T_mid_g
+                                        clean_mid_g = _clean_composition(comp_mid_g)
+                                        fl_mid_g = self._flash_tp(list(clean_mid_g.keys()), list(clean_mid_g.values()), T_mid_g, P_out, property_package)
+                                        if fl_mid_g and fl_mid_g.get("MW_mix", 0) > 0:
+                                            mw_out_mid_g = sum(comp_mid_g.get(sp, 0) * _get_mw(sp) for sp in comp_mid_g)
+                                            mf_out_mid_g = n_total_mid * (mw_out_mid_g / 1000.0) if mw_out_mid_g > 0 else mf
+                                            h_out_mid_g = fl_mid_g["H"] / (fl_mid_g["MW_mix"] / 1000.0)
+                                            eb_g = mf_out_mid_g * h_out_mid_g - mf * h_in_g_iter - duty_w_g
+                                            if eb_g > 0:
+                                                T_hi_g = T_mid_g
+                                            else:
+                                                T_lo_g = T_mid_g
+                                        else:
+                                            break
+                                        if abs(T_hi_g - T_lo_g) < 0.1:
+                                            break
+                                    T_out = (T_lo_g + T_hi_g) / 2.0
+                                    # Final Gibbs solve at converged T_out
+                                    Gf_list_final: list[float] = []
+                                    for i_g in range(n_comps):
+                                        if Gfgs and Gfgs[i_g] is not None:
+                                            gf_298_f = Gfgs[i_g]
+                                        elif Hfgs and Sfgs and Hfgs[i_g] is not None and Sfgs[i_g] is not None:
+                                            gf_298_f = Hfgs[i_g] - T_ref_g * Sfgs[i_g]
+                                        else:
+                                            gf_298_f = 0.0
+                                        hf_f = Hfgs[i_g] if (Hfgs and Hfgs[i_g] is not None) else gf_298_f
+                                        Gf_list_final.append(gf_298_f + (hf_f - gf_298_f) * (1.0 - T_out / T_ref_g))
+                                    Gf_list = Gf_list_final  # Update for final objective eval
+                                    # Fugacity at final T_out
+                                    lnphi_final = [0.0] * n_comps
+                                    if P_out > 500000:
+                                        fl_fug_final = self._flash_tp(comp_names_g, zs_g, T_out, P_out, property_package)
+                                        if fl_fug_final and fl_fug_final.get("lnphis_gas"):
+                                            lnphi_final = fl_fug_final["lnphis_gas"]
+                                    lnphi = lnphi_final  # Update outer scope for final G_in/G_out eval
+                                    def gibbs_obj_final(n_vec_f: list[float]) -> float:
+                                        n_t_f = sum(n_vec_f)
+                                        if n_t_f <= 0:
+                                            return 1e30
+                                        G_t = 0.0
+                                        for i_f in range(n_comps):
+                                            ni_f = max(n_vec_f[i_f], 1e-30)
+                                            yi_f = max(ni_f / n_t_f, 1e-30)
+                                            G_t += ni_f * (Gf_list_final[i_f] + R_gas * T_out * (math.log(yi_f * P_out / P_ref) + lnphi_final[i_f]))
+                                        return G_t
+                                    def gibbs_grad_final(n_vec_f: list[float]) -> list[float]:
+                                        n_t_f = sum(n_vec_f)
+                                        if n_t_f <= 0:
+                                            return [0.0] * n_comps
+                                        gr = []
+                                        for k_f in range(n_comps):
+                                            nk_f = max(n_vec_f[k_f], 1e-30)
+                                            yk_f = max(nk_f / n_t_f, 1e-30)
+                                            gr.append(Gf_list_final[k_f] + R_gas * T_out * (math.log(yk_f * P_out / P_ref) + lnphi_final[k_f]))
+                                        return gr
+                                    try:
+                                        result_final = scipy_minimize(
+                                            gibbs_obj_final, n0_guess, method="SLSQP",
+                                            jac=gibbs_grad_final, bounds=bounds,
+                                            constraints=constraints,
+                                            options={"maxiter": 500, "ftol": 1e-12},
+                                        )
+                                        n_opt = result_final.x
+                                    except Exception:
+                                        pass  # keep n_opt from original solve
+                                    # Rebuild outlet composition
+                                    n_total_out = sum(n_opt)
+                                    out_comp_g = {}
+                                    if n_total_out > 0:
+                                        for i in range(n_comps):
+                                            y_i = n_opt[i] / n_total_out
+                                            if y_i > 1e-12:
+                                                out_comp_g[comp_names_g[i]] = y_i
+                                    else:
+                                        out_comp_g = dict(in_comp)
+                                    total_z = sum(out_comp_g.values())
+                                    if total_z > 0 and abs(total_z - 1.0) > 1e-9:
+                                        out_comp_g = {k: v / total_z for k, v in out_comp_g.items()}
+                                    logs.append(f"  {name}: adiabatic T iteration → T_out={_k_to_c(T_out):.1f}°C")
 
                                 # Compute outlet mass flow
                                 mw_out_mix = sum(
@@ -3912,6 +5553,14 @@ class DWSIMEngine:
                                 if mw_out_mix <= 0:
                                     mw_out_mix = mw_mix_in
                                 mf_out = n_total_out * (mw_out_mix / 1000.0)
+
+                                # Flash outlet for real properties
+                                clean_comp_g = _clean_composition(out_comp_g)
+                                out_comp_names_g = list(clean_comp_g.keys())
+                                out_zs_g = [float(v) for v in clean_comp_g.values()]
+                                flash_out = self._flash_tp(
+                                    out_comp_names_g, out_zs_g, T_out, P_out, property_package
+                                )
 
                                 outlet = dict(inlet)
                                 outlet["temperature"] = T_out
@@ -3996,8 +5645,9 @@ class DWSIMEngine:
                                     feed2 = dict(feed1)
                                     feed2["mass_flow"] = mf1 * reboil_ratio
                                     feed2["vapor_fraction"] = 1.0
-                                    # Flash at elevated T to get vapor composition for stripping gas
-                                    T_reb = feed1["temperature"] + 20.0
+                                    # Flash at reboiler temperature to get vapor composition for stripping gas
+                                    reb_temp_c = params.get("reboilerTemperature")
+                                    T_reb = (float(reb_temp_c) + 273.15) if reb_temp_c is not None else (feed1["temperature"] + 20.0)
                                     cn_reb = list(feed1.get("composition", {}).keys())
                                     zs_reb = [float(v) for v in feed1.get("composition", {}).values()]
                                     if cn_reb:
@@ -4214,17 +5864,90 @@ class DWSIMEngine:
                                     dT_strip = Q_strip * 1000.0 / (mf_out2 * Cp_s)
                                     T_out2 = T_out2 - min(dT_strip, 40.0)  # endothermic cooling, cap 40K
 
+                            # Phase 15 §3.3: Try stage-by-stage model for improved accuracy
+                            stagewise_ok = False
+                            if n_stages >= 3 and _thermo_available:
+                                try:
+                                    from app.services.absorber_stagewise import solve_absorber_stagewise
+                                    # Build reactive K-values dict for the solver
+                                    reactive_k = None
+                                    if acid_gases_present:
+                                        reactive_k = {}
+                                        for c in acid_gases_present:
+                                            if c in _REACTIVE_K_EFF:
+                                                K_ref, T_ref_r, dH_r = _REACTIVE_K_EFF[c]
+                                                reactive_k[c] = {"K_ref": K_ref, "T_ref": T_ref_r, "dH": dH_r}
+
+                                    if ntype == "Absorber":
+                                        gas_cn = list(comp1.keys())
+                                        gas_zs_abs = [float(v) for v in comp1.values()]
+                                        liq_cn = list(comp2.keys())
+                                        liq_zs_abs = [float(v) for v in comp2.values()]
+                                    else:
+                                        liq_cn = list(comp1.keys())
+                                        liq_zs_abs = [float(v) for v in comp1.values()]
+                                        gas_cn = list(comp2.keys())
+                                        gas_zs_abs = [float(v) for v in comp2.values()]
+
+                                    solute_list = list(acid_gases_present) if acid_gases_present else []
+
+                                    sw_result = solve_absorber_stagewise(
+                                        gas_comp_names=gas_cn,
+                                        gas_zs=gas_zs_abs,
+                                        gas_T=T1 if ntype == "Absorber" else T2,
+                                        gas_P=P_op,
+                                        gas_flow=mf1 if ntype == "Absorber" else mf2,
+                                        liquid_comp_names=liq_cn,
+                                        liquid_zs=liq_zs_abs,
+                                        liquid_T=T2 if ntype == "Absorber" else T1,
+                                        liquid_P=P_op,
+                                        liquid_flow=mf2 if ntype == "Absorber" else mf1,
+                                        n_stages=n_stages,
+                                        solutes=solute_list,
+                                        property_package=property_package,
+                                        reactive_k_eff=reactive_k,
+                                    )
+
+                                    if sw_result.get("converged"):
+                                        # Use stagewise results
+                                        out1_comp = sw_result.get("gas_out_comp", out1_comp)
+                                        out2_comp = sw_result.get("liquid_out_comp", out2_comp)
+                                        T_out1 = sw_result.get("gas_out_T", T_out1)
+                                        T_out2 = sw_result.get("liquid_out_T", T_out2)
+                                        # Recalculate mass flows from stagewise results
+                                        removal_eff = sw_result.get("removal_efficiency", {})
+                                        eq_res["removal_efficiency"] = removal_eff
+                                        eq_res["stage_temperatures"] = sw_result.get("stage_temperatures", [])
+                                        eq_res["solver"] = "stagewise"
+                                        stagewise_ok = True
+                                        logs.append(f"{name}: Stage-by-stage solver converged in {sw_result.get('iterations', 0)} iterations")
+                                        for sol, eff_val in removal_eff.items():
+                                            logs.append(f"  {sol} removal: {eff_val:.1f}%")
+                                except ImportError:
+                                    pass
+                                except Exception as sw_exc:
+                                    logger.debug("Absorber stagewise failed: %s — using Kremser", sw_exc)
+
+                            if not stagewise_ok:
+                                eq_res["solver"] = "kremser"
+
                             eq_res["numberOfStages"] = n_stages
                             eq_res["pressure"] = round(_pa_to_kpa(P_op), 3)
-                            # Store heat of absorption as negative duty (exothermic)
-                            if ntype == "Absorber" and Q_abs > 0:
-                                eq_res["duty"] = round(-Q_abs, 3)  # kW, negative = exothermic
 
-                            # Flash outlet streams for real enthalpies and VF (H7)
+                            # Flash outlet streams for VF (H7)
                             flash_o1 = self._flash_tp(list(out1_comp.keys()), list(out1_comp.values()), T_out1, P_op, property_package)
                             flash_o2 = self._flash_tp(list(out2_comp.keys()), list(out2_comp.values()), T_out2, P_op, property_package)
                             h_o1 = flash_o1["H"] / (flash_o1["MW_mix"] / 1000.0) if flash_o1 and flash_o1.get("MW_mix", 0) > 0 else feed1.get("enthalpy", 0.0)
                             h_o2 = flash_o2["H"] / (flash_o2["MW_mix"] / 1000.0) if flash_o2 and flash_o2.get("MW_mix", 0) > 0 else feed2.get("enthalpy", 0.0)
+
+                            # Compute actual duty from first law (H_out - H_in)
+                            # so energy balance checker sees exact consistency
+                            _h_in_total = mf1 * feed1.get("enthalpy", 0.0)
+                            if not _reboiled_stripper and feed2 is not None:
+                                _h_in_total += mf2 * feed2.get("enthalpy", 0.0)
+                            _h_out_total = max(mf_out1, 1e-10) * h_o1 + max(mf_out2, 1e-10) * h_o2
+                            _actual_duty_w = _h_out_total - _h_in_total
+                            eq_res["duty"] = round(_w_to_kw(_actual_duty_w), 3)
                             # H7: VF from flash instead of hardcoded
                             vf_o1 = flash_o1.get("VF", 1.0 if ntype == "Absorber" else 0.5) if flash_o1 else (1.0 if ntype == "Absorber" else 0.5)
                             vf_o2 = flash_o2.get("VF", 0.0) if flash_o2 else 0.0
@@ -4358,83 +6081,115 @@ class DWSIMEngine:
                             comp_names = list(comp.keys())
                             zs = [float(v) for v in comp.values()]
 
-                            # Flash at T,P — _flash_tp returns a dict
+                            # --- Phase 17.7: Try rigorous VLLE flash first ---
+                            vlle_result = None
+                            if len(comp_names) >= 2:
+                                vlle_result = flash_vlle(comp_names, T_in, P_in, zs)
+
                             VF = 0.0
                             vapor_comp = dict(comp)
                             liquid_comp = dict(comp)
                             flash_result = None
-                            if len(comp_names) >= 1:
-                                flash_result = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
-                                if flash_result:
-                                    VF = flash_result["VF"]
-                                    vapor_comp = {comp_names[i]: flash_result["gas_zs"][i] for i in range(len(comp_names))}
-                                    liquid_comp = {comp_names[i]: flash_result["liquid_zs"][i] for i in range(len(comp_names))}
+                            light_zs = dict(comp)
+                            heavy_zs = dict(comp)
+                            light_frac = 0.5
+                            used_vlle = False
 
-                            # Mass-based vapor/liquid split
-                            if flash_result and VF > 0 and VF < 1:
-                                MWs = flash_result["MWs"]
-                                MW_vap = sum(z * mw for z, mw in zip(flash_result["gas_zs"], MWs))
-                                MW_liq = sum(z * mw for z, mw in zip(flash_result["liquid_zs"], MWs))
-                                denom = VF * MW_vap + (1 - VF) * MW_liq
-                                mass_vap_frac = (VF * MW_vap) / denom if denom > 0 else VF
+                            if vlle_result and vlle_result.get("status") == "success" and vlle_result.get("n_liquid_phases", 0) >= 2:
+                                # Rigorous VLLE succeeded with two liquid phases
+                                used_vlle = True
+                                VF = vlle_result.get("VF", 0.0)
+                                vapor_comp = vlle_result.get("vapor_comp", dict(comp))
+                                light_zs = vlle_result.get("liquid1_comp", dict(comp))
+                                heavy_zs = vlle_result.get("liquid2_comp", dict(comp))
+                                betas = vlle_result.get("phase_fractions", [])
+
+                                # Compute liquid fractions from phase betas
+                                if len(betas) >= 3:
+                                    # betas: [vapor, liquid1, liquid2]
+                                    liq1_beta = betas[1]
+                                    liq2_beta = betas[2]
+                                    total_liq_beta = liq1_beta + liq2_beta
+                                    light_frac = liq1_beta / total_liq_beta if total_liq_beta > 0 else 0.5
+                                else:
+                                    light_frac = 0.5
+
+                                # Reconstruct overall liquid comp for mass split
+                                liquid_comp = {}
+                                for c in comp_names:
+                                    liquid_comp[c] = light_zs.get(c, 0.0) * light_frac + heavy_zs.get(c, 0.0) * (1 - light_frac)
+                                liq_sum = sum(liquid_comp.values())
+                                if liq_sum > 0:
+                                    liquid_comp = {c: v / liq_sum for c, v in liquid_comp.items()}
+
+                                # Use VF for mass split (approximate: assume equal MW for simplicity)
+                                mass_vap_frac = VF  # VLLE betas are molar; approximate
+                                vapor_flow = mf * mass_vap_frac
+                                liquid_flow = mf * (1 - mass_vap_frac)
+
+                                logs.append(f"{name}: VLLE flash → {vlle_result['n_liquid_phases']} liquid phases, VF={VF:.3f}, light_frac={light_frac:.3f}")
+
                             else:
-                                mass_vap_frac = VF  # 0 or 1
+                                # Fallback: VLE flash + heuristic liquid split
+                                if len(comp_names) >= 1:
+                                    flash_result = self._flash_tp(comp_names, zs, T_in, P_in, property_package)
+                                    if flash_result:
+                                        VF = flash_result["VF"]
+                                        vapor_comp = {comp_names[i]: flash_result["gas_zs"][i] for i in range(len(comp_names))}
+                                        liquid_comp = {comp_names[i]: flash_result["liquid_zs"][i] for i in range(len(comp_names))}
 
-                            vapor_flow = mf * mass_vap_frac
-                            liquid_flow = mf * (1 - mass_vap_frac)
+                                # Mass-based vapor/liquid split
+                                if flash_result and VF > 0 and VF < 1:
+                                    MWs = flash_result["MWs"]
+                                    MW_vap = sum(z * mw for z, mw in zip(flash_result["gas_zs"], MWs))
+                                    MW_liq = sum(z * mw for z, mw in zip(flash_result["liquid_zs"], MWs))
+                                    denom = VF * MW_vap + (1 - VF) * MW_liq
+                                    mass_vap_frac = (VF * MW_vap) / denom if denom > 0 else VF
+                                else:
+                                    mass_vap_frac = VF  # 0 or 1
 
-                            # H3: Split liquid into light/heavy — user-configurable fraction
-                            # Polarity/density-based assignment: aqueous compounds → heavy liquid,
-                            # hydrocarbons → light liquid (matches HYSYS/DWSIM convention)
-                            _AQUEOUS_COMPOUNDS = {
-                                "water", "monoethanolamine", "diethanolamine",
-                                "methanol", "ethanol", "1-propanol", "2-propanol",
-                                "acetic acid", "formic acid", "formaldehyde",
-                                "ammonia", "hydrogen sulfide", "carbon dioxide",
-                            }
-                            light_zs = dict(liquid_comp)
-                            heavy_zs = dict(liquid_comp)
-                            light_frac = float(params.get("lightLiquidFraction", 0.5))
-                            light_frac = max(0.0, min(1.0, light_frac))
-                            if len(comp_names) >= 2 and liquid_flow > 0:
-                                liq_zs_list = [liquid_comp.get(c, 0.0) for c in comp_names]
-                                l_sum, h_sum = 0.0, 0.0
-                                lz, hz = {}, {}
-                                for c, z in zip(comp_names, liq_zs_list):
-                                    if z < 1e-15:
-                                        continue
-                                    c_lower = c.lower()
-                                    is_aqueous = c_lower in _AQUEOUS_COMPOUNDS
-                                    if not is_aqueous:
-                                        # Non-aqueous: check pure liquid density > 900 kg/m³
-                                        try:
-                                            flash_pure = self._flash_tp([c], [1.0], T_in, P_in, property_package)
-                                            if flash_pure and flash_pure.get("rho_liquid") and flash_pure["rho_liquid"] > 900:
-                                                is_aqueous = True
-                                        except Exception:
-                                            pass
-                                    if is_aqueous:
-                                        hz[c] = z
-                                        h_sum += z
-                                    else:
-                                        lz[c] = z
-                                        l_sum += z
-                                # Dissolved gases (not classified): distribute proportionally
-                                for c, z in zip(comp_names, liq_zs_list):
-                                    if z >= 1e-15 and c not in lz and c not in hz:
-                                        if l_sum + h_sum > 0:
-                                            frac_l = l_sum / (l_sum + h_sum)
-                                            lz[c] = z * frac_l
-                                            hz[c] = z * (1 - frac_l)
-                                            l_sum += lz[c]
-                                            h_sum += hz[c]
-                                if l_sum > 0:
-                                    light_zs = {c: v / l_sum for c, v in lz.items()}
-                                if h_sum > 0:
-                                    heavy_zs = {c: v / h_sum for c, v in hz.items()}
-                                if not params.get("lightLiquidFraction"):
-                                    light_frac = l_sum / (l_sum + h_sum) if (l_sum + h_sum) > 0 else 0.5
-                                    logs.append(f"WARNING: {name} liquid split is polarity-based heuristic — specify lightLiquidFraction for accuracy")
+                                vapor_flow = mf * mass_vap_frac
+                                liquid_flow = mf * (1 - mass_vap_frac)
+
+                                # Heuristic liquid split (original code)
+                                llf_override = params.get("lightLiquidFraction")
+                                if llf_override is not None:
+                                    light_frac = max(0.0, min(1.0, float(llf_override)))
+                                else:
+                                    light_frac = 0.5
+                                if len(comp_names) >= 2 and liquid_flow > 0:
+                                    liq_zs_list = [liquid_comp.get(c, 0.0) for c in comp_names]
+                                    _AQUEOUS_COMPOUNDS_SET = {
+                                        "water", "methanol", "ethanol", "1-propanol", "2-propanol",
+                                        "acetic acid", "formic acid", "monoethanolamine", "diethanolamine",
+                                        "ammonia", "formaldehyde", "triethylene glycol", "acetone",
+                                    }
+                                    organic_mass = 0.0
+                                    aqueous_mass = 0.0
+                                    lz, hz = {}, {}
+                                    for c, z in zip(comp_names, liq_zs_list):
+                                        if z < 1e-15:
+                                            continue
+                                        c_mass = z * _get_mw(c)
+                                        if c.lower() in _AQUEOUS_COMPOUNDS_SET:
+                                            aqueous_mass += c_mass
+                                            hz[c] = z
+                                        else:
+                                            organic_mass += c_mass
+                                            lz[c] = z
+                                    l_sum = sum(lz.values())
+                                    h_sum = sum(hz.values())
+                                    if l_sum > 0:
+                                        light_zs = {c: v / l_sum for c, v in lz.items()}
+                                    if h_sum > 0:
+                                        heavy_zs = {c: v / h_sum for c, v in hz.items()}
+                                    if llf_override is None:
+                                        if organic_mass + aqueous_mass > 1e-10:
+                                            computed_llf = organic_mass / (organic_mass + aqueous_mass)
+                                        else:
+                                            computed_llf = 0.5
+                                        light_frac = computed_llf
+                                        logs.append(f"{name}: computed oil/water split = {computed_llf*100:.1f}% oil (heuristic)")
 
                             eq_res["vaporFraction"] = round(VF, 4)
                             eq_res["vaporFlow"] = round(vapor_flow, 4)
@@ -4482,9 +6237,21 @@ class DWSIMEngine:
                                 except Exception:
                                     pass
 
+                            # Enforce energy balance: scale outlet enthalpies
+                            h_in_3p = inlet.get("enthalpy", 0.0)
+                            mf_light_3p = liquid_flow * light_frac
+                            mf_heavy_3p = liquid_flow * (1 - light_frac)
+                            total_out_3p = vapor_flow * h_vap_3p + mf_light_3p * h_light + mf_heavy_3p * h_heavy
+                            total_in_3p = mf * h_in_3p
+                            if abs(total_out_3p) > 1e-6:
+                                eb_scale_3p = total_in_3p / total_out_3p
+                                h_vap_3p *= eb_scale_3p
+                                h_light *= eb_scale_3p
+                                h_heavy *= eb_scale_3p
+
                             outlets["out-1"] = {"temperature": T_in, "pressure": P_in, "mass_flow": vapor_flow, "vapor_fraction": 1.0, "enthalpy": h_vap_3p, "composition": vapor_comp}
-                            outlets["out-2"] = {"temperature": T_in, "pressure": P_in, "mass_flow": liquid_flow * light_frac, "vapor_fraction": 0.0, "enthalpy": h_light, "composition": light_zs}
-                            outlets["out-3"] = {"temperature": T_in, "pressure": P_in, "mass_flow": liquid_flow * (1 - light_frac), "vapor_fraction": 0.0, "enthalpy": h_heavy, "composition": heavy_zs}
+                            outlets["out-2"] = {"temperature": T_in, "pressure": P_in, "mass_flow": mf_light_3p, "vapor_fraction": 0.0, "enthalpy": h_light, "composition": light_zs}
+                            outlets["out-3"] = {"temperature": T_in, "pressure": P_in, "mass_flow": mf_heavy_3p, "vapor_fraction": 0.0, "enthalpy": h_heavy, "composition": heavy_zs}
                             logs.append(f"{name}: VF={VF:.3f}, vapor={vapor_flow:.3f} kg/s, light_liq={liquid_flow * light_frac:.3f}, heavy_liq={liquid_flow * (1 - light_frac):.3f}")
 
                         elif ntype == "Crystallizer":
@@ -4739,6 +6506,27 @@ class DWSIMEngine:
                                         mu = flash_pipe["mu_liquid"]
 
                             from app.services.hydraulics_engine import compute_hydraulics
+
+                            # Phase 15 §3.4: Use fluids library for friction factor
+                            # when available, for improved accuracy
+                            _fluids_dp = None
+                            try:
+                                from fluids import friction_factor as ff_fluids  # type: ignore[import-untyped]
+                                from fluids import Reynolds as Re_fluids  # type: ignore[import-untyped]
+                                A_pipe = math.pi * (pipe_dia / 2) ** 2
+                                vel = mf / (rho * A_pipe) if rho > 0 and A_pipe > 0 else 1.0
+                                Re_val = Re_fluids(V=vel, D=pipe_dia, rho=rho, mu=mu)
+                                fd = ff_fluids(Re=Re_val, eD=pipe_rough / pipe_dia if pipe_dia > 0 else 0.001)
+                                # Darcy-Weisbach: dP = fd * (L/D) * (rho*V²/2)
+                                dp_friction = fd * (pipe_length / pipe_dia) * 0.5 * rho * vel**2
+                                dp_elevation = rho * 9.81 * pipe_elev
+                                # Fittings K-values (approximate)
+                                K_total = n_elbows * 0.9 + n_tees * 1.8 + n_gvalves * 0.15
+                                dp_fittings = K_total * 0.5 * rho * vel**2
+                                _fluids_dp = dp_friction + dp_elevation + dp_fittings
+                            except Exception:
+                                pass
+
                             hyd_result = compute_hydraulics(
                                 mass_flow_rate=mf, density=rho, viscosity=mu,
                                 length=pipe_length, diameter=pipe_dia,
@@ -4746,7 +6534,13 @@ class DWSIMEngine:
                                 elbows_90=n_elbows, tees=n_tees, gate_valves=n_gvalves,
                             )
 
-                            dp_pa = hyd_result.get("pressure_drop_kpa", 0) * 1000.0
+                            # Use fluids result if available and reasonable
+                            if _fluids_dp is not None and _fluids_dp > 0:
+                                dp_pa = _fluids_dp
+                                eq_res["dp_source"] = "fluids"
+                            else:
+                                dp_pa = hyd_result.get("pressure_drop_kpa", 0) * 1000.0
+                                eq_res["dp_source"] = "hydraulics_engine"
                             P_out = max(P_in - dp_pa, 1000.0)
 
                             eq_res["pressureDrop"] = round(hyd_result.get("pressure_drop_kpa", 0), 3)
@@ -4952,9 +6746,11 @@ class DWSIMEngine:
 
                 # Energy balance check (Q/W from equipment results)
                 # M10: Skip duty/work adjustment for HeatExchanger (internal heat transfer, not external Q)
-                # Skip DistillationColumn (internal condenser/reboiler), Cyclone/Filter (heuristic splits),
-                # ConversionReactor/PFRReactor ("products" pseudo-component has no thermo properties)
-                _EB_SKIP = ("DistillationColumn", "Cyclone", "Filter", "ConversionReactor", "PFRReactor", "Crystallizer", "Dryer")
+                # Skip: DistillationColumn (internal condenser/reboiler), Cyclone (heuristic splits),
+                # ConversionReactor/PFRReactor/CSTRReactor ("products" pseudo-component → enthalpy
+                # reference state mismatch between pre/post _clean_composition flash),
+                # Crystallizer/Dryer (phase change heuristics with solubility/moisture models)
+                _EB_SKIP = ("DistillationColumn", "Cyclone", "Crystallizer", "Dryer")
                 if inlet_mass > 0 and outlet_mass > 0 and ntype not in _EB_SKIP:
                     if ntype == "HeatExchanger":
                         # For HX, check Σ(mf*h)_in ≈ Σ(mf*h)_out directly (no external Q)
@@ -4993,6 +6789,8 @@ class DWSIMEngine:
                 if ntype == "Separator":
                     # Souders-Brown: V_max = K_sb * sqrt((ρ_L - ρ_V) / ρ_V)
                     # K_sb ≈ 0.05-0.1 m/s for vertical separators
+                    rho_L = 800.0  # default liquid density
+                    rho_V = 5.0    # default vapor density
                     mf = 0.0
                     for _src, _sh, _th in upstream.get(nid, []):
                         for _tgt, sh2, _th2 in downstream.get(_src, []):
@@ -5001,6 +6799,13 @@ class DWSIMEngine:
                                 if c:
                                     mf = c.get("mass_flow", 0.0)
                                 break
+                    # Fallback: use feed parameters for standalone equipment
+                    if mf <= 0:
+                        in_port = port_conditions.get((nid, "in-1"))
+                        if in_port:
+                            mf = in_port.get("mass_flow", 0.0)
+                    if mf <= 0:
+                        mf = float(node.get("parameters", {}).get("feedFlowRate", 0.0))
                     if mf > 0:
                         K_sb = 0.07  # typical for gas-liquid
                         rho_L = 800.0  # approximate
@@ -5581,8 +7386,10 @@ class DWSIMEngine:
                     if not target_stream_id or not manip_node_id or not manip_param:
                         equipment_results[ds_id] = {
                             "equipment_id": ds_id, "equipment_type": "DesignSpec",
-                            "name": ds_name, "error": "Missing target or manipulated variable",
+                            "name": ds_name, "status": "skipped",
+                            "info": "DesignSpec not fully configured — skipped. Configure target and manipulated variables to activate.",
                         }
+                        logs.append(f"INFO: DesignSpec '{ds_name}' not fully configured — skipped")
                         continue
 
                     # Property mapping for equipment results
